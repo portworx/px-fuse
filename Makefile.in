@@ -1,0 +1,16 @@
+px-objs = pxd.o dev.o
+obj-m = px.o
+
+ccflags-y := -Werror -I$(src)
+
+KVERSION = $(shell uname -r)
+
+all: 
+	make -C /usr/src/kernels/$(KVERSION) M=$(CURDIR) modules
+	
+clean:
+	make -C /usr/src/kernels/$(KVERSION) M=$(CURDIR) clean
+
+install:
+	make V=1 -C /usr/src/kernels/$(KVERSION) M=$(CURDIR) modules_install 
+
