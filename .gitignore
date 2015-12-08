@@ -11,3 +11,19 @@
 # Shared objects (inc. Windows DLLs)
 *.so
 *.so.*
+
+# Generated files
+.dev.o.cmd
+.px.ko.cmd
+.px.mod.o.cmd
+.px.o.cmd
+.pxd.o.cmd
+.tmp_versions/
+Makefile
+Module.symvers
+modules.order
+px.mod.c
+test/.deps/
+test/.dirstamp
+test/pxd_test
+
