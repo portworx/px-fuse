@@ -89,6 +89,8 @@ struct pxd_rdwr_in {
 			flags(i_flags), chksum(i_chksum), offset(i_offset) {
 		minor = i_minor;
 	}
+
+	pxd_rdwr_in() = default;
 #endif
 	uint32_t minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
