@@ -48,6 +48,8 @@ cd $RPM_BUILD_ROOT
 find . -name px.ko -exec echo \"{}\" \; | sed 's/^"\./"/' > $LOC/%{name}.files
 cp -a $LOC/%{name}.files .
 echo /%{name}.files >> $LOC/%{name}.files
+MDIR=$(cat $LOC/%{name}.files | /bin/egrep px.ko | /bin/sed -e 's/\/extra\/.*//' -e 's/"//g' -e 's/^\/lib/lib/' | /usr/bin/tr -d '[:space:]')
+[ -d "${MDIR}" ] && for fl in $(ls ${MDIR}/*); do [ ! -d ${fl} ] && /bin/rm -f ${fl}; done
 cd -
 
 %check
@@ -62,19 +64,31 @@ cd -
 
 %post
 
-if [ -e /%{name}.files ]; then   
-   mkdir -p /lib/modules/$(uname -r)/extra;
-   for fl in $(cat /%{name}.files); do cp -a $fl /lib/modules/$(uname -r)/extra; done;      
-   [ -e /etc/modules ] && /bin/egrep -q '^%{name}$' /etc/modules || echo -e '%{name}\n' >> /etc/modules
-   /bin/rm /%{name}.files
-   /usr/sbin/depmod -a 
+if [ -e /%{name}.files ]; then 
+   MDIR="/lib/modules/$(uname -r)/extra"
+   mkdir -p ${MDIR}
+   FILES=$(cat /%{name}.files| /bin/egrep -v %{name}.files | /bin/sed -e 's/"//g')
+   for fl in ${FILES}; do echo $fl | /bin/egrep -q ${MDIR} || cp -af $fl ${MDIR}; done;      
+   [ -e /etc/modules ] && /bin/egrep -q '^%{name}$' /etc/modules || echo -e '%{name}' >> /etc/modules
+   #/usr/sbin/depmod -a 
    /usr/sbin/modprobe %{name}
-   fi
 fi
 
 %postun
 #if [ $1 = 0 ]; then
 #fi
+
+/usr/sbin/rmmod %{name}.ko
+
+MODCONF=/etc/modules
+if [ -e ${MODCONF} ]; then
+    /bin/egrep -q '^%{name}$' ${MODCONF}
+    if [ $? -eq 0 ]; then
+	cat ${MODCONF} | egrep -v '^%{name}$' > ${MODCONF}.$$
+	/bin/mv ${MODCONF}.$$ ${MODCONF}
+    fi
+fi
+
 /bin/rm -f /lib/modules/$(uname -r)/extra/%{name}.ko
 
 %preun
