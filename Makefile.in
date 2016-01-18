@@ -3,14 +3,24 @@ obj-m = px.o
 
 ccflags-y := -Werror -I$(src)
 
-KVERSION = $(shell uname -r)
+ifndef KERNALPATH
+	KVERSION = $(shell uname -r)
+        KERNALPATH=/usr/src/kernels/$(KVERSION)
+endif 
+
+ifeq ($(shell test -d $(KERNALPATH); echo $$?),1)
+$(error Kernal path: $(KERNALPATH)  directory does not exitst.)
+endif 
+
 
 all: 
-	make -C /usr/src/kernels/$(KVERSION) M=$(CURDIR) modules
-	
+	make -C $(KERNALPATH) M=$(CURDIR) modules
+
 clean:
-	make -C /usr/src/kernels/$(KVERSION) M=$(CURDIR) clean
+	make -C $(KERNALPATH) M=$(CURDIR) clean
 
 install:
-	make V=1 -C /usr/src/kernels/$(KVERSION) M=$(CURDIR) modules_install 
+	make V=1 -C $(KERNALPATH) M=$(CURDIR) modules_install 
 
+distclean: clean
+	@/bin/rm -f  config.* Makefile
