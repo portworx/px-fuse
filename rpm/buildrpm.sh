@@ -42,7 +42,7 @@ BLDDIRS=" \
 for dir in ${BLDDIRS}; do mkdir -p ${dir}; done
 
 PXSPEC=px.spec
-[ ! -e ${RPMSPECSROOT}/${PXSPEC} ] && cp -a ${BUILDDIR}/${PXSPEC} ${RPMSPECSROOT}/${PXSPEC}
+cp -a ${BUILDDIR}/${PXSPEC} ${RPMSPECSROOT}/${PXSPEC}
 
 EXTRA_DEFINES="--define 'kernalpath "${KERNALPATH}"' --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.17.0'"
 
