@@ -70,7 +70,7 @@ if [ -e /%{name}.files ]; then
    FILES=$(cat /%{name}.files| /bin/egrep -v %{name}.files | /bin/sed -e 's/"//g')
    for fl in ${FILES}; do echo $fl | /bin/egrep -q ${MDIR} || cp -af $fl ${MDIR}; done;      
    [ -e /etc/modules ] && /bin/egrep -q '^%{name}$' /etc/modules || echo -e '%{name}' >> /etc/modules
-   #/usr/sbin/depmod -a 
+   /usr/sbin/depmod -a &> /dev/null
    /usr/sbin/modprobe %{name}
 fi
 
