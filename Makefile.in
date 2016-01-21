@@ -3,24 +3,30 @@ obj-m = px.o
 
 ccflags-y := -Werror -I$(src)
 
-ifndef KERNALPATH
+ifndef KERNELPATH
 	KVERSION = $(shell uname -r)
-        KERNALPATH=/usr/src/kernels/$(KVERSION)
+        KERNELPATH=/usr/src/kernels/$(KVERSION)
 endif 
 
-ifeq ($(shell test -d $(KERNALPATH); echo $$?),1)
-$(error Kernal path: $(KERNALPATH)  directory does not exitst.)
+ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
+$(error Kernal path: $(KERNELPATH)  directory does not exitst.)
+endif 
+
+MINKVER=3.17
+KERNELVER=$(shell make -s -C $(KERNELPATH) kernelversion | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
+ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
+$(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif 
 
 
 all: 
-	make -C $(KERNALPATH) M=$(CURDIR) modules
+	make -C $(KERNELPATH) M=$(CURDIR) modules
 
 clean:
-	make -C $(KERNALPATH) M=$(CURDIR) clean
+	make -C $(KERNELPATH) M=$(CURDIR) clean
 
 install:
-	make V=1 -C $(KERNALPATH) M=$(CURDIR) modules_install 
+	make V=1 -C $(KERNELPATH) M=$(CURDIR) modules_install 
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
