@@ -64,32 +64,40 @@ cd -
 
 %post
 
+/usr/sbin/lsmod | egrep -q '^%{name} '
+[ $? -eq 0 ] && /usr/sbin/rmmod %{name}
+
 if [ -e /%{name}.files ]; then 
    MDIR="/lib/modules/$(uname -r)/extra"
    mkdir -p ${MDIR}
    FILES=$(cat /%{name}.files| /bin/egrep -v %{name}.files | /bin/sed -e 's/"//g')
    for fl in ${FILES}; do echo $fl | /bin/egrep -q ${MDIR} || cp -af $fl ${MDIR}; done;      
    [ -e /etc/modules ] && /bin/egrep -q '^%{name}$' /etc/modules || echo -e '%{name}' >> /etc/modules
-   /usr/sbin/depmod -a &> /dev/null
+   [ -d /etc/modules-load.d -a ! -e /etc/modules-load.d/px.conf ] && echo -e '%{name}' > /etc/modules-load.d/px.conf
+   /usr/sbin/depmod -a
    /usr/sbin/modprobe %{name}
+   /bin/true
 fi
 
 %postun
-#if [ $1 = 0 ]; then
-#fi
+if [ $1 -eq 0 ]; then
+    /usr/sbin/lsmod | egrep -q '^%{name} '
+    [ $? -eq 0 ] && /usr/sbin/rmmod %{name}
 
-/usr/sbin/rmmod %{name}.ko
-
-MODCONF=/etc/modules
-if [ -e ${MODCONF} ]; then
-    /bin/egrep -q '^%{name}$' ${MODCONF}
-    if [ $? -eq 0 ]; then
-	cat ${MODCONF} | egrep -v '^%{name}$' > ${MODCONF}.$$
-	/bin/mv ${MODCONF}.$$ ${MODCONF}
+    MODCONF=/etc/modules
+    if [ -e ${MODCONF} ]; then
+	/bin/egrep -q '^%{name}$' ${MODCONF}
+	if [ $? -eq 0 ]; then
+	    cat ${MODCONF} | egrep -v '^%{name}$' > ${MODCONF}.$$
+	    /bin/mv ${MODCONF}.$$ ${MODCONF}
+	fi
     fi
+
+    [ -e /etc/modules-load.d/px.conf ] && /bin/rm -f /etc/modules-load.d/px.conf
+
+    /bin/rm -f /lib/modules/$(uname -r)/extra/%{name}.ko
 fi
 
-/bin/rm -f /lib/modules/$(uname -r)/extra/%{name}.ko
 
 %preun
 #if [ $1 = 0 ]; then
