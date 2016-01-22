@@ -5,8 +5,10 @@
 #define _PXD_TP_H
 
 #include <linux/tracepoint.h>
-
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
 #include <linux/timekeeping.h>
+#endif
 
 TRACE_EVENT(
 		make_request_wait,

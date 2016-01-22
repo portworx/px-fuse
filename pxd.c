@@ -9,7 +9,25 @@
 #define CREATE_TRACE_POINTS
 #include "pxd_trace.h"
 #undef CREATE_TRACE_POINTS
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
 #include <linux/timekeeping.h>
+#else
+#include <linux/idr.h>
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
+#define HAVE_BVEC_ITER
+#endif
+
+#ifdef HAVE_BVEC_ITER
+#define BIO_SECTOR(bio) bio->bi_iter.bi_sector
+#define BIO_SIZE(bio) bio->bi_iter.bi_size
+#else
+#define BIO_SECTOR(bio) bio->bi_sector
+#define BIO_SIZE(bio) bio->bi_size
+#endif
 
 /** enables time tracing */
 //#define GD_TIME_LOG
@@ -112,7 +130,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw)
 	int cpu = part_stat_lock();
 	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
 	part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw],
-			req->bio->bi_iter.bi_size / SECTOR_SIZE);
+			BIO_SIZE(req->bio) / SECTOR_SIZE);
 	part_stat_unlock();
 }
 
@@ -152,8 +170,13 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
+#ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 	struct bvec_iter iter;
+#else
+	unsigned index = 0;
+	struct bio_vec *bvec = NULL;
+#endif
 	int i;
 	struct timespec start, end;
 	uint32_t crc = 0; 
@@ -161,7 +184,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages flags %lx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			bio->bi_iter.bi_sector * SECTOR_SIZE, bio->bi_iter.bi_size,
+			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, bio->bi_rw);
 
 	i = 0;
@@ -201,7 +224,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		req->in.argpages = 1;
 		req->in.args[0].size = sizeof(struct pxd_rdwr_in);
 		req->in.args[0].value = &req->misc.pxd_rdwr_in;
-		req->in.args[1].size = bio->bi_iter.bi_size;
+		req->in.args[1].size = BIO_SIZE(bio);
 		req->in.args[1].value = NULL;
 		req->out.numargs = 0;
 		req->end = pxd_process_write_reply;
@@ -217,7 +240,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		req->in.args[0].value = &req->misc.pxd_rdwr_in;
 		req->out.numargs = 1;
 		req->out.argpages = 1;
-		req->out.args[0].size = bio->bi_iter.bi_size;
+		req->out.args[0].size = BIO_SIZE(bio);
 		req->out.args[0].value = NULL;
 		req->end = pxd_process_read_reply;
 		break;
@@ -239,12 +262,14 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
                 ((bio->bi_rw & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
                 ((bio->bi_rw & REQ_META) ? PXD_FLAGS_META : 0);
 	req->misc.pxd_rdwr_in.minor = pxd_dev->minor;
-	req->misc.pxd_rdwr_in.offset = bio->bi_iter.bi_sector * SECTOR_SIZE;
-	req->misc.pxd_rdwr_in.size = bio->bi_iter.bi_size;
+	req->misc.pxd_rdwr_in.offset = BIO_SECTOR(bio) * SECTOR_SIZE;
+	req->misc.pxd_rdwr_in.size = BIO_SIZE(bio);
 	req->num_pages = bio->bi_vcnt;
 	if (bio->bi_vcnt) {
 		i = 0;
+#ifdef HAVE_BVEC_ITER
 		bio_for_each_segment(bvec, bio, iter) {
+		bio_for_each_segment(bvec, bio, index) {
 			BUG_ON(i >= req->max_pages);
 			req->pages[i] = bvec.bv_page;
 			req->page_descs[i].offset = bvec.bv_offset;
@@ -252,6 +277,16 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			++i;
 		}
 	}
+#else
+		bio_for_each_segment(bvec, bio, index) {
+			BUG_ON(i >= req->max_pages);
+			req->pages[i] = bvec->bv_page;
+			req->page_descs[i].offset = bvec->bv_offset;
+			req->page_descs[i].length = bvec->bv_len;
+			++i;
+		}
+	}
+#endif
 	req->misc.pxd_rdwr_in.chksum = crc;
 	req->bio = bio;
 	req->queue = q;
