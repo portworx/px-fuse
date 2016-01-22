@@ -12,7 +12,7 @@ ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
 $(error Kernal path: $(KERNELPATH)  directory does not exitst.)
 endif 
 
-MINKVER=3.17
+MINKVER=3.10
 KERNELVER=$(shell make -s -C $(KERNELPATH) kernelversion | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
 ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)

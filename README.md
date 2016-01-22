@@ -5,4 +5,4 @@ Exports a control plane to create virtual block devices in the linux namespace. 
 
 ## Requirements
 
-Requires kernel >= 3.17
+Requires kernel >= 3.10
