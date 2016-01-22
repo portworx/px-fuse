@@ -64,8 +64,8 @@ cd -
 
 %post
 
-/usr/sbin/lsmod | egrep -q '^%{name} '
-[ $? -eq 0 ] && /usr/sbin/rmmod %{name}
+lsmod | egrep -q '^%{name} '
+[ $? -eq 0 ] && rmmod %{name}
 
 if [ -e /%{name}.files ]; then 
    MDIR="/lib/modules/$(uname -r)/extra"
@@ -74,15 +74,19 @@ if [ -e /%{name}.files ]; then
    for fl in ${FILES}; do echo $fl | /bin/egrep -q ${MDIR} || cp -af $fl ${MDIR}; done;      
    [ -e /etc/modules ] && /bin/egrep -q '^%{name}$' /etc/modules || echo -e '%{name}' >> /etc/modules
    [ -d /etc/modules-load.d -a ! -e /etc/modules-load.d/px.conf ] && echo -e '%{name}' > /etc/modules-load.d/px.conf
-   /usr/sbin/depmod -a
-   /usr/sbin/modprobe %{name}
-   /bin/true
+   depmod -a
+   modprobe %{name}
 fi
 
 %postun
-if [ $1 -eq 0 ]; then
-    /usr/sbin/lsmod | egrep -q '^%{name} '
-    [ $? -eq 0 ] && /usr/sbin/rmmod %{name}
+
+POSTUN=$1
+
+[ "${POSTUN}" == "purge" -o "${POSTUN}" == "remove" ] && POSTUN=0
+
+if [ "${POSTUN}" == "0" ]; then
+    lsmod | egrep -q '^%{name} '
+    [ $? -eq 0 ] && rmmod %{name}
 
     MODCONF=/etc/modules
     if [ -e ${MODCONF} ]; then
@@ -97,7 +101,6 @@ if [ $1 -eq 0 ]; then
 
     /bin/rm -f /lib/modules/$(uname -r)/extra/%{name}.ko
 fi
-
 
 %preun
 #if [ $1 = 0 ]; then

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-[ -z "${KERNALPATH}" ] && KERNALPATH="/usr/src/kernels/$(/bin/uname -r)"
+[ -z "${KERNELPATH}" ] && KERNELPATH="/usr/src/kernels/$(/bin/uname -r)"
 [ -z "${VERSION}" ] && VERSION="0.0.0"
 [ -z "${REVISION}" ] && REVISION="0"
 
@@ -44,7 +44,7 @@ for dir in ${BLDDIRS}; do mkdir -p ${dir}; done
 PXSPEC=px.spec
 cp -a ${BUILDDIR}/${PXSPEC} ${RPMSPECSROOT}/${PXSPEC}
 
-EXTRA_DEFINES="--define 'kernalpath "${KERNALPATH}"' --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10.0'"
+EXTRA_DEFINES="--define 'kernelpath "${KERNELPATH}"' --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10'"
 
 SOURCE_ROOT=${BUILDDIR}/..
 RPM_NAME="${NAME}"
@@ -56,7 +56,24 @@ echo "--- Building target for ${RPM_NAME} ---"
 mkdir -p ${MBUILDROOT}/${RPM_NAME}-src
 cd ${SOURCE_ROOT} && tar --exclude .git --exclude rpm -czf - * | (cd ${MBUILDROOT}/${RPM_NAME}-src; tar -xzf -)
 cd ${MBUILDROOT} && tar -czf ${RPMSRCROOT}/${RPM_NAME}-${RPMVERSION}.tar.gz ${RPM_NAME}-src
-cd ${RPMSPECSROOT} && eval rpmbuild -ba ${BLD_MACROS[@]} ${RPMVERSION_DEFINES[@]} ${RPM_DEFINES[@]} ${PXSPEC}
+cd ${RPMSPECSROOT} && eval rpmbuild -vv -ba ${BLD_MACROS[@]} ${RPMVERSION_DEFINES[@]} ${RPM_DEFINES[@]} ${PXSPEC}
+ 
+if [ $? -eq 0 -a -e /etc/debian_version ]; then
+    ALIEN=$(which alien)
+    [ -z "${ALIEN}" ] && echo "Error: Debian 'alien' package not installed.  Please install using apt-get install alien and rerun this script." && exit 1;
+    cd ${RPMRPMSROOT}/${PLATFORM} && DEBPKG=$(${ALIEN} -k ${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm --scripts)
+    [ $? -ne 0 ] && echo "Error: Failed to build debian package." && exit 1
+    DEBPKG=$(echo "${DEBPKG}" | /bin/sed 's/ generated.*//') 
+fi
 
-
-
+echo
+echo "Install commands for the built ${RPM_NAME} packages:"
+echo
+echo "  RHEL/Centos: rpm -Uvh ${RPMRPMSROOT}/${PLATFORM}/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm"
+[ -n "${DEBPKG}" ] && echo "       Debian: dpkg --install ${RPMRPMSROOT}/${PLATFORM}/${DEBPKG}" 
+echo
+echo "Uninstall commands for the built ${RPM_NAME} packages:"
+echo
+echo "  RHEL/Centos: rpm -e ${RPM_NAME}"
+[ -n "${DEBPKG}" ] && echo "       Debian: dpkg --purge ${RPM_NAME}"
+echo                                                                                                   
