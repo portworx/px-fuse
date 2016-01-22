@@ -269,7 +269,6 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		i = 0;
 #ifdef HAVE_BVEC_ITER
 		bio_for_each_segment(bvec, bio, iter) {
-		bio_for_each_segment(bvec, bio, index) {
 			BUG_ON(i >= req->max_pages);
 			req->pages[i] = bvec.bv_page;
 			req->page_descs[i].offset = bvec.bv_offset;
