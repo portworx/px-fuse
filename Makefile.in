@@ -9,7 +9,7 @@ ifndef KERNELPATH
 endif 
 
 ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
-$(error Kernal path: $(KERNELPATH)  directory does not exitst.)
+$(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif 
 
 MINKVER=3.10
