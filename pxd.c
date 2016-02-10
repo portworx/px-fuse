@@ -193,7 +193,8 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 #endif
 	do {
 		req = fuse_get_req_for_background(&pxd_dev->ctx->fc, bio->bi_vcnt);
-		if (!IS_ERR(req) || PTR_ERR(req) != -EINTR)
+		if (!(IS_ERR(req) && (PTR_ERR(req) == -EINTR ||
+				PTR_ERR(req) == -ENOTCONN)))
 			break;
 		++i;
 	} while (1);
