@@ -186,7 +186,7 @@ void GddTestWithControl::dev_add(pxd_add_out &add, int &minor, std::string &name
 	added_ids.insert(add.dev_id);
 
 	minor = write_bytes;
-	name = std::string(PXD_BLOCK_DEV) + std::to_string(minor);
+	name = std::string(PXD_DEV_PATH) + std::to_string(add.dev_id);
 }
 
 int GddTestWithControl::wait_msg(int timeout)
