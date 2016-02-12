@@ -52,6 +52,8 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	bool init_sent;
+#define ECONN_MAX_BACKOFF 120
+	int econn_backoff;
 };
 
 struct pxd_context *pxd_contexts;
@@ -60,23 +62,16 @@ uint32_t pxd_num_contexts = 10;
 module_param(pxd_num_contexts, uint, 0644);
 
 struct pxd_device {
-	uint64_t		dev_id;
-
-	int			major;
-	int			minor;
-	struct gendisk		*disk;
-	struct device 		dev;
-
-	size_t 			size;
-
-	spinlock_t		lock;
-
-	struct list_head	node;
-
-	int			open_count;
-
-	bool			removing;
-
+	uint64_t dev_id;
+	int	major;
+	int	minor;
+	struct gendisk *disk;
+	struct device dev;
+	size_t size;
+	spinlock_t lock;
+	struct list_head node;
+	int	open_count;
+	bool removing;
 	struct pxd_context	*ctx;
 };
 
@@ -177,7 +172,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	unsigned index = 0;
 	struct bio_vec *bvec = NULL;
 #endif
-	int i;
+	int i, eintr, enotconn;
 	struct timespec start, end;
 	uint32_t crc = 0; 
 
@@ -187,32 +182,48 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, bio->bi_rw);
 
-	i = 0;
 #ifdef GD_TIME_LOG
 	ktime_get_ts(&start);
 #endif
-	do {
+	for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
 		req = fuse_get_req_for_background(&pxd_dev->ctx->fc, bio->bi_vcnt);
-		if (!(IS_ERR(req) && (PTR_ERR(req) == -EINTR ||
-				PTR_ERR(req) == -ENOTCONN)))
+		if (!IS_ERR(req)) {
 			break;
-		++i;
-	} while (1);
-	if (i > 0) {
-		printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d\n",
-			__func__, bio->bi_vcnt, i);
+		} 
+		if (PTR_ERR(req) == -EINTR) {
+			++eintr;
+			continue;
+		}
+		if (PTR_ERR(req) == -ENOTCONN) {
+			if (enotconn < ECONN_MAX_BACKOFF) {
+				printk(KERN_INFO "%s: request alloc (%d pages) ENOTCONN retries %d\n",
+						__func__, bio->bi_vcnt, enotconn);
+				schedule_timeout_interruptible(1 * HZ);
+				++enotconn;
+				continue;
+			}
+			break;
+		}
 	}
-	if (IS_ERR(req)) { // no NULL returned, not EINTR
+	if (eintr > 0 || enotconn > 0) {
+		printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d ENOTCONN retries %d\n",
+			__func__, bio->bi_vcnt, eintr, enotconn);
+	}
+	if (IS_ERR(req)) { 
+		pxd_dev->ctx->econn_backoff = enotconn;
 		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld retries %d\n",
-			__func__, bio->bi_vcnt, PTR_ERR(req), i);
+			__func__, bio->bi_vcnt, PTR_ERR(req), enotconn);
 		bio_io_error(bio);
 		return;
 	}
 
+	/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
+	pxd_dev->ctx->econn_backoff = 0;
+
 #ifdef GD_TIME_LOG
 	ktime_get_ts(&end);
 #endif
-	trace_make_request_wait(bio_data_dir(bio), pxd_dev->ctx->fc.reqctr, i,
+	trace_make_request_wait(bio_data_dir(bio), pxd_dev->ctx->fc.reqctr, eintr,
 		req->in.h.unique, &start, &end);
 
 	switch (bio->bi_rw & (REQ_WRITE | REQ_DISCARD)) {
@@ -801,6 +812,7 @@ void pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
+	ctx->econn_backoff = 0;
 	INIT_LIST_HEAD(&ctx->pending_requests);
 }
 
