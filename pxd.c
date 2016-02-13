@@ -194,16 +194,14 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			++eintr;
 			continue;
 		}
-		if (PTR_ERR(req) == -ENOTCONN) {
-			if (enotconn < ECONN_MAX_BACKOFF) {
-				printk(KERN_INFO "%s: request alloc (%d pages) ENOTCONN retries %d\n",
-						__func__, bio->bi_vcnt, enotconn);
-				schedule_timeout_interruptible(1 * HZ);
-				++enotconn;
-				continue;
-			}
-			break;
+		if ((PTR_ERR(req) == -ENOTCONN) && (enotconn < ECONN_MAX_BACKOFF)) {
+			printk(KERN_INFO "%s: request alloc (%d pages) ENOTCONN retries %d\n",
+					__func__, bio->bi_vcnt, enotconn);
+			schedule_timeout_interruptible(1 * HZ);
+			++enotconn;
+			continue;
 		}
+		break;
 	}
 	if (eintr > 0 || enotconn > 0) {
 		printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d ENOTCONN retries %d\n",
