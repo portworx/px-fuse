@@ -881,6 +881,8 @@ void pxd_exit(void)
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		misc_deregister(&pxd_contexts[i].miscdev);
+		/* force cleanup @@@ */
+		pxd_contexts[i].fc.connected = true;
 		fuse_abort_conn(&pxd_contexts[i].fc);
 		fuse_conn_put(&pxd_contexts[i].fc);
 	}
