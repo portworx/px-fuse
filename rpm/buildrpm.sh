@@ -4,7 +4,11 @@
 [ -z "${VERSION}" ] && VERSION="0.0.0"
 [ -z "${REVISION}" ] && REVISION="0"
 
-NAME=px
+if [ "x$1" == "x" ] ; then
+	NAME=px
+else
+	NAME=px-$1
+fi
 SUMMARY="PX-FUSE module"
 DESCRIPTION="Exports a control plane to create virtual block devices in the linux namespace. Piggy-backs on FUSE transport to act as a conduit between kernel and user space."
 
