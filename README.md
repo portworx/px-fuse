@@ -4,14 +4,28 @@ Exports a control plane to create virtual block devices in the linux namespace. 
 ## Requirements
 Requires kernel >= 3.10
 
-## Building the PX-FUSE RPM for your kernel
+### Building the PX-FUSE module on Ubuntu
+```
+# apt-get install dh-autoreconf
+# git clone https://github.com/portworx/px-fuse.git
+# cd px-fuse/rpm
+# # check your kernel version with 
+# uname -a
+# # Make sure you have the kernel headers... if not, get them.
+# ls /usr/src/linux-headers-<kernel version>
+# KERNELPATH="/usr/src/linux-headers-3.19.0-43-generic" VERSION=3.19.0 REVISION=43 ./buildrpm.sh
+# # This will generate an install package in px-fuse/rpm/px/RPMS/x86_64/
+# dpkg --install px_<version>.deb
+```
+
+### Building the PX-FUSE RPM on CentOS
 ```
 # cd rpm
 # pwd
 /root/px-fuse/rpm
 # uname -r
 3.10.0-123.9.3.el7.x86_64
-# #Make sure you have the kernel headers... if not, get them.
+# # Make sure you have the kernel headers... if not, get them.
 # ls /usr/src/kernels/
 3.10.0-123.9.3.el7.x86_64
 # KERNELPATH=/usr/src/kernels/3.10.0-123.el7.x86_64 VERSION=3.10.0 REVISION=123.9.3.el7 ./buildrpm.sh
