@@ -11,6 +11,7 @@ Requires kernel >= 3.10
 # cd px-fuse/rpm
 # # check your kernel version with 
 # uname -a
+3.19.0-43-generic
 # # Make sure you have the kernel headers... if not, get them.
 # ls /usr/src/linux-headers-<kernel version>
 # KERNELPATH="/usr/src/linux-headers-3.19.0-43-generic" VERSION=3.19.0 REVISION=43 ./buildrpm.sh
@@ -20,9 +21,8 @@ Requires kernel >= 3.10
 
 ### Building the PX-FUSE RPM on CentOS
 ```
-# cd rpm
-# pwd
-/root/px-fuse/rpm
+# git clone https://github.com/portworx/px-fuse.git
+# cd px-fuse/rpm
 # uname -r
 3.10.0-123.9.3.el7.x86_64
 # # Make sure you have the kernel headers... if not, get them.
