@@ -17,7 +17,7 @@
 #include <linux/idr.h>
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,16,0)
 #define HAVE_BVEC_ITER
 #endif
 
