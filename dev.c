@@ -1282,6 +1282,8 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	return err;
 }
 
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
 static ssize_t fuse_dev_read(struct kiocb *iocb, const struct iovec *iov,
 			      unsigned long nr_segs, loff_t pos)
 {
@@ -1295,7 +1297,20 @@ static ssize_t fuse_dev_read(struct kiocb *iocb, const struct iovec *iov,
 
 	return fuse_dev_do_read(fc, file, &cs, iov_length(iov, nr_segs));
 }
+#else
+static ssize_t fuse_dev_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct fuse_copy_state cs;
+	struct file *file = iocb->ki_filp;
+	struct fuse_conn *fc = fuse_get_conn(file);
+	if (!fc)
+		return -EPERM;
 
+	fuse_copy_init(&cs, fc, 1, to->iov, to->nr_segs);
+
+	return fuse_dev_do_read(fc, file, &cs, iov_length(to->iov, to->nr_segs));
+}
+#endif 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
 static int fuse_dev_pipe_buf_steal(struct pipe_inode_info *pipe,
@@ -1582,6 +1597,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 	return err;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
 static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 			      unsigned long nr_segs, loff_t pos)
 {
@@ -1594,7 +1610,20 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 
 	return fuse_dev_do_write(fc, &cs, iov_length(iov, nr_segs));
 }
+#else
+static ssize_t fuse_dev_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct fuse_copy_state cs;
+	struct fuse_conn *fc = fuse_get_conn(iocb->ki_filp);
+	if (!fc)
+		return -EPERM;
 
+	fuse_copy_init(&cs, fc, 0, from->iov, from->nr_segs);
+
+	return fuse_dev_do_write(fc, &cs, iov_length(from->iov, from->nr_segs));
+}
+#endif
+ 
 static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 				     struct file *out, loff_t *ppos,
 				     size_t len, unsigned int flags)
@@ -1927,6 +1956,8 @@ static int fuse_dev_fasync(int fd, struct file *file, int on)
 	return fasync_helper(fd, file, on, &fc->fasync);
 }
 
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
 const struct file_operations fuse_dev_operations = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
@@ -1940,6 +1971,20 @@ const struct file_operations fuse_dev_operations = {
 	.release	= fuse_dev_release,
 	.fasync		= fuse_dev_fasync,
 };
+#else
+const struct file_operations fuse_dev_operations = {
+	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
+	.read		= __vfs_read,
+	.read_iter	= fuse_dev_read_iter,
+	.splice_read	= fuse_dev_splice_read,
+	.write_iter	= fuse_dev_write_iter,
+	.splice_write	= fuse_dev_splice_write,
+	.poll		= fuse_dev_poll,
+	.release	= fuse_dev_release,
+	.fasync		= fuse_dev_fasync,
+};
+#endif
 
 int fuse_dev_init(void)
 {
