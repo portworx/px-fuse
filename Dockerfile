@@ -19,4 +19,4 @@ RUN autoreconf && ./configure
 
 ENTRYPOINT ["/home/px-fuse/docker-entry-point.sh"]
 
-CMD ["make", "insert"]
+CMD ["make", "rpm"]

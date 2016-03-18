@@ -28,4 +28,5 @@ if [ -z $KERNELPATH ]; then
 	exit 1
 fi
 
+export KERNELPATH
 exec "$@"
