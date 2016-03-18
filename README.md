@@ -6,7 +6,7 @@ Requires kernel >= 3.10
 
 ### Building the PX-FUSE rpm/dpkg in docker
 ```
-# OUTPATH=/opt/pwx docker run -v $OUTPATH:$OUTPATH -v /usr/src:/usr/src -ti -e OUTPATH=$OUTPATH portworx/px-fuse
+# export OUTPATH=/opt/pwx; docker run -v ${OUTPATH}:${OUTPATH} -v /usr/src:/usr/src -ti -e OUTPATH=$OUTPATH portworx/px-fuse:dev
 ```
 
 ### Building the PX-FUSE module on Ubuntu
