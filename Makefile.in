@@ -26,6 +26,7 @@ PATCH=$(shell echo $(KVERSION) | awk -F. '{print $$3}' | awk -F- '{print $$1}')
 export REVISION=$(shell echo $(KVERSION) | awk -F. '{print $$3}' |  awk -F- '{print $$2}')
 export VERSION=$(MAJOR).$(MINOR).$(PATCH)
 export KERNELPATH
+export OUTPATH
 
 .PHONY: rpm
 

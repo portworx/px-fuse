@@ -71,11 +71,23 @@ if [ $? -eq 0 -a -e /etc/debian_version ]; then
     DEBPKG=$(echo "${DEBPKG}" | /bin/sed 's/ generated.*//') 
 fi
 
+RPMPATH="${RPMRPMSROOT}/${PLATFORM}/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm" 
+DPKGPATH="${RPMRPMSROOT}/${PLATFORM}/${DEBPKG}" 
+
+if [ !  -z "${OUTPATH}" ]; then
+	cp  ${RPMPATH} ${OUTPATH}
+	RPMPATH="$OUTPATH/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm"
+	if [ -n "${DEBPKG}" ]; then
+		cp ${RPMRPMSROOT}/${PLATFORM}/${DEBPKG} ${OUTPATH}
+		DPKGPATH="${OUTPATH}/${DEBPKG}" 
+	fi
+fi
+
 echo
 echo "Install commands for the built ${RPM_NAME} packages:"
 echo
-echo "  RHEL/Centos: rpm -Uvh ${RPMRPMSROOT}/${PLATFORM}/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm"
-[ -n "${DEBPKG}" ] && echo "       Debian: dpkg --install ${RPMRPMSROOT}/${PLATFORM}/${DEBPKG}" 
+echo "  RHEL/Centos: rpm -Uvh ${RPMPATH}"
+[ -n "${DEBPKG}" ] && echo "       Debian: dpkg --install ${DPKGPATH}"
 echo
 echo "Uninstall commands for the built ${RPM_NAME} packages:"
 echo
