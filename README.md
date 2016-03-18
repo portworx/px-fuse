@@ -4,6 +4,11 @@ Exports a control plane to create virtual block devices in the linux namespace. 
 ## Requirements
 Requires kernel >= 3.10
 
+### Building the PX-FUSE rpm/dpkg in docker
+```
+# OUTPATH=/opt/pwx docker run -v $OUTPATH:$OUTPATH -v /usr/src:/usr/src -ti -e OUTPATH=$OUTPATH portworx/px-fuse
+```
+
 ### Building the PX-FUSE module on Ubuntu
 ```
 # apt-get install dh-autoreconf
