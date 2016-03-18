@@ -44,5 +44,14 @@ install:
 rpm: 
 	@cd rpm && ./buildrpm.sh
 
+docker-build-dev:
+	docker build -t portworx/px-fuse:dev -f Dockerfile .
+	
+docker-build: docker-build-dev
+	docker run --privileged \
+	-v /usr/src/:/usr/src  \
+	-v $(shell pwd):/home/px-fuse \
+	portworx/px-fuse:dev make
+	
 distclean: clean
 	@/bin/rm -f  config.* Makefile
