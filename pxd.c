@@ -29,6 +29,18 @@
 #define BIO_SIZE(bio) bio->bi_size
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+#define BIO_ENDIO(bio, err) do { 		\
+	if (err != 0) { 			\
+		bio_io_error((bio)); 		\
+	} else {				\
+		bio_endio((bio));		\
+	} 					\
+} while (0)
+#else
+#define BIO_ENDIO(bio, err) bio_endio((bio), (err))
+#endif
+
 /** enables time tracing */
 //#define GD_TIME_LOG
 
@@ -137,7 +149,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 	pxd_update_stats(req, 0);
 
-	bio_endio(req->bio, req->out.h.error);
+	BIO_ENDIO(req->bio, req->out.h.error);
 #ifdef GD_TIME_LOG
 	ktime_get_ts(&end);
 #endif
@@ -153,7 +165,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 	pxd_update_stats(req, 1);
 
-	bio_endio(req->bio, req->out.h.error);
+	BIO_ENDIO(req->bio, req->out.h.error);
 #ifdef GD_TIME_LOG
 	ktime_get_ts(&end);
 #endif
