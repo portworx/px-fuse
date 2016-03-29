@@ -173,7 +173,13 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 		fc->num_background, &req->start, &end);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+#else
 static void pxd_make_request(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL
+#endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
@@ -224,7 +230,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld retries %d\n",
 			__func__, bio->bi_vcnt, PTR_ERR(req), enotconn);
 		bio_io_error(bio);
-		return;
+		return BLK_QC_RETVAL;
 	}
 
 	/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
@@ -313,6 +319,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	req->queue = q;
 
 	fuse_request_send_background(&pxd_dev->ctx->fc, req);
+	return BLK_QC_RETVAL;
 }
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
