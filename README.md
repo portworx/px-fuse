@@ -14,7 +14,7 @@ Requires kernel >= 3.10
 
 ```
 
-# git clone https://github.com/portworx/px-lite.git
+# git clone https://github.com/portworx/px-fuse.git
 # cd px-lite
 # autoreconf && ./configure
 # export KERNELPATH="/usr/src/linux-headers-`uname -r`"
