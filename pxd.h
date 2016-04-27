@@ -10,7 +10,7 @@
 
 #include "linux/fuse.h"
 
-/// @file pxd/pxd.h
+/// @file px_fuse/pxd.h
 
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
 #define PXD_DEV  		"pxd/pxd"				/**< block device prefix */
