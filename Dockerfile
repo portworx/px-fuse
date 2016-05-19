@@ -17,6 +17,6 @@ ADD . /home/px-fuse
 WORKDIR /home/px-fuse
 RUN autoreconf && ./configure
 
-ENTRYPOINT ["/home/px-fuse/docker-entry-point.sh"]
+ENTRYPOINT ["/home/px-fuse/fuse-entry-point.sh"]
 
 CMD ["make", "rpm"]
