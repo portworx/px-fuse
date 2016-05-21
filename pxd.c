@@ -21,6 +21,14 @@
 #define HAVE_BVEC_ITER
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+#define BLK_QUEUE_INIT_TAGS(q, sz) \
+	blk_queue_init_tags((q), (sz), NULL, BLK_TAG_ALLOC_FIFO)
+#else
+#define BLK_QUEUE_INIT_TAGS(q, sz) \
+	blk_queue_init_tags((q), (sz), NULL)
+#endif
+
 #ifdef HAVE_BVEC_ITER
 #define BIO_SECTOR(bio) bio->bi_iter.bi_sector
 #define BIO_SIZE(bio) bio->bi_iter.bi_size
@@ -346,7 +354,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		goto out_disk;
 
 	/* Switch queue to TCQ mode; allocate tag map. */
-	rc = blk_queue_init_tags(q, 32, NULL);//XXX, BLK_TAG_ALLOC_FIFO);
+	rc = BLK_QUEUE_INIT_TAGS(q, 32);
 	if (rc) {
 		blk_cleanup_queue(q);
 		goto out_disk;
