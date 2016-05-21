@@ -359,8 +359,8 @@ struct fuse_req {
 		/** AIO control block */
 		struct fuse_io_priv *io;
 
-		/** Associated request struct. */
-		struct request *rq;
+		/** Bio associated with request */
+		struct bio *bio;
 	};
 
 	/** Link on fi->writepages */
