@@ -160,26 +160,24 @@ static void pxd_update_stats(struct fuse_req *req, int rw)
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
 	struct timespec end;
-	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n", __func__, req,
-			req->in.h.unique, req->misc.pxd_rdwr_in.offset, req->out.h.error);
+	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n", 
+			__func__, req, req->in.h.unique, 
+			req->misc.pxd_rdwr_in.offset, req->out.h.error);
 
 	pxd_update_stats(req, 0);
-
-	__blk_end_request(req->rq, 0, blk_rq_cur_bytes(req->rq));
+	__blk_end_request(req->rq, req->out.h.error, blk_rq_cur_bytes(req->rq));
 	KTIME_GET_TS(&end);
 	trace_make_request_lat(READ, fc->reqctr, req->in.h.unique,
-		fc->num_background, &req->start, &end);
+			fc->num_background, &req->start, &end);
 }
 
 static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
 	struct timespec end;
-	pxd_printk("%s: receive reply to %p(%lld) err %d\n", __func__, req,
-			req->in.h.unique, req->out.h.error);
-
+	pxd_printk("%s: receive reply to %p(%lld) err %d\n", 
+			__func__, req, req->in.h.unique, req->out.h.error); 
 	pxd_update_stats(req, 1);
-
-	__blk_end_request(req->rq, 0, blk_rq_cur_bytes(req->rq));
+	__blk_end_request(req->rq, req->out.h.error, blk_rq_cur_bytes(req->rq));
 	KTIME_GET_TS(&end);
 	trace_make_request_lat(WRITE, fc->reqctr, req->in.h.unique,
 		fc->num_background, &req->start, &end);
@@ -261,41 +259,41 @@ static void pxd_rq_fn(struct request_queue *q)
 					&end);
 
 		switch (rq->cmd_flags & (REQ_WRITE | REQ_DISCARD)) {
-			case REQ_WRITE:
-				KTIME_GET_TS(&req->start);
-				req->in.h.opcode = PXD_WRITE;
-				req->in.numargs = 2;
-				req->in.argpages = 1;
-				req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-				req->in.args[0].value = &req->misc.pxd_rdwr_in;
-				req->in.args[1].size = blk_rq_cur_bytes(rq);
-				req->in.args[1].value = NULL;
-				req->out.numargs = 0;
-				req->end = pxd_process_write_reply;
-				break;
-			case 0:
-				KTIME_GET_TS(&req->start);
-				req->in.h.opcode = PXD_READ;
-				req->in.numargs = 1;
-				req->in.argpages = 0;
-				req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-				req->in.args[0].value = &req->misc.pxd_rdwr_in;
-				req->out.numargs = 1;
-				req->out.argpages = 1;
-				req->out.args[0].size = blk_rq_cur_bytes(rq);
-				req->out.args[0].value = NULL;
-				req->end = pxd_process_read_reply;
-				break;
-			case REQ_DISCARD:
-			case REQ_WRITE | REQ_DISCARD:
-				req->in.h.opcode = PXD_DISCARD;
-				req->in.numargs = 1;
-				req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-				req->in.args[0].value = &req->misc.pxd_rdwr_in;
-				req->in.argpages = 0;
-				req->out.numargs = 0;
-				req->end = pxd_process_write_reply;
-				break;
+		case REQ_WRITE:
+			KTIME_GET_TS(&req->start);
+			req->in.h.opcode = PXD_WRITE;
+			req->in.numargs = 2;
+			req->in.argpages = 1;
+			req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+			req->in.args[0].value = &req->misc.pxd_rdwr_in;
+			req->in.args[1].size = blk_rq_cur_bytes(rq);
+			req->in.args[1].value = NULL;
+			req->out.numargs = 0;
+			req->end = pxd_process_write_reply;
+			break;
+		case 0:
+			KTIME_GET_TS(&req->start);
+			req->in.h.opcode = PXD_READ;
+			req->in.numargs = 1;
+			req->in.argpages = 0;
+			req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+			req->in.args[0].value = &req->misc.pxd_rdwr_in;
+			req->out.numargs = 1;
+			req->out.argpages = 1;
+			req->out.args[0].size = blk_rq_cur_bytes(rq);
+			req->out.args[0].value = NULL;
+			req->end = pxd_process_read_reply;
+			break;
+		case REQ_DISCARD:
+		case REQ_WRITE | REQ_DISCARD:
+			req->in.h.opcode = PXD_DISCARD;
+			req->in.numargs = 1;
+			req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+			req->in.args[0].value = &req->misc.pxd_rdwr_in;
+			req->in.argpages = 0;
+			req->out.numargs = 0;
+			req->end = pxd_process_write_reply;
+			break;
 		}
 
 		req->in.h.pid = current->pid;
