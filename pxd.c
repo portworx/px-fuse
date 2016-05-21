@@ -65,8 +65,6 @@
 #define SECTOR_SIZE 512
 #define SEGMENT_SIZE (1024 * 1024)
 
-
-
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
@@ -92,17 +90,17 @@ module_param(pxd_num_contexts, uint, 0644);
 
 struct pxd_device {
 	uint64_t dev_id;
-	int	major;
-	int	minor;
+	int major;
+	int minor;
 	struct gendisk *disk;
 	struct device dev;
 	size_t size;
 	spinlock_t lock;
 	spinlock_t qlock;
 	struct list_head node;
-	int	open_count;
+	int open_count;
 	bool removing;
-	struct pxd_context	*ctx;
+	struct pxd_context *ctx;
 };
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
@@ -931,4 +929,3 @@ module_init(pxd_init);
 module_exit(pxd_exit);
 
 MODULE_LICENSE("GPL");
-
