@@ -24,9 +24,11 @@
 #ifdef HAVE_BVEC_ITER
 #define BIO_SECTOR(bio) bio->bi_iter.bi_sector
 #define BIO_SIZE(bio) bio->bi_iter.bi_size
+#define BVEC(bvec) (bvec) 
 #else
 #define BIO_SECTOR(bio) bio->bi_sector
 #define BIO_SIZE(bio) bio->bi_size
+#define BVEC(bvec) (*(bvec)) 
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -303,26 +305,14 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->num_pages = rq->nr_phys_segments;
 		if (rq->nr_phys_segments) {
 			i = 0;
-#ifdef HAVE_BVEC_ITER 
 			rq_for_each_segment(bvec, rq, iter) {
 				BUG_ON(i >= req->max_pages);
-				req->pages[i] = bvec.bv_page;
-				req->page_descs[i].offset = bvec.bv_offset;
-				req->page_descs[i].length = bvec.bv_len;
+				req->pages[i] = BVEC(bvec).bv_page;
+				req->page_descs[i].offset = BVEC(bvec).bv_offset;
+				req->page_descs[i].length = BVEC(bvec).bv_len;
 				++i;
 			}
 		}
-#else
-			rq_for_each_segment(bvec, rq, iter) {
-				BUG_ON(i >= req->max_pages);
-				req->pages[i] = bvec->bv_page;
-				req->page_descs[i].offset = bvec->bv_offset;
-				req->page_descs[i].length = bvec->bv_len;
-				++i;
-			}
-		}
-		
-#endif
 		req->misc.pxd_rdwr_in.chksum = crc;
 		req->rq = rq;
 		req->queue = q;
