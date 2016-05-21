@@ -81,6 +81,7 @@ struct pxd_device {
 	struct device dev;
 	size_t size;
 	spinlock_t lock;
+	spinlock_t qlock;
 	struct list_head node;
 	int	open_count;
 	bool removing;
@@ -117,7 +118,6 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 
 	put_device(&pxd_dev->dev);
 }
-
 static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
@@ -128,7 +128,7 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
-	.ioctl			= pxd_ioctl,
+	.ioctl			= pxd_ioctl
 };
 
 static void pxd_update_stats(struct fuse_req *req, int rw)
@@ -137,7 +137,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw)
 	int cpu = part_stat_lock();
 	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
 	part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw],
-			BIO_SIZE(req->bio) / SECTOR_SIZE);
+			blk_rq_cur_sectors(req->rq));
 	part_stat_unlock();
 }
 
@@ -149,7 +149,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 	pxd_update_stats(req, 0);
 
-	BIO_ENDIO(req->bio, req->out.h.error);
+	__blk_end_request(req->rq, 0, blk_rq_cur_bytes(req->rq));
 #ifdef GD_TIME_LOG
 	ktime_get_ts(&end);
 #endif
@@ -165,7 +165,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 	pxd_update_stats(req, 1);
 
-	BIO_ENDIO(req->bio, req->out.h.error);
+	__blk_end_request(req->rq, 0, blk_rq_cur_bytes(req->rq));
 #ifdef GD_TIME_LOG
 	ktime_get_ts(&end);
 #endif
@@ -173,161 +173,171 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 		fc->num_background, &req->start, &end);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL BLK_QC_T_NONE
-#else
-static void pxd_make_request(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL
-#endif
+static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-#ifdef HAVE_BVEC_ITER
+	struct req_iterator iter;
+#ifdef HAVE_BVEC_ITER 
 	struct bio_vec bvec;
-	struct bvec_iter iter;
 #else
-	unsigned index = 0;
 	struct bio_vec *bvec = NULL;
 #endif
 	int i, eintr, enotconn;
 	struct timespec start, end;
 	uint32_t crc = 0; 
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages flags %lx\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_rw);
+	for (;;) {
+		struct request *rq;
 
-#ifdef GD_TIME_LOG
-	ktime_get_ts(&start);
-#endif
-	for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
-		req = fuse_get_req_for_background(&pxd_dev->ctx->fc, bio->bi_vcnt);
-		if (!IS_ERR(req)) {
+		/* Peek at request from block layer. */
+		rq = blk_peek_request(q);
+		if (!rq)
 			break;
-		} 
-		if (PTR_ERR(req) == -EINTR) {
-			++eintr;
+
+		/* Filter out block requests we don't understand */
+                if (rq->cmd_type != REQ_TYPE_FS) {
+                        blk_end_request_all(rq, 0);
+                        continue;
+                }
+
+		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages flags %llx\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			rq_data_dir(rq) == WRITE ? "wr" : "rd",
+			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_cur_bytes(rq),
+			rq->nr_phys_segments, rq->cmd_flags);
+
+#ifdef GD_TIME_LOG
+		ktime_get_ts(&start);
+#endif
+		for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
+			req = fuse_get_req_for_background(&pxd_dev->ctx->fc, rq->nr_phys_segments);
+			if (!IS_ERR(req)) {
+				break;
+			} 
+			if (PTR_ERR(req) == -EINTR) {
+				++eintr;
+				continue;
+			}
+			if ((PTR_ERR(req) == -ENOTCONN) && (enotconn < ECONN_MAX_BACKOFF)) {
+				printk(KERN_INFO "%s: request alloc (%d pages) ENOTCONN retries %d\n",
+							__func__, rq->nr_phys_segments, enotconn);
+				schedule_timeout_interruptible(1 * HZ);
+				++enotconn;
+				continue;
+			}
+			break;
+		}
+		if (eintr > 0 || enotconn > 0) {
+			printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d ENOTCONN retries %d\n",
+							__func__, rq->nr_phys_segments, eintr, enotconn);
+		}
+		if (IS_ERR(req)) { 
+			pxd_dev->ctx->econn_backoff = enotconn;
+			printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld retries %d\n",
+					__func__, rq->nr_phys_segments, PTR_ERR(req), enotconn);
+			__blk_end_request(rq, -EIO, blk_rq_cur_bytes(rq));
 			continue;
 		}
-		if ((PTR_ERR(req) == -ENOTCONN) && (enotconn < ECONN_MAX_BACKOFF)) {
-			printk(KERN_INFO "%s: request alloc (%d pages) ENOTCONN retries %d\n",
-					__func__, bio->bi_vcnt, enotconn);
-			schedule_timeout_interruptible(1 * HZ);
-			++enotconn;
-			continue;
+
+		/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
+		pxd_dev->ctx->econn_backoff = 0;
+
+#ifdef GD_TIME_LOG
+		ktime_get_ts(&end);
+#endif
+		trace_make_request_wait(rq_data_dir(rq), pxd_dev->ctx->fc.reqctr, eintr,
+								req->in.h.unique, &start, &end);
+
+		switch (rq->cmd_flags & (REQ_WRITE | REQ_DISCARD)) {
+			case REQ_WRITE:
+#ifdef GD_TIME_LOG
+				ktime_get_ts(&req->start);
+#endif
+				req->in.h.opcode = PXD_WRITE;
+				req->in.numargs = 2;
+				req->in.argpages = 1;
+				req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+				req->in.args[0].value = &req->misc.pxd_rdwr_in;
+				req->in.args[1].size = blk_rq_cur_bytes(rq);
+				req->in.args[1].value = NULL;
+				req->out.numargs = 0;
+				req->end = pxd_process_write_reply;
+				break;
+			case 0:
+#ifdef GD_TIME_LOG
+				ktime_get_ts(&req->start);
+#endif
+				req->in.h.opcode = PXD_READ;
+				req->in.numargs = 1;
+				req->in.argpages = 0;
+				req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+				req->in.args[0].value = &req->misc.pxd_rdwr_in;
+				req->out.numargs = 1;
+				req->out.argpages = 1;
+				req->out.args[0].size = blk_rq_cur_bytes(rq);
+				req->out.args[0].value = NULL;
+				req->end = pxd_process_read_reply;
+				break;
+			case REQ_DISCARD:
+			case REQ_WRITE | REQ_DISCARD:
+				req->in.h.opcode = PXD_DISCARD;
+				req->in.numargs = 1;
+				req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+				req->in.args[0].value = &req->misc.pxd_rdwr_in;
+				req->in.argpages = 0;
+				req->out.numargs = 0;
+				req->end = pxd_process_write_reply;
+				break;
 		}
-		break;
-	}
-	if (eintr > 0 || enotconn > 0) {
-		printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d ENOTCONN retries %d\n",
-			__func__, bio->bi_vcnt, eintr, enotconn);
-	}
-	if (IS_ERR(req)) { 
-		pxd_dev->ctx->econn_backoff = enotconn;
-		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld retries %d\n",
-			__func__, bio->bi_vcnt, PTR_ERR(req), enotconn);
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
 
-	/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
-	pxd_dev->ctx->econn_backoff = 0;
-
-#ifdef GD_TIME_LOG
-	ktime_get_ts(&end);
-#endif
-	trace_make_request_wait(bio_data_dir(bio), pxd_dev->ctx->fc.reqctr, eintr,
-		req->in.h.unique, &start, &end);
-
-	switch (bio->bi_rw & (REQ_WRITE | REQ_DISCARD)) {
-	case REQ_WRITE:
-#ifdef GD_TIME_LOG
-		ktime_get_ts(&req->start);
-#endif
-		req->in.h.opcode = PXD_WRITE;
-		req->in.numargs = 2;
-		req->in.argpages = 1;
-		req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-		req->in.args[0].value = &req->misc.pxd_rdwr_in;
-		req->in.args[1].size = BIO_SIZE(bio);
-		req->in.args[1].value = NULL;
-		req->out.numargs = 0;
-		req->end = pxd_process_write_reply;
-		break;
-	case 0:
-#ifdef GD_TIME_LOG
-		ktime_get_ts(&req->start);
-#endif
-		req->in.h.opcode = PXD_READ;
-		req->in.numargs = 1;
-		req->in.argpages = 0;
-		req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-		req->in.args[0].value = &req->misc.pxd_rdwr_in;
-		req->out.numargs = 1;
-		req->out.argpages = 1;
-		req->out.args[0].size = BIO_SIZE(bio);
-		req->out.args[0].value = NULL;
-		req->end = pxd_process_read_reply;
-		break;
-	case REQ_DISCARD:
-	case REQ_WRITE | REQ_DISCARD:
-		req->in.h.opcode = PXD_DISCARD;
-		req->in.numargs = 1;
-		req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-		req->in.args[0].value = &req->misc.pxd_rdwr_in;
-		req->in.argpages = 0;
-		req->out.numargs = 0;
-		req->end = pxd_process_write_reply;
-		break;
-	}
-
-	req->in.h.pid = current->pid;
-        req->misc.pxd_rdwr_in.flags =
-                ((bio->bi_rw & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
-                ((bio->bi_rw & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
-                ((bio->bi_rw & REQ_META) ? PXD_FLAGS_META : 0);
-	req->misc.pxd_rdwr_in.minor = pxd_dev->minor;
-	req->misc.pxd_rdwr_in.offset = BIO_SECTOR(bio) * SECTOR_SIZE;
-	req->misc.pxd_rdwr_in.size = BIO_SIZE(bio);
-	req->num_pages = bio->bi_vcnt;
-	if (bio->bi_vcnt) {
-		i = 0;
-#ifdef HAVE_BVEC_ITER
-		bio_for_each_segment(bvec, bio, iter) {
-			BUG_ON(i >= req->max_pages);
-			req->pages[i] = bvec.bv_page;
-			req->page_descs[i].offset = bvec.bv_offset;
-			req->page_descs[i].length = bvec.bv_len;
-			++i;
+		req->in.h.pid = current->pid;
+		req->misc.pxd_rdwr_in.flags =
+				((rq->cmd_flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
+				((rq->cmd_flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+				((rq->cmd_flags & REQ_META) ? PXD_FLAGS_META : 0);
+		req->misc.pxd_rdwr_in.minor = pxd_dev->minor;
+		req->misc.pxd_rdwr_in.offset = blk_rq_pos(rq) * SECTOR_SIZE;
+		req->misc.pxd_rdwr_in.size = blk_rq_cur_bytes(rq);
+		req->num_pages = rq->nr_phys_segments;
+		if (rq->nr_phys_segments) {
+			i = 0;
+#ifdef HAVE_BVEC_ITER 
+			rq_for_each_segment(bvec, rq, iter) {
+				BUG_ON(i >= req->max_pages);
+				req->pages[i] = bvec.bv_page;
+				req->page_descs[i].offset = bvec.bv_offset;
+				req->page_descs[i].length = bvec.bv_len;
+				++i;
+			}
 		}
-	}
 #else
-		bio_for_each_segment(bvec, bio, index) {
-			BUG_ON(i >= req->max_pages);
-			req->pages[i] = bvec->bv_page;
-			req->page_descs[i].offset = bvec->bv_offset;
-			req->page_descs[i].length = bvec->bv_len;
-			++i;
+			rq_for_each_segment(bvec, rq, iter) {
+				BUG_ON(i >= req->max_pages);
+				req->pages[i] = bvec->bv_page;
+				req->page_descs[i].offset = bvec->bv_offset;
+				req->page_descs[i].length = bvec->bv_len;
+				++i;
+			}
 		}
-	}
+		
 #endif
-	req->misc.pxd_rdwr_in.chksum = crc;
-	req->bio = bio;
-	req->queue = q;
+		req->misc.pxd_rdwr_in.chksum = crc;
+		req->rq = rq;
+		req->queue = q;
 
-	fuse_request_send_background(&pxd_dev->ctx->fc, req);
-	return BLK_QC_RETVAL;
+		fuse_request_send_background(&pxd_dev->ctx->fc, req);
+	}
+	return;
 }
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
+	int rc;
 
-	/* create gendisk info */
+	/* Create gendisk info. */
 	disk = alloc_disk(1);
 	if (!disk)
 		return -ENOMEM;
@@ -340,11 +350,16 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	q = blk_alloc_queue(GFP_KERNEL);
-	if (!q)
+	q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
+	if (!q) 
 		goto out_disk;
 
-	blk_queue_make_request(q, pxd_make_request);
+	/* Switch queue to TCQ mode; allocate tag map. */
+	rc = blk_queue_init_tags(q, 32, NULL);//XXX, BLK_TAG_ALLOC_FIFO);
+	if (rc) {
+		blk_cleanup_queue(q);
+		goto out_disk;
+	}
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
@@ -354,20 +369,19 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
-	/* enable the discard support */
+	/* Enable discard support. */
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 	q->limits.discard_granularity = PXD_LBS;
 	q->limits.discard_alignment = PXD_LBS;
 	q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
 	q->limits.discard_zeroes_data = 1;
 
-	/* enable flush support */
+	/* Enable flush support. */
 	blk_queue_flush(q, REQ_FLUSH | REQ_FUA);
+	blk_queue_prep_rq(q, blk_queue_start_tag);
 
 	disk->queue = q;
-
 	q->queuedata = pxd_dev;
-
 	pxd_dev->disk = disk;
 
 	return 0;
@@ -387,9 +401,11 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
-		if (disk->queue)
-			blk_cleanup_queue(disk->queue);
 	}
+	if (disk->queue) {
+		blk_cleanup_queue(disk->queue);
+	}
+	pxd_dev->disk = NULL;
 	put_disk(disk);
 }
 
@@ -411,6 +427,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 		goto out_module;
 
 	spin_lock_init(&pxd_dev->lock);
+	spin_lock_init(&pxd_dev->qlock);
 
 	new_minor = ida_simple_get(&pxd_minor_ida,
 				    1, 1 << MINORBITS,
