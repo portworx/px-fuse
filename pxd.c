@@ -53,12 +53,19 @@
 
 /** enables time tracing */
 //#define GD_TIME_LOG
+#ifdef GD_TIME_LOG
+#define KTIME_GET_TS(t) ktime_get_ts((t))
+#else
+#define KTIME_GET_TS(t)
+#endif
 
 #define pxd_printk(args...)
 //#define pxd_printk(args...) printk(KERN_ERR args)
 
 #define SECTOR_SIZE 512
 #define SEGMENT_SIZE (1024 * 1024)
+
+
 
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
@@ -161,9 +168,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 	pxd_update_stats(req, 0);
 
 	__blk_end_request(req->rq, 0, blk_rq_cur_bytes(req->rq));
-#ifdef GD_TIME_LOG
-	ktime_get_ts(&end);
-#endif
+	KTIME_GET_TS(&end);
 	trace_make_request_lat(READ, fc->reqctr, req->in.h.unique,
 		fc->num_background, &req->start, &end);
 }
@@ -177,9 +182,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 	pxd_update_stats(req, 1);
 
 	__blk_end_request(req->rq, 0, blk_rq_cur_bytes(req->rq));
-#ifdef GD_TIME_LOG
-	ktime_get_ts(&end);
-#endif
+	KTIME_GET_TS(&end);
 	trace_make_request_lat(WRITE, fc->reqctr, req->in.h.unique,
 		fc->num_background, &req->start, &end);
 }
@@ -218,9 +221,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_cur_bytes(rq),
 			rq->nr_phys_segments, rq->cmd_flags);
 
-#ifdef GD_TIME_LOG
-		ktime_get_ts(&start);
-#endif
+		KTIME_GET_TS(&start);
 		for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
 			req = fuse_get_req_for_background(&pxd_dev->ctx->fc, rq->nr_phys_segments);
 			if (!IS_ERR(req)) {
@@ -254,17 +255,16 @@ static void pxd_rq_fn(struct request_queue *q)
 		/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
 		pxd_dev->ctx->econn_backoff = 0;
 
-#ifdef GD_TIME_LOG
-		ktime_get_ts(&end);
-#endif
-		trace_make_request_wait(rq_data_dir(rq), pxd_dev->ctx->fc.reqctr, eintr,
-								req->in.h.unique, &start, &end);
+		KTIME_GET_TS(&end);
+		trace_make_request_wait(rq_data_dir(rq), 
+					pxd_dev->ctx->fc.reqctr, 
+					eintr,
+					req->in.h.unique, &start, 
+					&end);
 
 		switch (rq->cmd_flags & (REQ_WRITE | REQ_DISCARD)) {
 			case REQ_WRITE:
-#ifdef GD_TIME_LOG
-				ktime_get_ts(&req->start);
-#endif
+				KTIME_GET_TS(&req->start);
 				req->in.h.opcode = PXD_WRITE;
 				req->in.numargs = 2;
 				req->in.argpages = 1;
@@ -276,9 +276,7 @@ static void pxd_rq_fn(struct request_queue *q)
 				req->end = pxd_process_write_reply;
 				break;
 			case 0:
-#ifdef GD_TIME_LOG
-				ktime_get_ts(&req->start);
-#endif
+				KTIME_GET_TS(&req->start);
 				req->in.h.opcode = PXD_READ;
 				req->in.numargs = 1;
 				req->in.argpages = 0;
