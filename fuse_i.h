@@ -361,6 +361,9 @@ struct fuse_req {
 
 		/** Associated request structrure. */
 		struct request *rq;
+
+		/** Associated bio structrure. */
+ 		struct bio *bio;
 	};
 
 	/** Link on fi->writepages */
