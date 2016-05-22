@@ -59,8 +59,8 @@
 #define KTIME_GET_TS(t)
 #endif
 
-#define pxd_printk(args...)
-//#define pxd_printk(args...) printk(KERN_ERR args)
+//#define pxd_printk(args...)
+#define pxd_printk(args...) printk(KERN_ERR args)
 
 #define SECTOR_SIZE 512
 #define SEGMENT_SIZE (1024 * 1024)
@@ -147,13 +147,12 @@ static const struct block_device_operations pxd_bd_ops = {
 	.ioctl			= pxd_ioctl,
 };
 
-static void pxd_update_stats(struct fuse_req *req, int rw)
+static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 	int cpu = part_stat_lock();
 	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
-	part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw],
-			blk_rq_sectors(req->rq));
+	part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
 	part_stat_unlock();
 }
 
@@ -164,7 +163,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 			__func__, req, req->in.h.unique, 
 			req->misc.pxd_rdwr_in.offset, req->out.h.error);
 
-	pxd_update_stats(req, 0);
+	pxd_update_stats(req, 0, blk_rq_sectors(req->rq));
 	__blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	KTIME_GET_TS(&end);
 	trace_make_request_lat(READ, fc->reqctr, req->in.h.unique,
@@ -176,11 +175,112 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 	struct timespec end;
 	pxd_printk("%s: receive reply to %p(%lld) err %d\n", 
 			__func__, req, req->in.h.unique, req->out.h.error); 
-	pxd_update_stats(req, 1);
+	pxd_update_stats(req, 1, blk_rq_sectors(req->rq));
 	__blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	KTIME_GET_TS(&end);
 	trace_make_request_lat(WRITE, fc->reqctr, req->in.h.unique,
 		fc->num_background, &req->start, &end);
+}
+
+static struct fuse_req * pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
+{
+	int eintr, enotconn;
+	struct fuse_req * req = NULL;
+
+	for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
+		req = fuse_get_req_for_background(&pxd_dev->ctx->fc, nr_pages);
+		if (!IS_ERR(req)) {
+			break;
+		} 
+		if (PTR_ERR(req) == -EINTR) {
+			++eintr;
+			continue;
+		}
+		if ((PTR_ERR(req) == -ENOTCONN) && (enotconn < ECONN_MAX_BACKOFF)) {
+			printk(KERN_INFO "%s: request alloc (%d pages) "
+					"ENOTCONN retries %d\n",
+					__func__, nr_pages, enotconn);
+			schedule_timeout_interruptible(1 * HZ);
+			++enotconn;
+			continue;
+		}
+		break;
+	}
+	if (eintr > 0 || enotconn > 0) {
+		printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d"
+			"ENOTCONN retries %d\n", __func__, 
+			nr_pages, eintr, enotconn);
+	}
+	if (IS_ERR(req)) { 
+		pxd_dev->ctx->econn_backoff = enotconn;
+		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld "
+			"retries %d\n", __func__, 
+			nr_pages, PTR_ERR(req), enotconn);
+		return req;
+	}
+
+	/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
+	pxd_dev->ctx->econn_backoff = 0;
+	return req;
+}
+
+static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
+			uint32_t minor, uint32_t flags)
+{
+	req->in.h.pid = current->pid;
+	req->misc.pxd_rdwr_in.minor = minor;
+	req->misc.pxd_rdwr_in.offset = off;
+	req->misc.pxd_rdwr_in.size = size;
+	req->misc.pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
+				((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+				((flags & REQ_META) ? PXD_FLAGS_META : 0);
+}
+
+static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
+			uint32_t minor, uint32_t flags)
+{
+	req->in.h.opcode = PXD_READ;
+	req->in.numargs = 1;
+	req->in.argpages = 0;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
+	req->out.numargs = 1;
+	req->out.argpages = 1;
+	req->out.args[0].size = size;
+	req->out.args[0].value = NULL;
+	req->end = pxd_process_read_reply;
+
+	pxd_req_misc(req, size, off, minor, flags);
+}
+
+static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
+			uint32_t minor, uint32_t flags)
+{
+	req->in.h.opcode = PXD_WRITE;
+	req->in.numargs = 2;
+	req->in.argpages = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
+	req->in.args[1].size = size;
+	req->in.args[1].value = NULL;
+	req->out.numargs = 0;
+	req->end = pxd_process_write_reply;
+
+	pxd_req_misc(req, size, off, minor, flags);
+}
+
+static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
+			uint32_t minor, uint32_t flags)
+{
+	req->in.h.opcode = PXD_DISCARD;
+	req->in.numargs = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
+	req->in.argpages = 0;
+	req->out.numargs = 0;
+	req->end = pxd_process_write_reply;
+
+	pxd_req_misc(req, size, off, minor, flags);
 }
 
 static void pxd_rq_fn(struct request_queue *q)
@@ -193,10 +293,9 @@ static void pxd_rq_fn(struct request_queue *q)
 #else
 	struct bio_vec *bvec = NULL;
 #endif
-	int i, eintr, enotconn;
+	int i, nr_pages;
 	struct timespec start, end;
 	uint32_t crc = 0; 
-	int nr_pages;
 
 	for (;;) {
 		struct request *rq;
@@ -226,95 +325,36 @@ static void pxd_rq_fn(struct request_queue *q)
 				nr_pages++;
 			}
 		}
-		for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
-			req = fuse_get_req_for_background(&pxd_dev->ctx->fc, nr_pages);
-			if (!IS_ERR(req)) {
-				break;
-			} 
-			if (PTR_ERR(req) == -EINTR) {
-				++eintr;
-				continue;
-			}
-			if ((PTR_ERR(req) == -ENOTCONN) && (enotconn < ECONN_MAX_BACKOFF)) {
-				printk(KERN_INFO "%s: request alloc (%d pages) "
-					"ENOTCONN retries %d\n",
-					__func__, nr_pages, enotconn);
-				schedule_timeout_interruptible(1 * HZ);
-				++enotconn;
-				continue;
-			}
-			break;
-		}
-		if (eintr > 0 || enotconn > 0) {
-			printk(KERN_INFO "%s: request alloc (%d pages) "
-			"EINTR %d ENOTCONN %d\n",
-			__func__, nr_pages, eintr, enotconn);
-		}
+		req = pxd_fuse_req(pxd_dev, nr_pages);
 		if (IS_ERR(req)) { 
-			pxd_dev->ctx->econn_backoff = enotconn;
-			printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld "
-					"retries %d\n", __func__, 
-					nr_pages, PTR_ERR(req), enotconn);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
 		}
 
-		/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
-		pxd_dev->ctx->econn_backoff = 0;
-
 		KTIME_GET_TS(&end);
-		trace_make_request_wait(rq_data_dir(rq), 
-					pxd_dev->ctx->fc.reqctr, 
-					eintr,
-					req->in.h.unique, &start, 
-					&end);
+		trace_make_request_wait(rq_data_dir(rq), pxd_dev->ctx->fc.reqctr, 
+					0, req->in.h.unique, &start, &end);
 
 		switch (rq->cmd_flags & (REQ_WRITE | REQ_DISCARD)) {
 		case REQ_WRITE:
-			KTIME_GET_TS(&req->start);
-			req->in.h.opcode = PXD_WRITE;
-			req->in.numargs = 2;
-			req->in.argpages = 1;
-			req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-			req->in.args[0].value = &req->misc.pxd_rdwr_in;
-			req->in.args[1].size = blk_rq_bytes(rq);
-			req->in.args[1].value = NULL;
-			req->out.numargs = 0;
-			req->end = pxd_process_write_reply;
+			pxd_write_request(req, blk_rq_bytes(rq), 
+				blk_rq_pos(rq) * SECTOR_SIZE,
+				pxd_dev->minor, rq->cmd_flags);
 			break;
 		case 0:
-			KTIME_GET_TS(&req->start);
-			req->in.h.opcode = PXD_READ;
-			req->in.numargs = 1;
-			req->in.argpages = 0;
-			req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-			req->in.args[0].value = &req->misc.pxd_rdwr_in;
-			req->out.numargs = 1;
-			req->out.argpages = 1;
-			req->out.args[0].size = blk_rq_bytes(rq);
-			req->out.args[0].value = NULL;
-			req->end = pxd_process_read_reply;
+			pxd_read_request(req, blk_rq_bytes(rq), 
+				blk_rq_pos(rq) * SECTOR_SIZE,
+				pxd_dev->minor, rq->cmd_flags);
 			break;
 		case REQ_DISCARD:
+			/* FALLTHROUGH */
 		case REQ_WRITE | REQ_DISCARD:
-			req->in.h.opcode = PXD_DISCARD;
-			req->in.numargs = 1;
-			req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-			req->in.args[0].value = &req->misc.pxd_rdwr_in;
-			req->in.argpages = 0;
-			req->out.numargs = 0;
-			req->end = pxd_process_write_reply;
+			pxd_discard_request(req, blk_rq_bytes(rq), 
+				blk_rq_pos(rq) * SECTOR_SIZE,
+				pxd_dev->minor, rq->cmd_flags);
 			break;
 		}
 
-		req->in.h.pid = current->pid;
-		req->misc.pxd_rdwr_in.flags =
-				((rq->cmd_flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
-				((rq->cmd_flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
-				((rq->cmd_flags & REQ_META) ? PXD_FLAGS_META : 0);
-		req->misc.pxd_rdwr_in.minor = pxd_dev->minor;
-		req->misc.pxd_rdwr_in.offset = blk_rq_pos(rq) * SECTOR_SIZE;
-		req->misc.pxd_rdwr_in.size = blk_rq_bytes(rq);
 		req->num_pages = nr_pages;
 		if (rq->nr_phys_segments) {
 			i = 0;
@@ -329,10 +369,8 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->misc.pxd_rdwr_in.chksum = crc;
 		req->rq = rq;
 		req->queue = q;
-
 		fuse_request_send_background(&pxd_dev->ctx->fc, req);
 	}
-	return;
 }
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
@@ -708,7 +746,8 @@ static void pxd_fill_init(struct fuse_conn *fc, struct fuse_req *req,
 static void pxd_process_init_reply(struct fuse_conn *fc,
 		struct fuse_req *req)
 {
-	pxd_printk("%s: req %p err %d len %d un %lld\n", __func__, req, req->out.h.error,
+	pxd_printk("%s: req %p err %d len %d un %lld\n", 
+		__func__, req, req->out.h.error,
 		req->out.h.len, req->out.h.unique);
 
 	BUG_ON(fc->pend_open != 1);
