@@ -1975,7 +1975,6 @@ const struct file_operations fuse_dev_operations = {
 const struct file_operations fuse_dev_operations = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
-	.read		= __vfs_read,
 	.read_iter	= fuse_dev_read_iter,
 	.splice_read	= fuse_dev_splice_read,
 	.write_iter	= fuse_dev_write_iter,
