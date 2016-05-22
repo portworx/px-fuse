@@ -13,10 +13,10 @@
 /// @file px_fuse/pxd.h
 
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
-#define PXD_DEV  		"pxd/pxd"				/**< block device prefix */
+#define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 1		/**< driver version */
+#define PXD_VERSION 2		/**< driver version */
 
 #define PXD_MAX_DEVICES 1024	/**< maximum number of devices supported */
 #define PXD_MAX_IO (1024*1024)	/**< maximum io size in bytes */
@@ -47,13 +47,14 @@ enum pxd_opcode {
 
 /** Device identification passed from kernel on initialization */
 struct pxd_dev_id {
-	uint32_t local_minor; /**< minor number assigned by kernel */
+	uint32_t local_minor; 	/**< minor number assigned by kernel */
 	uint32_t pad;
 	uint64_t dev_id;	/**< global device id */
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
 
-/** PXD_INIT message passed from kernel.
+/** 
+ * PXD_INIT message passed from kernel.
  *
  * Includes array of registered pxd devices in the end of the message.
  */
@@ -76,6 +77,7 @@ struct pxd_init_out {
 struct pxd_add_out {
 	uint64_t dev_id;	/**< device global id */
 	size_t size;		/**< block device size in bytes */
+	int queue_depth;	/**< use queue depth 0 to bypass queueing. */
 };
 
 /**

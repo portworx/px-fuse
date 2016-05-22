@@ -359,7 +359,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		goto out_disk;
 
 	/* Switch queue to TCQ mode; allocate tag map. */
-	rc = BLK_QUEUE_INIT_TAGS(q, 32);
+	rc = BLK_QUEUE_INIT_TAGS(q, add->queue_depth);
 	if (rc) {
 		blk_cleanup_queue(q);
 		goto out_disk;
