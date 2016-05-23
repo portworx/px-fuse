@@ -59,8 +59,8 @@
 #define KTIME_GET_TS(t)
 #endif
 
-//#define pxd_printk(args...)
-#define pxd_printk(args...) printk(KERN_ERR args)
+#define pxd_printk(args...)
+//#define pxd_printk(args...) printk(KERN_ERR args)
 
 #define SECTOR_SIZE 512
 #define SEGMENT_SIZE (1024 * 1024)
