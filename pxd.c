@@ -147,6 +147,11 @@ static const struct block_device_operations pxd_bd_ops = {
 	.ioctl			= pxd_ioctl,
 };
 
+static int pxd_rq_congested(struct request_queue *q, unsigned long threshold)
+{
+	return ((q->in_flight[0] + q->in_flight[1]) >= threshold);
+}
+
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
@@ -190,9 +195,20 @@ static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
+	unsigned long flags;
+	struct pxd_device *pxd_dev = req->queue->queuedata;
+
 	pxd_update_stats(req, 1, blk_rq_sectors(req->rq));
 	__blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	pxd_request_complete(fc, req);
+
+	if (!pxd_rq_congested(req->queue, req->queue->nr_requests)) {
+		spin_lock_irqsave(&pxd_dev->qlock, flags);
+		if (blk_queue_stopped(req->queue)) {
+			blk_start_queue(req->queue);
+		}
+		spin_unlock_irqrestore(&pxd_dev->qlock, flags);
+	}
 }
 
 static struct fuse_req * pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
@@ -399,11 +415,19 @@ static void pxd_rq_fn(struct request_queue *q)
 		if (!rq)
 			break;
 
+		if (pxd_rq_congested(q, q->nr_requests)) {
+			/* request_fn is called with qlock held */
+			assert_spin_locked(&pxd_dev->qlock);
+			blk_requeue_request(q, rq);
+			blk_stop_queue(q);
+			return;
+		}
+
 		/* Filter out block requests we don't understand. */
-                if (rq->cmd_type != REQ_TYPE_FS) {
-                        blk_end_request_all(rq, 0);
-                        continue;
-                }
+		if (rq->cmd_type != REQ_TYPE_FS) {
+				blk_end_request_all(rq, 0);
+				continue;
+		}
 		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags  %llx\n", __func__, 
 			pxd_dev->minor, pxd_dev->dev_id,
@@ -513,6 +537,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
+	spin_lock_init(q->queue_lock);
 
 	return 0;
 out_disk:
