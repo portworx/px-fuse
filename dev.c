@@ -25,7 +25,7 @@
 
 /** Maximum number of outstanding background requests */
 //#define FUSE_DEFAULT_MAX_BACKGROUND 12
-#define FUSE_DEFAULT_MAX_BACKGROUND 1024
+#define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
 
 
 /** Congestion starts at 75% of maximum */

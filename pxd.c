@@ -534,6 +534,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		blk_queue_prep_rq(q, blk_queue_start_tag);
 	}
 
+	q->nr_requests = PXD_MAX_QDEPTH;
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
