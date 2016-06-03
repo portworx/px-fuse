@@ -188,9 +188,20 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
+	unsigned long flags;
+	struct pxd_device *pxd_dev = req->queue->queuedata;
+
 	pxd_update_stats(req, 0, blk_rq_sectors(req->rq));
 	__blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	pxd_request_complete(fc, req);
+
+	if (!pxd_rq_congested(req->queue, req->queue->nr_requests)) {
+		spin_lock_irqsave(&pxd_dev->qlock, flags);
+		if (blk_queue_stopped(req->queue)) {
+			blk_start_queue(req->queue);
+		}
+		spin_unlock_irqrestore(&pxd_dev->qlock, flags);
+	}
 }
 
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
