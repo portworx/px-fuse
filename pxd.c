@@ -192,7 +192,7 @@ static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 
 	pxd_update_stats(req, 0, blk_rq_sectors(req->rq));
-	__blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	pxd_request_complete(fc, req);
 
 	if (!pxd_rq_congested(req->queue, req->queue->nr_requests)) {
@@ -210,7 +210,7 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 
 	pxd_update_stats(req, 1, blk_rq_sectors(req->rq));
-	__blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	pxd_request_complete(fc, req);
 
 	if (!pxd_rq_congested(req->queue, req->queue->nr_requests)) {
@@ -566,9 +566,9 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
-		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
+		del_gendisk(disk);
 	}
 	put_disk(disk);
 }
