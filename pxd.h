@@ -18,9 +18,9 @@
 
 #define PXD_VERSION 2		/**< driver version */
 
-#define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
+#define PXD_MAX_DEVICES	256			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
-#define PXD_MAX_QDEPTH  128         /**< maximum device queue depth */
+#define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
 /** fuse opcodes */
 enum pxd_opcode {
