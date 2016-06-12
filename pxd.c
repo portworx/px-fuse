@@ -81,10 +81,12 @@ struct pxd_context {
 	bool init_sent;
 #define ECONN_MAX_BACKOFF 120
 	int econn_backoff;
+	ktime_t fc_disc_time;
 };
 
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = 10;
+static struct timer_list pxd_timer;
 
 module_param(pxd_num_contexts, uint, 0644);
 
@@ -969,6 +971,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	if (rc)
 		return rc;
 
+	ctx->fc_disc_time = ktime_set(0, 0);
 	printk(KERN_INFO "%s: open OK\n", __func__);
 	return 0;
 }
@@ -978,6 +981,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;
 	ctx = container_of(file->f_op, struct pxd_context, fops);
+	ctx->fc_disc_time = ktime_get();
 	if (ctx->fc.connected == 0)
 		pxd_printk("%s: not opened\n", __func__);
 	else
@@ -1002,6 +1006,7 @@ void pxd_context_init(struct pxd_context *ctx, int i)
 	fuse_conn_init(&ctx->fc);
 	ctx->id = i;
 	ctx->fc.release = pxd_fuse_conn_release;
+	ctx->fc.allow_disconnected = 0;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
@@ -1013,6 +1018,48 @@ void pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.fops = &ctx->fops;
 	ctx->econn_backoff = 0;
 	INIT_LIST_HEAD(&ctx->pending_requests);
+}
+
+void pxd_timer_fn(unsigned long args)
+{
+	struct pxd_context *ctx = (struct pxd_context *)args;
+	struct pxd_device *pxd_dev = NULL;
+	struct request_queue *q = NULL;
+	ktime_t now = ktime_get();
+	ktime_t zero = ktime_set(0, 0);
+	int secs_disconnected = 0;
+
+	if (!ktime_equal(zero, ctx[1].fc_disc_time)) {
+		pxd_printk(KERN_INFO "%s: FC disc time: %llu secs\n", __func__,
+			(ktime_to_ms(ktime_sub(now, ctx[1].fc_disc_time)) / 1000));
+		secs_disconnected = ktime_to_ms(ktime_sub(now, ctx[1].fc_disc_time)) / 1000;
+	}
+
+	spin_lock(&ctx[1].lock);
+	list_for_each_entry(pxd_dev, &ctx[1].list, node) {
+		q = pxd_dev->disk->queue;
+		if (q->nr_requests > 0 && secs_disconnected > 60) {
+			for (;;) {
+				struct request *rq = NULL;
+
+				rq = blk_peek_request(q);
+				if (!rq)
+					break;
+
+				pxd_printk(KERN_INFO "%s: End req for Dev: %llu\n",
+					__func__, pxd_dev->dev_id);
+				blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+			}
+			pxd_printk(KERN_INFO "%s: Abort all fuse requests for Dev: %llu\n",
+				__func__, pxd_dev->dev_id);
+			ctx[1].fc.connected = true;
+			fuse_abort_conn(&ctx[1].fc);
+		}
+	}
+	spin_unlock(&ctx[1].lock);
+
+	//set timeout again
+	//mod_timer(&pxd_timer, jiffies + (60 * HZ));
 }
 
 int pxd_init(void)
@@ -1055,6 +1102,8 @@ int pxd_init(void)
 	if (err)
 		goto out_blkdev;
 
+	setup_timer(&pxd_timer, pxd_timer_fn, (unsigned long)pxd_contexts);
+	mod_timer(&pxd_timer, jiffies + (60 * HZ));
 	printk(KERN_INFO "pxd driver loaded\n");
 
 	return 0;
@@ -1091,6 +1140,9 @@ void pxd_exit(void)
 	fuse_dev_cleanup();
 
 	kfree(pxd_contexts);
+
+  /* remove kernel timer when unloading module */
+  del_timer(&pxd_timer);
 
 	printk(KERN_INFO "pxd driver unloaded\n");
 }

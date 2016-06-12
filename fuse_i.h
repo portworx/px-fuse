@@ -619,6 +619,9 @@ struct fuse_conn {
 
 	/** Read/write semaphore to hold when accessing sb. */
 	struct rw_semaphore killsb;
+
+	/* Alow operations on disconnected fuse conenction. */
+	int allow_disconnected;	
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
