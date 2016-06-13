@@ -81,6 +81,7 @@ struct pxd_context {
 	bool init_sent;
 #define ECONN_MAX_BACKOFF 120
 	int econn_backoff;
+#define PXD_TIMER_SECS	600
 	ktime_t fc_disc_time;
 };
 
@@ -1025,41 +1026,47 @@ void pxd_timer_fn(unsigned long args)
 	struct pxd_context *ctx = (struct pxd_context *)args;
 	struct pxd_device *pxd_dev = NULL;
 	struct request_queue *q = NULL;
+	struct request *rq = NULL;
 	ktime_t now = ktime_get();
 	ktime_t zero = ktime_set(0, 0);
 	int secs_disconnected = 0;
+	int i = 0;
 
-	if (!ktime_equal(zero, ctx[1].fc_disc_time)) {
-		pxd_printk(KERN_INFO "%s: FC disc time: %llu secs\n", __func__,
-			(ktime_to_ms(ktime_sub(now, ctx[1].fc_disc_time)) / 1000));
-		secs_disconnected = ktime_to_ms(ktime_sub(now, ctx[1].fc_disc_time)) / 1000;
-	}
-
-	spin_lock(&ctx[1].lock);
-	list_for_each_entry(pxd_dev, &ctx[1].list, node) {
-		q = pxd_dev->disk->queue;
-		if (q->nr_requests > 0 && secs_disconnected > 60) {
-			for (;;) {
-				struct request *rq = NULL;
-
-				rq = blk_peek_request(q);
-				if (!rq)
-					break;
-
-				pxd_printk(KERN_INFO "%s: End req for Dev: %llu\n",
-					__func__, pxd_dev->dev_id);
-				blk_end_request(rq, -EIO, blk_rq_bytes(rq));
-			}
-			pxd_printk(KERN_INFO "%s: Abort all fuse requests for Dev: %llu\n",
-				__func__, pxd_dev->dev_id);
-			ctx[1].fc.connected = true;
-			fuse_abort_conn(&ctx[1].fc);
+	for (i = 0; i < pxd_num_contexts; ++i) {
+		if (!ktime_equal(zero, ctx[i].fc_disc_time)) {
+			secs_disconnected = ktime_to_ms(ktime_sub(now, ctx[i].fc_disc_time));
+			secs_disconnected /= 1000;
 		}
+		spin_lock(&ctx[i].lock);
+		list_for_each_entry(pxd_dev, &ctx[i].list, node) {
+			q = pxd_dev->disk->queue;
+
+			/*
+			 * If fuse channel has been down for more than PXD_TIMER_SECS,
+			 * abort all current requests - ones which have already been
+			 * dispatched or are sitting in the request q. 
+			 */
+			if (q->nr_requests > 0 && secs_disconnected > PXD_TIMER_SECS) {
+				for (;;) {
+					rq = blk_peek_request(q);
+					if (!rq)
+						break;
+
+					printk(KERN_ERR "%s: End req for Dev: %llu\n",
+						__func__, pxd_dev->dev_id);
+					blk_end_request_all(rq, -EIO);
+				}
+				printk(KERN_ERR "%s: Abort all fuse requests for Dev: %llu\n",
+					__func__, pxd_dev->dev_id);
+				ctx[i].fc.connected = true;
+				fuse_abort_conn(&ctx[i].fc);
+			}
+		}
+		spin_unlock(&ctx[i].lock);
 	}
-	spin_unlock(&ctx[1].lock);
 
 	//set timeout again
-	//mod_timer(&pxd_timer, jiffies + (60 * HZ));
+	//mod_timer(&pxd_timer, jiffies + (PXD_TIMER_SECS * HZ));
 }
 
 int pxd_init(void)
@@ -1103,7 +1110,7 @@ int pxd_init(void)
 		goto out_blkdev;
 
 	setup_timer(&pxd_timer, pxd_timer_fn, (unsigned long)pxd_contexts);
-	mod_timer(&pxd_timer, jiffies + (60 * HZ));
+	mod_timer(&pxd_timer, jiffies + (PXD_TIMER_SECS * HZ));
 	printk(KERN_INFO "pxd driver loaded\n");
 
 	return 0;
