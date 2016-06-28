@@ -472,8 +472,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	//XXX: Hardcoded for testing
-	add->queue_depth = 256;
 	/* Bypass queue if queue_depth is zero. */
 	if (add->queue_depth == 0) {
 		q = blk_alloc_queue(GFP_KERNEL);
