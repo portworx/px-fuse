@@ -459,6 +459,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	struct request_queue *q;
 	int rc;
 
+#define PXD_MAX_QUEUE_DEPTH	1024
+	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QUEUE_DEPTH)
+		return -EINVAL;
+
 	/* Create gendisk info. */
 	disk = alloc_disk(1);
 	if (!disk)
