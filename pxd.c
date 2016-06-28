@@ -1021,6 +1021,10 @@ void pxd_timer_fn(unsigned long args)
 						__func__, pxd_dev->dev_id);
 					blk_end_request_all(rq, -EIO);
 				}
+				printk(KERN_ERR "%s: conn: %d nb: %d mb: %d ct: %d blocked: %d\n",
+					__func__, ctx[i].fc.connected, ctx[i].fc.num_background,
+					 ctx[i].fc.max_background, ctx[i].fc.congestion_threshold,
+					ctx[i].fc.blocked);
 				printk(KERN_ERR "%s: Abort all fuse requests for Dev: %llu\n",
 					__func__, pxd_dev->dev_id);
 				ctx[i].fc.connected = true;
@@ -1031,7 +1035,7 @@ void pxd_timer_fn(unsigned long args)
 	}
 
 	//set timeout again
-	//mod_timer(&pxd_timer, jiffies + (PXD_TIMER_SECS * HZ));
+	mod_timer(&pxd_timer, jiffies + (PXD_TIMER_SECS * HZ));
 }
 
 int pxd_init(void)
