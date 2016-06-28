@@ -976,7 +976,7 @@ void pxd_context_init(struct pxd_context *ctx, int i)
 	fuse_conn_init(&ctx->fc);
 	ctx->id = i;
 	ctx->fc.release = pxd_fuse_conn_release;
-	ctx->fc.allow_disconnected = 1;
+	ctx->fc.allow_disconnected = 0;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
@@ -1039,7 +1039,7 @@ void pxd_timer_fn(unsigned long args)
 	}
 
 	//set timeout again
-	mod_timer(&pxd_timer, jiffies + (PXD_TIMER_SECS * HZ));
+	//mod_timer(&pxd_timer, jiffies + (PXD_TIMER_SECS * HZ));
 }
 
 int pxd_init(void)
