@@ -179,7 +179,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 	pxd_request_complete(fc, req);
 }
