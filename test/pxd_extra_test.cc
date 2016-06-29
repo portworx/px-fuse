@@ -14,6 +14,7 @@
 #include <sys/ioctl.h>
 #include <thread>
 #include <vector>
+#include <atomic>
 
 using namespace std::placeholders;
 
@@ -113,8 +114,9 @@ protected:
 	int fd;		// control file descriptor
 	std::set<uint64_t> added_ids;
 	const size_t write_len = 4096;
+	std::atomic<uint64_t> wr_thr_cnt;
 
-	GddTestWithControl() : fd(-1) {}
+	GddTestWithControl() : fd(-1), wr_thr_cnt(0) {}
 	virtual ~GddTestWithControl() {
 		if (fd >= 0)
 			close(fd);
@@ -130,7 +132,7 @@ protected:
 	void read_pattern(fuse_in_header *in, pxd_rdwr_in *rd);
 	void read_all_zeroes(int timeout);
 public:
-	void write_thread(const char *name, off_t offset);
+	void write_thread(const char *name);
 	void read_thread(const char *name);
 };
 
@@ -290,14 +292,51 @@ void GddTestWithControl::read_all_zeroes(int timeout)
 	}
 }
 
-void GddTestWithControl::write_thread(const char *name, off_t offset)
+void GddTestWithControl::write_thread(const char *name)
 {
-	std::vector<uint64_t> v(make_pattern(write_len));
-	boost::iostreams::file_descriptor dev_fd(name);
+	for (int i = 0; i < 1000000; i++) {
+		off_t offset = rand() % (512 * 1024);
+		size_t sz = rand() % (16 * 1024);
 
-	ASSERT_EQ(offset, lseek(dev_fd.handle(), offset, SEEK_SET));
-	ssize_t write_bytes = write(dev_fd.handle(), v.data(), write_len);
-	ASSERT_EQ(write_bytes, write_len);
+		if (sz <= 16) {
+			sz = 100;
+		}
+
+		std::vector<uint64_t> v(make_pattern(sz));
+		boost::iostreams::file_descriptor dev_fd(name);
+
+		offset = 8192 + (offset & ~4095);
+
+		fprintf(stderr, "\n\n\nITTR %d Starting IO at offset %lu with size %lu\n", i, offset, sz);
+
+		ASSERT_EQ(offset, lseek(dev_fd.handle(), offset, SEEK_SET));
+		ssize_t write_bytes = write(dev_fd.handle(), v.data(), sz);
+		if (write_bytes == -1) {
+			perror("write_thread");
+		}
+		ASSERT_EQ(write_bytes, sz);
+
+		ASSERT_EQ(offset - 8192, lseek(dev_fd.handle(), offset - 8192, SEEK_SET));
+		write_bytes = write(dev_fd.handle(), v.data(), sz);
+		if (write_bytes == -1) {
+			perror("write_thread");
+		}
+
+		ASSERT_TRUE(write_bytes == (int)sz || errno == EINTR);
+
+		ASSERT_EQ(offset + 8192, lseek(dev_fd.handle(), offset + 8192, SEEK_SET));
+		write_bytes = write(dev_fd.handle(), v.data(), sz);
+		if (write_bytes == -1) {
+			perror("write_thread");
+		}
+		ASSERT_EQ(write_bytes, sz);
+
+		fprintf(stderr, "Wrote %lu bytes at %lu\n", sz, offset);
+	}
+
+	uint64_t th = wr_thr_cnt;
+	fprintf(stderr, "THREAD %lu exiting\n", th);
+	wr_thr_cnt++;
 }
 
 void GddTestWithControl::read_thread(const char *name)
@@ -355,6 +394,7 @@ TEST_F(GddTestWithControl, device_size)
 
 	add.dev_id = 1;
 	add.size = target_dev_size;
+	add.queue_depth = 0;
 	dev_add(add, minor, name);
 
 	boost::iostreams::file_descriptor dev_fd(name);
@@ -370,27 +410,49 @@ TEST_F(GddTestWithControl, read_write)
 	pxd_add_out add;
 	std::string name;
 	int minor;
-	char msg_buf[write_len * 2];
+	char msg_buf[write_len * 8 * 2];
 	fuse_in_header *in;
 	ssize_t read_bytes;
 
 	add.dev_id = 1;
 	add.size = 1024 * 1024;
+	add.queue_depth = 256;
 	dev_add(add, minor, name);
 
-	for (int i = 0; i < 1000000; i++) {
-		off_t offset = (rand() % 512 * 1024);
-		offset = (offset & ~4095);
+	std::thread writer1(&GddTestWithControl::write_thread, this, name.c_str());
+	std::thread writer2(&GddTestWithControl::write_thread, this, name.c_str());
+	std::thread writer3(&GddTestWithControl::write_thread, this, name.c_str());
 
-		fprintf(stderr, "Starting IO at offset %lu\n", offset);
-
-		std::thread wt(&GddTestWithControl::write_thread, this, name.c_str(), offset);
-
+	do {
 		while (1) {
-			int ret = wait_msg(1);
-			ASSERT_EQ(0, ret);
+			fd_set set;
+			struct timeval timeout;
+			int rv;
+
+			FD_ZERO(&set); /* clear the set */
+			FD_SET(fd, &set); /* add our file descriptor to the set */
+
+			timeout.tv_sec = 10;
+			timeout.tv_usec = 0;
+
+			rv = select(fd + 1, &set, NULL, NULL, &timeout);
+			if (rv == -1) {
+    			perror("select"); /* an error accured */
+			} else if(rv == 0) {
+    			perror("timeout"); /* a timeout occured */
+			}
+
+			ASSERT_GE(1, rv);
+
+			if (wr_thr_cnt == 3) {
+				goto done;
+			}
 
 			read_bytes = read(fd, msg_buf, sizeof(msg_buf));
+			if (read_bytes == -1) {
+				perror("read_thread");
+			}
+
 			in = reinterpret_cast<fuse_in_header *>(msg_buf);
 			if (in->opcode == PXD_READ) {
 				read_zeroes(in, reinterpret_cast<pxd_rdwr_in *>(in + 1));
@@ -399,18 +461,12 @@ TEST_F(GddTestWithControl, read_write)
 			}
 		}
 
-		fprintf(stderr, "Got data at IO at offset %lu\n", offset);
-
 		pxd_rdwr_in *wr = reinterpret_cast<pxd_rdwr_in *>(in + 1);
 
 		ASSERT_EQ(in->opcode, PXD_WRITE);
 		ASSERT_EQ(wr->minor, minor);
-		ASSERT_EQ(wr->offset, offset);
-		ASSERT_EQ(wr->size, write_len);
-		ASSERT_EQ(sizeof(fuse_in_header) + sizeof(pxd_rdwr_in) + write_len,
-				read_bytes);
 
-		// ASSERT_TRUE(verify_pattern(wr + 1, write_len));
+		fprintf(stderr, "Got %d bytes at offset %lu\n", wr->size, wr->offset);
 
 		fuse_out_header oh;
 		oh.unique = in->unique;
@@ -418,10 +474,12 @@ TEST_F(GddTestWithControl, read_write)
 		oh.len = sizeof(oh);
 		ssize_t write_bytes = write(fd, &oh, sizeof(oh));
 		ASSERT_EQ(sizeof(oh), write_bytes);
+	} while (1);
 
-		fprintf(stderr, "Waiting for thread to join at offset %lu\n", offset);
-		wt.join();
-	}
+done:
+	writer1.join();
+	writer2.join();
+	writer3.join();
 
 	std::thread rt(&GddTestWithControl::read_thread, this, name.c_str());
 
