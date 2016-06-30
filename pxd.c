@@ -429,6 +429,7 @@ static void pxd_rq_fn(struct request_queue *q)
 				blk_end_request_all(rq, 0);
 				continue;
 		}
+		spin_unlock_irq(&pxd_dev->qlock);
 		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags  %llx\n", __func__, 
 			pxd_dev->minor, pxd_dev->dev_id,
@@ -446,6 +447,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 		req = pxd_fuse_req(pxd_dev, nr_pages);
 		if (IS_ERR(req)) { 
+  			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
 		}
@@ -472,6 +474,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->rq = rq;
 		req->queue = q;
 		fuse_request_send_background(&pxd_dev->ctx->fc, req);
+		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
 
