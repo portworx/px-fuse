@@ -140,6 +140,28 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
+	struct pxd_context *ctx = NULL;
+	int i = 0;
+
+	switch (cmd) {
+	case PXD_IOC_DUMP_FC_INFO:
+		for (i = 0; i < pxd_num_contexts; ++i) {
+			ctx = &pxd_contexts[i];
+			if (!ctx || ctx->num_devices == 0) {
+				continue;
+			}
+			printk(KERN_INFO "%s: pxd_ctx: %s ndevices: %lu",
+				__func__, ctx->name, ctx->num_devices);
+			printk(KERN_INFO "\tFC: connected: %d blocked: %d "
+				"max: %d threshold: %d nb: %d ab: %d", ctx->fc.connected,
+				ctx->fc.blocked, ctx->fc.max_background,
+				ctx->fc.congestion_threshold, ctx->fc.num_background,
+				ctx->fc.active_background);
+		}
+		return 0;
+	default:
+		break;
+	}
 	return -ENOTTY;
 }
 
@@ -1121,8 +1143,8 @@ void pxd_exit(void)
 
 	kfree(pxd_contexts);
 
-  /* remove kernel timer when unloading module */
-  del_timer(&pxd_timer);
+	/* remove kernel timer when unloading module */
+	del_timer(&pxd_timer);
 
 	printk(KERN_INFO "pxd driver unloaded\n");
 }

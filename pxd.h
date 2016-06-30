@@ -18,6 +18,9 @@
 
 #define PXD_VERSION 2		/**< driver version */
 
+#define PXD_IOCTL_MAGIC			(('P' << 8) | 'X')
+#define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
+
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
