@@ -482,7 +482,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	int rc;
 
 #define PXD_MAX_QUEUE_DEPTH	1024
-	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QUEUE_DEPTH)
+	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
 		return -EINVAL;
 
 	/* Create gendisk info. */
@@ -540,7 +540,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	}
 
 	q->nr_requests = add->queue_depth;
-	printk(KERN_ERR "%s: queue depth set to: %d\n", __func__, add->queue_depth);
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;

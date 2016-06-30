@@ -24,12 +24,7 @@
 #include <linux/version.h>
 
 /** Maximum number of outstanding background requests */
-//#define FUSE_DEFAULT_MAX_BACKGROUND 12
-#define FUSE_DEFAULT_MAX_BACKGROUND 1024
-
-/* TODO: For use with the new device q */
-//#define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
-
+#define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
 
 /** Congestion starts at 75% of maximum */
 #define FUSE_DEFAULT_CONGESTION_THRESHOLD (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
