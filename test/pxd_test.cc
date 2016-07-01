@@ -353,6 +353,7 @@ TEST_F(GddTestWithControl, device_size)
 
 	add.dev_id = 1;
 	add.size = target_dev_size;
+	add.queue_depth = 0;
 	dev_add(add, minor, name);
 
 	boost::iostreams::file_descriptor dev_fd(name);
@@ -374,6 +375,7 @@ TEST_F(GddTestWithControl, read_write)
 
 	add.dev_id = 1;
 	add.size = 1024 * 1024;
+	add.queue_depth = 256;
 	dev_add(add, minor, name);
 
 	std::thread wt(&GddTestWithControl::write_thread, this, name.c_str());
