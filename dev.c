@@ -23,6 +23,14 @@
 #include <linux/random.h>
 #include <linux/version.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
+#define PAGE_CACHE_GET(page) get_page(page)
+#define PAGE_CACHE_RELEASE(page) put_page(page)
+#else
+#define PAGE_CACHE_GET(page) page_cache_get(page)
+#define PAGE_CACHE_RELEASE(page) page_cache_release(page)
+#endif
+
 /** Maximum number of outstanding background requests */
 #define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
 
@@ -847,7 +855,7 @@ static int fuse_try_move_page(struct fuse_copy_state *cs, struct page **pagep)
 		return err;
 	}
 
-	page_cache_get(newpage);
+	PAGE_CACHE_GET(newpage);
 
 	if (!(buf->flags & PIPE_BUF_FLAG_LRU))
 		lru_cache_add_file(newpage);
@@ -862,12 +870,12 @@ static int fuse_try_move_page(struct fuse_copy_state *cs, struct page **pagep)
 
 	if (err) {
 		unlock_page(newpage);
-		page_cache_release(newpage);
+		PAGE_CACHE_RELEASE(newpage);
 		return err;
 	}
 
 	unlock_page(oldpage);
-	page_cache_release(oldpage);
+	PAGE_CACHE_RELEASE(oldpage);
 	cs->len = 0;
 
 	return 0;
@@ -897,7 +905,7 @@ static int fuse_ref_page(struct fuse_copy_state *cs, struct page *page,
 	fuse_copy_finish(cs);
 
 	buf = cs->pipebufs;
-	page_cache_get(page);
+	PAGE_CACHE_GET(page);
 	buf->page = page;
 	buf->offset = offset;
 	buf->len = count;
@@ -1242,6 +1250,8 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	reqsize = in->h.len;
 	/* If request is too large, reply with an error and restart the read */
 	if (nbytes < reqsize) {
+		printk("%s request is too large (%u), buffer size (%lu)",
+			__func__, reqsize, nbytes);
 		req->out.h.error = -EIO;
 		/* SETXATTR is special, since it may contain too large data */
 		if (in->h.opcode == FUSE_SETXATTR)
@@ -1407,7 +1417,7 @@ out_unlock:
 
 out:
 	for (; page_nr < cs.nr_segs; page_nr++)
-		page_cache_release(bufs[page_nr].page);
+		PAGE_CACHE_RELEASE(bufs[page_nr].page);
 
 	kfree(bufs);
 	return ret;
