@@ -82,8 +82,6 @@ struct pxd_context {
 	struct list_head pending_requests;
 	struct timer_list timer;
 	bool init_sent;
-#define ECONN_MAX_BACKOFF 120
-	int econn_backoff;
 };
 
 struct pxd_context *pxd_contexts;
@@ -222,10 +220,10 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 
 static struct fuse_req * pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 {
-	int eintr, enotconn;
+	int eintr;
 	struct fuse_req * req = NULL;
 
-	for (eintr = 0, enotconn = pxd_dev->ctx->econn_backoff;;)  {
+	for (eintr = 0;;) {
 		req = fuse_get_req_for_background(&pxd_dev->ctx->fc, nr_pages);
 		if (!IS_ERR(req)) {
 			break;
@@ -234,31 +232,18 @@ static struct fuse_req * pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 			++eintr;
 			continue;
 		}
-		if ((PTR_ERR(req) == -ENOTCONN) && (enotconn < ECONN_MAX_BACKOFF)) {
-			printk(KERN_INFO "%s: request alloc (%d pages) "
-					"ENOTCONN retries %d\n",
-					__func__, nr_pages, enotconn);
-			schedule_timeout_interruptible(1 * HZ);
-			++enotconn;
-			continue;
-		}
 		break;
 	}
-	if (eintr > 0 || enotconn > 0) {
-		printk(KERN_INFO "%s: request alloc (%d pages) EINTR retries %d"
-			"ENOTCONN retries %d\n", __func__, 
-			nr_pages, eintr, enotconn);
+	if (eintr > 0) {
+		printk(KERN_INFO "%s: alloc (%d pages) EINTR retries %d",
+			 __func__, nr_pages, eintr);
 	}
 	if (IS_ERR(req)) { 
-		pxd_dev->ctx->econn_backoff = enotconn;
-		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld "
-			"retries %d\n", __func__, 
-			nr_pages, PTR_ERR(req), enotconn);
+		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld",
+			 __func__, nr_pages, PTR_ERR(req));
 		return req;
 	}
 
-	/* We're connected, countup to ECONN_MAX_BACKOFF the next time around. */
-	pxd_dev->ctx->econn_backoff = 0;
 	return req;
 }
 
@@ -958,6 +943,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	fc->pend_open = 1;
 	fc->connected = 1;
 	fc->initialized = 1;
+	fc->allow_disconnected = 1;
 	file->private_data = fc;
 
 	fuse_restart_requests(fc);
@@ -1003,6 +989,7 @@ static void pxd_timeout(unsigned long args)
 	BUG_ON(fc->connected);
 
 	fc->connected = true;
+	fc->allow_disconnected = 0;
 	fuse_abort_conn(fc);
 	printk(KERN_INFO "PXD_TIMEOUT (%s): Aborting all requests...", ctx->name);
 }
@@ -1023,7 +1010,6 @@ void pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
-	ctx->econn_backoff = 0;
 	INIT_LIST_HEAD(&ctx->pending_requests);
 	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
 }
