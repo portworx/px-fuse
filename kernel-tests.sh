@@ -1,5 +1,6 @@
 #!/bin/bash
 # test various Linux kernel headers against px-fuse [201607.05MeV]
+# requires dh-reconfig and bc packages on Ubuntu
 
 FILENAME=${0##*/}
 DEF_URL=http://kernel.ubuntu.com/~kernel-ppa/mainline/
@@ -41,24 +42,20 @@ if [ "$@" != "" ]; then SEARCH=$@; fi
 
 test_kernel () {
 # $1=single kernel package to test against (won't work if there's multiples)
+	tmp_deb=`mktemp`
+    kstart=`date +%s.%N`
 	autoreconf && ./configure
 	export KERNELPATH="/usr/src/${1}"
 	make
+	kstop=`date +%s.%N`
+    kdur=$( echo "$kstop - $kstart" | bc -l )
 	if [ $? -eq 0 ]; then 
-		echo "--- PASS: ${1}"
+		printf "%s %s (%.2fs)\n" "--- PASS:" ${1} ${kdur}
 	else
-		echo "--- FAIL: ${1}"
+		printf "%s %s (%.2fs)\n" "--- FAIL:" ${1} ${kdur}
 	fi
 	make clean
-	# don't bother testing if px.ko can be installed since it probably can't
-	# unless the linux kernel matches what's currently running
-	#insmod px.ko
-	#if [ $? -eq 0 ]; then
-	# 	echo "    PASS: insmod ${1}"
-	# 	rmmod px.ko
-	#else
-	# 	echo "    FAIL: insmod ${1}"
-	#fi
+	rm $tmp_deb
 }
 
 get_deb () {
@@ -80,7 +77,9 @@ get_deb () {
 	# test each header individually, although that may not be necessary
 	# only the generic header will build, only allow that one to to test
 	for p in ${packages}; do
-		if [ "`echo ${p} | grep generic`X" != "X" ]; then test_kernel ${p}; fi
+		if [ "`echo ${p} | grep generic`X" != "X" ]; then 
+			test_kernel ${p}
+		fi
 	done
 	dpkg -r ${packages}
 	rm -f ${deb_files}
@@ -97,27 +96,21 @@ fi
 TOTAL=`echo "${dirs}" | wc -l`
 [ $OPT_V -ne 0 ] && echo "${TOTAL} linux header directories found"
 
+tmp_file=`mktemp`
 # loop through directories found
-typeset -F SECONDS
 COUNT=1
 for d in ${dirs}; do
 	echo -n "=== RUN ${COUNT}/${TOTAL} ${d} "
 	start=`date +%s.%N`
-	get_deb ${DEF_URL}${d}
+	get_deb ${DEF_URL}${d} > ${tmp_file} 2>&1
 	stop=`date +%s.%N`
-	duration=$( echo "$stop - $start" | bc -l )
-	echo " (${duration}s)"
+	deb_dur=$( echo "$stop - $start" | bc -l )
+	printf " (%.2fs)\n" ${deb_dur}
+	if [ "$OPT_V" -eq 0 ]; then
+		awk '/^---/ {print $0}' $tmp_file
+	else
+		cat $tmp_file
+	fi
 	COUNT=$((COUNT + 1))
 done
-
-# these directories contain patched headers that require the base headers, some of which aren't available or I can't find
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/daily/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/drm-intel-next/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/drm-intel-nightly/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/drm-next/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/linux-3.13.y.z-queue/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/linux-3.13.y.z-review/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/linux-3.16.y.z-queue/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/linux-3.16.y.z-review/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/linux-3.19.y.z-queue/
-## get_dir http://kernel.ubuntu.com/~kernel-ppa/mainline/linux-3.19.y.z-review/
+#rm ${tmp_file}
