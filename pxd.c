@@ -29,6 +29,14 @@
 	blk_queue_init_tags((q), (sz), NULL)
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
+#define BLK_QUEUE_FLUSH(q) \
+	blk_queue_write_cache(q, true, true)
+#else
+#define BLK_QUEUE_FLUSH(q) \
+	blk_queue_flush(q, REQ_FLUSH | REQ_FUA)
+#endif
+
 #ifdef HAVE_BVEC_ITER
 #define BIO_SECTOR(bio) bio->bi_iter.bi_sector
 #define BIO_SIZE(bio) bio->bi_iter.bi_size
@@ -518,7 +526,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	q->limits.discard_zeroes_data = 1;
 
 	/* Enable flush support. */
-	blk_queue_flush(q, REQ_FLUSH | REQ_FUA);
+	BLK_QUEUE_FLUSH(q);
 
 	if (add->queue_depth != 0) {
 		blk_queue_prep_rq(q, blk_queue_start_tag);
