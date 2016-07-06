@@ -7,7 +7,10 @@
 #include "pxd.h"
 
 #define CREATE_TRACE_POINTS
-#include "pxd_trace.h"
+#undef TRACE_INCLUDE_PATH
+#define TRACE_INCLUDE_PATH .
+#define TRACE_INCLUDE_FILE pxd_trace
+#include <pxd_trace.h>
 #undef CREATE_TRACE_POINTS
 
 #include <linux/version.h>
@@ -129,6 +132,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	if (!err)
 		(void)get_device(&pxd_dev->dev);
 
+	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
 }
 
@@ -140,20 +144,22 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	pxd_dev->open_count--;
 	spin_unlock(&pxd_dev->lock);
 
+	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
 	put_device(&pxd_dev->dev);
 }
 
 static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
 			unsigned int cmd, unsigned long arg)
 {
+	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
 	struct pxd_context *ctx = NULL;
-	int i = 0;
+	int i, status = -ENOTTY;
 
 	switch (cmd) {
 	case PXD_IOC_DUMP_FC_INFO:
 		for (i = 0; i < pxd_num_contexts; ++i) {
 			ctx = &pxd_contexts[i];
-			if (!ctx || ctx->num_devices == 0) {
+			if (ctx->num_devices == 0) {
 				continue;
 			}
 			printk(KERN_INFO "%s: pxd_ctx: %s ndevices: %lu",
@@ -164,11 +170,15 @@ static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
 				ctx->fc.congestion_threshold, ctx->fc.num_background,
 				ctx->fc.active_background);
 		}
-		return 0;
+		status = 0;
+		break;
 	default:
 		break;
 	}
-	return -ENOTTY;
+	trace_pxd_ioctl(
+		pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor,
+		mode, cmd, arg, status);
+	return status;
 }
 
 static const struct block_device_operations pxd_bd_ops = {
@@ -187,19 +197,22 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 	part_stat_unlock();
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0)
+#define	REQCTR(fc) (fc)->iq.reqctr
+#else
+#define	REQCTR(fc) (fc)->reqctr
+#endif
+
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
-	struct timespec end;
 	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n", 
 			__func__, req, req->in.h.unique, 
 			req->misc.pxd_rdwr_in.offset, req->out.h.error);
-	KTIME_GET_TS(&end);
-	trace_make_request_lat(READ, fc->reqctr, req->in.h.unique,
-			fc->num_background, &req->start, &end);
 }
 
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
+	trace_pxd_reply(REQCTR(fc), req->in.h.unique, 0u); 
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 	pxd_request_complete(fc, req);
@@ -207,6 +220,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
+	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 	pxd_request_complete(fc, req);
@@ -224,32 +238,31 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	pxd_request_complete(fc, req);
 }
 
-static struct fuse_req * pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
+static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 {
-	int eintr;
-	struct fuse_req * req = NULL;
+	int eintr = 0;
+	struct fuse_req *req = NULL;
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
+	int status;
 
-	for (eintr = 0;;) {
-		req = fuse_get_req_for_background(&pxd_dev->ctx->fc, nr_pages);
-		if (!IS_ERR(req)) {
-			break;
-		} 
-		if (PTR_ERR(req) == -EINTR) {
+	while (req == NULL) {
+		trace_pxd_get_fuse_req(REQCTR(fc), nr_pages);
+		req = fuse_get_req_for_background(fc, nr_pages);
+		if (IS_ERR(req) && PTR_ERR(req) == -EINTR) {
+			req = NULL;
 			++eintr;
-			continue;
 		}
-		break;
 	}
 	if (eintr > 0) {
 		printk(KERN_INFO "%s: alloc (%d pages) EINTR retries %d",
 			 __func__, nr_pages, eintr);
 	}
-	if (IS_ERR(req)) { 
-		printk(KERN_ERR "%s: request alloc (%d pages) failed: %ld",
-			 __func__, nr_pages, PTR_ERR(req));
-		return req;
+	status = IS_ERR(req) ? PTR_ERR(req) : 0;
+	if (status != 0) { 
+		printk(KERN_ERR "%s: request alloc (%d pages) failed: %d",
+			 __func__, nr_pages, status);
 	}
-
+	trace_pxd_get_fuse_req_result(REQCTR(fc), status, eintr);
 	return req;
 }
 
@@ -313,8 +326,9 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 }
 
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn)
+			uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
 {
+	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags, qfn);
 	switch (flags & (REQ_WRITE | REQ_DISCARD)) {
 	case REQ_WRITE:
 		pxd_write_request(req, size, off, minor, flags, qfn);
@@ -348,7 +362,6 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	struct bio_vec *bvec = NULL;
 #endif
 	int i;
-	struct timespec start, end;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags %lx\n", __func__,
@@ -356,20 +369,15 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, bio->bi_rw);
-	KTIME_GET_TS(&start);
 
 	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
-	if (IS_ERR(req)) { 
+	if (IS_ERR(req)) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
-	KTIME_GET_TS(&end);
 
-	trace_make_request_wait(bio_data_dir(bio), pxd_dev->ctx->fc.reqctr, 0,
-		req->in.h.unique, &start, &end);
-
-	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE, 
-		pxd_dev->minor, bio->bi_rw, false);
+	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+		pxd_dev->minor, bio->bi_rw, false, REQCTR(&pxd_dev->ctx->fc));
 
 	req->num_pages = bio->bi_vcnt;
 	if (bio->bi_vcnt) {
@@ -405,7 +413,6 @@ static void pxd_rq_fn(struct request_queue *q)
 	struct bio_vec *bvec = NULL;
 #endif
 	int i, nr_pages;
-	struct timespec start, end;
 
 	for (;;) {
 		struct request *rq;
@@ -428,8 +435,6 @@ static void pxd_rq_fn(struct request_queue *q)
 			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 			rq->nr_phys_segments, rq->cmd_flags);
 
-		KTIME_GET_TS(&start);
-		
 		nr_pages = 0;
 		if (rq->nr_phys_segments) {
 			rq_for_each_segment(bvec, rq, iter) {
@@ -443,12 +448,8 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		KTIME_GET_TS(&end);
-		trace_make_request_wait(rq_data_dir(rq), pxd_dev->ctx->fc.reqctr, 0,
-				req->in.h.unique, &start, &end);
-
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			pxd_dev->minor, rq->cmd_flags, true);
+			pxd_dev->minor, rq->cmd_flags, true, REQCTR(&pxd_dev->ctx->fc));
 
 		req->num_pages = nr_pages;
 		if (rq->nr_phys_segments) {
