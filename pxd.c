@@ -43,11 +43,11 @@
 #ifdef HAVE_BVEC_ITER
 #define BIO_SECTOR(bio) bio->bi_iter.bi_sector
 #define BIO_SIZE(bio) bio->bi_iter.bi_size
-#define BVEC(bvec) (bvec) 
+#define BVEC(bvec) (bvec)
 #else
 #define BIO_SECTOR(bio) bio->bi_sector
 #define BIO_SIZE(bio) bio->bi_size
-#define BVEC(bvec) (*(bvec)) 
+#define BVEC(bvec) (*(bvec))
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -197,7 +197,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 	part_stat_unlock();
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
 #define	REQCTR(fc) (fc)->iq.reqctr
 #else
 #define	REQCTR(fc) (fc)->reqctr
@@ -205,14 +205,14 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n", 
-			__func__, req, req->in.h.unique, 
+	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
+			__func__, req, req->in.h.unique,
 			req->misc.pxd_rdwr_in.offset, req->out.h.error);
 }
 
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
-	trace_pxd_reply(REQCTR(fc), req->in.h.unique, 0u); 
+	trace_pxd_reply(REQCTR(fc), req->in.h.unique, 0u);
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 	pxd_request_complete(fc, req);
@@ -258,7 +258,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 			 __func__, nr_pages, eintr);
 	}
 	status = IS_ERR(req) ? PTR_ERR(req) : 0;
-	if (status != 0) { 
+	if (status != 0) {
 		printk(KERN_ERR "%s: request alloc (%d pages) failed: %d",
 			 __func__, nr_pages, status);
 	}
@@ -407,7 +407,7 @@ static void pxd_rq_fn(struct request_queue *q)
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
 	struct req_iterator iter;
-#ifdef HAVE_BVEC_ITER 
+#ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 #else
 	struct bio_vec *bvec = NULL;
@@ -429,7 +429,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 		spin_unlock_irq(&pxd_dev->qlock);
 		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags  %llx\n", __func__, 
+			"flags  %llx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			rq_data_dir(rq) == WRITE ? "wr" : "rd",
 			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
@@ -442,7 +442,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			}
 		}
 		req = pxd_fuse_req(pxd_dev, nr_pages);
-		if (IS_ERR(req)) { 
+		if (IS_ERR(req)) {
   			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
@@ -484,7 +484,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	if (!disk)
 		return -ENOMEM;
 
-	snprintf(disk->disk_name, sizeof(disk->disk_name), 
+	snprintf(disk->disk_name, sizeof(disk->disk_name),
 			PXD_DEV"%llu", pxd_dev->dev_id);
 	disk->major = pxd_dev->major;
 	disk->first_minor = pxd_dev->minor;
@@ -500,7 +500,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		blk_queue_make_request(q, pxd_make_request);
 	} else {
 		q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
-		if (!q) 
+		if (!q)
 			goto out_disk;
 
 		/* Switch queue to TCQ mode; allocate tag map. */
@@ -854,7 +854,7 @@ static void pxd_fill_init(struct fuse_conn *fc, struct fuse_req *req,
 static void pxd_process_init_reply(struct fuse_conn *fc,
 		struct fuse_req *req)
 {
-	pxd_printk("%s: req %p err %d len %d un %lld\n", 
+	pxd_printk("%s: req %p err %d len %d un %lld\n",
 		__func__, req, req->out.h.error,
 		req->out.h.len, req->out.h.unique);
 
