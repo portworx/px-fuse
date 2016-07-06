@@ -47,9 +47,10 @@ test_kernel () {
 	autoreconf && ./configure
 	export KERNELPATH="/usr/src/${1}"
 	make
+	ret=$?
 	kstop=`date +%s.%N`
     kdur=$( echo "$kstop - $kstart" | bc -l )
-	if [ $? -eq 0 ]; then 
+	if [ $ret -eq 0 ]; then 
 		printf "%s %s (%.2fs)\n" "--- PASS:" ${1} ${kdur}
 	else
 		printf "%s %s (%.2fs)\n" "--- FAIL:" ${1} ${kdur}
@@ -107,10 +108,12 @@ for d in ${dirs}; do
 	deb_dur=$( echo "$stop - $start" | bc -l )
 	printf " (%.2fs)\n" ${deb_dur}
 	if [ "$OPT_V" -eq 0 ]; then
-		awk '/^---/ {print $0}' $tmp_file
+		grep --color=auto "^---" $tmp_file
+	elif [ "`grep "^--- FAIL" $tmp_file`" != "" ]; then
+		cat $tmp_file
 	else
 		cat $tmp_file
 	fi
 	COUNT=$((COUNT + 1))
 done
-#rm ${tmp_file}
+rm ${tmp_file}
