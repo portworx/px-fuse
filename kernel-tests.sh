@@ -6,14 +6,17 @@ DEF_URL=http://kernel.ubuntu.com/~kernel-ppa/mainline/
 DEF_SEARCH="4.[4567]"
 
 usage () {
-	echo "usage: ${FILENAME} -huvn"
+	echo "usage: ${FILENAME} -huvn [regex-string]"
 	echo ""
+	echo " where"
 	echo "    -h	print this message"
 	echo "    -l	output to log file [default: STIN]"
 	echo "    -n	perform scan for directories but DO NO actually test"
-	echo "    -s	specify regex to use to search for linux header directories [default: ${DEF_SEARCH}]"
+	#echo "    -s	specify regex to use to search for linux header directories [default: ${DEF_SEARCH}]"
 	echo "    -u	use alternative URL to scan for linux headers [default: ${DEF_URL}]"
 	echo "    -v	verbose error messages"
+	echo "    [regex-string] is the optional string used to search the linux header "
+	echo "          directory names to select them for testing [default: ${DEF_SEARCH}]"
 	exit 2
 }
 
@@ -33,6 +36,8 @@ while getopts ":hl:ns:u:v" opt; do
 	esac
 done
 [ "$SEARCH" == "" ] && echo "-s cannot be blank" && exit 2
+shift $((OPTIND-1))		# point $@ to regex-string
+if [ "$@" != "" ]; then SEARCH=$@; fi
 
 test_kernel () {
 # $1=single kernel package to test against (won't work if there's multiples)
@@ -58,8 +63,6 @@ test_kernel () {
 
 get_deb () {
 # $1 - URL of linux header deb files
-# $2 - run #
-# $3 - total linux header directories in run
 	debs=`curl -s ${1} | grep "^<tr>" | sed -e "s/^.*href=\"//" -e "s/\">.*$//" | grep linux-headers | egrep "all.deb|generic.*amd64" `
 	[ "${debs}" == "" ] && return 0
 	# this is a list of at least 2 deb files...download and install them together
@@ -73,7 +76,6 @@ get_deb () {
 		deb_files="${deb_files} ${d}"
 		packages="${packages} ${p}"
 	done
-	echo "=== RUN ${2}/${3} ${deb_files} (${packages})"
 	dpkg -i ${deb_files}
 	# test each header individually, although that may not be necessary
 	# only the generic header will build, only allow that one to to test
@@ -96,9 +98,15 @@ TOTAL=`echo "${dirs}" | wc -l`
 [ $OPT_V -ne 0 ] && echo "${TOTAL} linux header directories found"
 
 # loop through directories found
+typeset -F SECONDS
 COUNT=1
 for d in ${dirs}; do
-	get_deb ${DEF_URL}${d} ${COUNT} ${TOTAL}
+	echo -n "=== RUN ${COUNT}/${TOTAL} ${d} "
+	start=`date +%s.%N`
+	get_deb ${DEF_URL}${d}
+	stop=`date +%s.%N`
+	duration=$( echo "$stop - $start" | bc -l )
+	echo " (${duration}s)"
 	COUNT=$((COUNT + 1))
 done
 
