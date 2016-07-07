@@ -206,14 +206,12 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_update_stats(req, 0, blk_rq_sectors(req->rq));
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	pxd_request_complete(fc, req);
 }
 
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_update_stats(req, 1, blk_rq_sectors(req->rq));
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	pxd_request_complete(fc, req);
 }
