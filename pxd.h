@@ -43,8 +43,13 @@ enum pxd_opcode {
 #define PXD_FLAGS_SYNC (PXD_FLAGS_FLUSH | PXD_FLAGS_FUA)
 
 /** rpc request flags */
+
 /** force remote write to execute as multi-node */
 #define PXD_FLAGS_FORCE_MULTI 0x10000
+
+/** Force overwrite even for readonly snapshots.
+ * Makes snapshot writeable */
+#define PXD_FLAGS_REPAIR 0x20000
 
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
@@ -57,7 +62,7 @@ struct pxd_dev_id {
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
 
-/** 
+/**
  * PXD_INIT message passed from kernel.
  *
  * Includes array of registered pxd devices in the end of the message.
