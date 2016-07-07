@@ -1,6 +1,9 @@
 #!/bin/bash
-# test various Linux kernel headers against px-fuse [201607.06MeV]
+# test various Linux kernel headers against px-fuse [201607.07MeV]
 # requires dh-reconfig and bc packages on Ubuntu
+# requires root because it installs packages
+
+[ "`id | grep 'uid=0(root)'`x" == "x" ] && echo "must be run as root" && exit 2
 
 FILENAME=${0##*/}
 DEF_URL=http://kernel.ubuntu.com/~kernel-ppa/mainline/
@@ -13,7 +16,7 @@ usage () {
 	echo "    -h	print this message"
 	echo "    -l	output to log file"
 	echo "    -n	perform scan for directories but DO NO actually test"
-	#echo "    -s	specify regex to use to search for linux header directories [default: ${DEF_SEARCH}]"
+	echo "    -s	specify regex to use to search for linux header directories [default: ${DEF_SEARCH}]"
 	echo "    -u	use alternative URL to scan for linux headers [default: ${DEF_URL}]"
 	echo "    -v	verbose error messages"
 	echo "    [regex-string] is the optional string used to search the linux header "
@@ -36,12 +39,13 @@ while getopts ":hl:ns:u:v" opt; do
 	h|\?) usage;;
 	esac
 done
-[ "$SEARCH" == "" ] && echo "-s cannot be blank" && exit 2
 shift $((OPTIND-1))		# point $@ to regex-string
-if [ "$@" != "" ]; then SEARCH=$@; fi
+[ "$SEARCH" == "" ] && echo "-s cannot be blank" && exit 2
+if [ "${@}x" != "x" ]; then SEARCH=$@; fi
 
 test_kernel () {
 # $1=single kernel package to test against (won't work if there's multiples)
+# outputs FINAL_STATUS variable to 1 if a build failure happened
 	tmp_deb=`mktemp`
 	kstart=`date +%s.%N`
 	autoreconf && ./configure
@@ -54,6 +58,7 @@ test_kernel () {
 		printf "%s %s (%.2fs)\n" "--- PASS:" ${1} ${kdur}
 	else
 		printf "%s %s (%.2fs)\n" "--- FAIL:" ${1} ${kdur}
+		FINAL_STATUS=1
 	fi
 	make clean
 	rm $tmp_deb
@@ -90,29 +95,33 @@ get_deb () {
 # will return blank if nothing found
 # NOTE: all the linux header directories start with "v"
 dirs=`curl -s ${URL} | grep "^<tr>" | sed -e "s/^.*href=\"//" -e "s/\">.*$//" | egrep "^v${SEARCH}"`
-if [ "$dirs" == "" ]; then
-	printf "no linux headers found for '%s'\n" $SEARCH
-	exit 1
-fi
+[ "$dirs" == "" ] && printf "no linux headers found for v'%s'\n" $SEARCH && exit 1
+
 # w/o "", shell converts to a single line with entries separated by space
 TOTAL=`echo "${dirs}" | wc -l`
 
+FINAL_STATUS=0		# assume all will complete OK
 tmp_file=`mktemp`
-# loop through directories found
 COUNT=1
+
+# loop through directories found
 for d in ${dirs}; do
 	echo -n "=== RUN ${COUNT}/${TOTAL} ${d} "
 	[ $OPT_L ] && echo -n "=== RUN ${COUNT}/${TOTAL} ${d} " >> $OPT_L
 
 	start=`date +%s.%N`
-	get_deb ${DEF_URL}${d} > ${tmp_file} 2>&1
+	[ $OPT_N -eq 0 ] && get_deb ${DEF_URL}${d} > ${tmp_file} 2>&1
 	stop=`date +%s.%N`
 	deb_dur=$( echo "$stop - $start" | bc -l )
-	printf " (%.2fs)\n" ${deb_dur}
+	if [ $OPT_N -eq 0 ]; then
+		printf " (%.2fs)\n" ${deb_dur}
+	else
+		printf " (%fs) [noop]\n" ${deb_dur}
+	fi
 	[ $OPT_L ] &&  printf " (%.2fs)\n" ${deb_dur} >> $OPT_L
 
 	#print to terminal if there's a build fail or if we specified VERBOSE
-	if [ "$OPT_V" -eq 1 -o "`grep "^--- FAIL" $tmp_file`" != "" ]; then
+	if [ "$OPT_V" -eq 1 -o "`grep '^--- FAIL' $tmp_file`" != "" ]; then
 		cat $tmp_file
 	else
 		grep --color=auto "^---" $tmp_file
@@ -122,3 +131,4 @@ for d in ${dirs}; do
 	COUNT=$((COUNT + 1))
 done
 rm ${tmp_file}
+exit $FINAL_STATUS
