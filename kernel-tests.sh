@@ -1,7 +1,8 @@
 #!/bin/bash
-# test various Linux kernel headers against px-fuse [201607.07MeV]
-# requires dh-reconfig and bc packages on Ubuntu
+# test various Linux kernel headers against px-fuse [201607.12MeV]
 # requires root because it installs packages
+# required packages:
+# apt-get install -y dh-reconfig bc make
 
 [ "`id | grep 'uid=0(root)'`x" == "x" ] && echo "must be run as root" && exit 2
 
