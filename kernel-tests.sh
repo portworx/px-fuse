@@ -62,6 +62,7 @@ test_kernel () {
 		FINAL_STATUS=1
 	fi
 	make clean
+	chmod 666 config.* configure *.log Makefile*
 	rm $tmp_deb
 }
 
