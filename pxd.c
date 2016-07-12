@@ -197,10 +197,18 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 	part_stat_unlock();
 }
 
+/*
+ * This is macroized because reqctr moves into a substructure
+ * in Linux versions 4.2 and later.  However, we have a private
+ * copy of fuse_i.h that uses the older layout.
+ */
+#define	REQCTR(fc) (fc)->reqctr
+#if 0
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
 #define	REQCTR(fc) (fc)->iq.reqctr
 #else
 #define	REQCTR(fc) (fc)->reqctr
+#endif
 #endif
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
