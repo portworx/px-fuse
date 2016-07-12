@@ -225,12 +225,14 @@ The script has built-in help:
 
 **usage: kernel-tests.sh -huvn [regex-string]**
 
- where
-      -h  print this message
-      -l  output to log file
-      -n  perform scan for directories but DO NO actually test
-      -s  specify regex to use to search for linux header directories [default: 4.[4567]]
-      -u  use alternative URL to scan for linux headers [default: http://kernel.ubuntu.com/~kernel-ppa/mainline/]
-      -v  verbose error messages
-      [regex-string] is the optional string used to search the linux header 
-      directory names to select them for testing [default: 4.[4567]]
+where
+```
+  -h  print this message
+  -l  output to log file
+  -n  perform scan for directories but DO NO actually test
+  -s  specify regex to use to search for linux header directories [default: 4.[4567]]
+  -u  use alternative URL to scan for linux headers [default: http://kernel.ubuntu.com/~kernel-ppa/mainline/]
+  -v  verbose error messages
+  [regex-string] is the optional string used to search the linux header 
+  directory names to select them for testing [default: 4.[4567]]
+```
