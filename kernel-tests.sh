@@ -1,5 +1,5 @@
 #!/bin/bash
-# test various Linux kernel headers against px-fuse [201607.12MeV]
+# test various Linux kernel headers against px-fuse [201607.13MeV]
 # requires root because it installs packages
 # required packages:
 # apt-get install -y dh-reconfig bc make
@@ -49,7 +49,7 @@ test_kernel () {
 # outputs FINAL_STATUS variable to 1 if a build failure happened
 	tmp_deb=`mktemp`
 	kstart=`date +%s.%N`
-	autoreconf && ./configure
+	autoreconf && chmod 755 ./configure && ./configure
 	export KERNELPATH="/usr/src/${1}"
 	make
 	ret=$?
