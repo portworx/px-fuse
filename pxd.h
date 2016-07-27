@@ -45,7 +45,7 @@ enum pxd_opcode {
 /** rpc request flags */
 
 /** force remote write to execute as multi-node */
-#define PXD_FLAGS_FORCE_MULTI 0x10000
+#define PXD_FLAGS_REQ_TYPE_MN 0x10000
 
 /** Force overwrite even for readonly snapshots.
  * Makes snapshot writeable */
