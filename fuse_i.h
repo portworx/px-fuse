@@ -277,9 +277,6 @@ struct fuse_req {
 	/** Request is sent in the background */
 	unsigned background:1;
 
-	/** Data is being copied to/from the request */
-	unsigned locked:1;
-
 	/** State of the request */
 	enum fuse_req_state state;
 

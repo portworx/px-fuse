@@ -59,7 +59,6 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
 	INIT_HLIST_NODE(&req->hash_entry);
-	init_waitqueue_head(&req->waitq);
 	atomic_set(&req->count, 1);
 	req->pages = pages;
 	req->page_descs = page_descs;
@@ -391,7 +390,6 @@ __releases(fc->lock)
 		flush_bg_queue(fc);
 	}
 	spin_unlock(&fc->lock);
-	wake_up(&req->waitq);
 	if (end)
 		end(fc, req);
 	fuse_put_request(fc, req);
@@ -432,36 +430,6 @@ void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->isreply = 1;
 	fuse_request_send_nowait(fc, req);
-}
-
-/*
- * Lock the request.  Up to the next unlock_request() there mustn't be
- * anything that could cause a page-fault.  If the request was already
- * aborted bail out.
- */
-static int lock_request(struct fuse_conn *fc, struct fuse_req *req)
-{
-	int err = 0;
-	if (req) {
-		spin_lock(&fc->lock);
-		req->locked = 1;
-		spin_unlock(&fc->lock);
-	}
-	return err;
-}
-
-/*
- * Unlock request.  If it was aborted during being locked, the
- * requester thread is currently waiting for it to be unlocked, so
- * wake it up.
- */
-static void unlock_request(struct fuse_conn *fc, struct fuse_req *req)
-{
-	if (req) {
-		spin_lock(&fc->lock);
-		req->locked = 0;
-		spin_unlock(&fc->lock);
-	}
 }
 
 struct fuse_copy_state {
@@ -520,7 +488,6 @@ static int fuse_copy_fill(struct fuse_copy_state *cs)
 	struct page *page;
 	int err;
 
-	unlock_request(cs->fc, cs->req);
 	fuse_copy_finish(cs);
 	if (cs->pipebufs) {
 		struct pipe_buffer *buf = cs->pipebufs;
@@ -575,7 +542,7 @@ static int fuse_copy_fill(struct fuse_copy_state *cs)
 		cs->addr += cs->len;
 	}
 
-	return lock_request(cs->fc, cs->req);
+	return 0;
 }
 
 /* Do as much copy to/from userspace buffer as we can */
@@ -626,7 +593,6 @@ static int fuse_try_move_page(struct fuse_copy_state *cs, struct page **pagep)
 	struct page *newpage;
 	struct pipe_buffer *buf = cs->pipebufs;
 
-	unlock_request(cs->fc, cs->req);
 	fuse_copy_finish(cs);
 
 	err = buf->ops->confirm(cs->pipe, buf);
@@ -703,10 +669,6 @@ out_fallback:
 	cs->pg = buf->page;
 	cs->offset = buf->offset;
 
-	err = lock_request(cs->fc, cs->req);
-	if (err)
-		return err;
-
 	return 1;
 }
 
@@ -718,7 +680,6 @@ static int fuse_ref_page(struct fuse_copy_state *cs, struct page *page,
 	if (cs->nr_segs == cs->pipe->buffers)
 		return -EIO;
 
-	unlock_request(cs->fc, cs->req);
 	fuse_copy_finish(cs);
 
 	buf = cs->pipebufs;
@@ -912,7 +873,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 				     (struct fuse_arg *) in->args, 0);
 	fuse_copy_finish(cs);
 	spin_lock(&fc->lock);
-	req->locked = 0;
 	if (err) {
 		req->out.h.error = -EIO;
 		request_end(fc, req);
@@ -1198,7 +1158,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 	req->state = FUSE_REQ_WRITING;
 	list_move(&req->list, &fc->io);
 	req->out.h = oh;
-	req->locked = 1;
 	cs->req = req;
 	if (!req->out.page_replace)
 		cs->move_pages = 0;
@@ -1208,7 +1167,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 	fuse_copy_finish(cs);
 
 	spin_lock(&fc->lock);
-	req->locked = 0;
 	if (err)
 		req->out.h.error = -EIO;
 	request_end(fc, req);
@@ -1387,12 +1345,10 @@ __acquires(fc->lock)
 		req->out.h.error = -ECONNABORTED;
 		req->state = FUSE_REQ_FINISHED;
 		list_del_init(&req->list);
-		wake_up(&req->waitq);
 		if (end) {
 			req->end = NULL;
 			__fuse_get_request(req);
 			spin_unlock(&fc->lock);
-			wait_event(req->waitq, !req->locked);
 			end(fc, req);
 			fuse_put_request(fc, req);
 			spin_lock(&fc->lock);
