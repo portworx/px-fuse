@@ -37,6 +37,8 @@
 /** Congestion starts at 75% of maximum */
 #define FUSE_DEFAULT_CONGESTION_THRESHOLD (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
 
+#define FUSE_HASH_SIZE FUSE_DEFAULT_MAX_BACKGROUND
+
 static struct kmem_cache *fuse_req_cachep;
 
 static struct fuse_conn *fuse_get_conn(struct file *file)
@@ -57,6 +59,7 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
 	INIT_LIST_HEAD(&req->intr_entry);
+	INIT_HLIST_NODE(&req->hash_entry);
 	init_waitqueue_head(&req->waitq);
 	atomic_set(&req->count, 1);
 	req->pages = pages;
@@ -325,6 +328,9 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
 	list_add_tail(&req->list, &fc->pending);
+	if (hlist_unhashed(&req->hash_entry))
+		hlist_add_head(&req->hash_entry,
+			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 	req->state = FUSE_REQ_PENDING;
 	if (!req->waiting) {
 		req->waiting = 1;
@@ -361,6 +367,9 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
 	list_add(&req->list, &fc->pending);
+	if (hlist_unhashed(&req->hash_entry))
+		hlist_add_head(&req->hash_entry,
+			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 	req->state = FUSE_REQ_PENDING;
 	if (!req->waiting) {
 		req->waiting = 1;
@@ -400,6 +409,8 @@ __releases(fc->lock)
 {
 	void (*end) (struct fuse_conn *, struct fuse_req *) = req->end;
 	req->end = NULL;
+	if (!hlist_unhashed(&req->hash_entry))
+		hlist_del_init(&req->hash_entry);
 	list_del(&req->list);
 	list_del(&req->intr_entry);
 	req->state = FUSE_REQ_FINISHED;
@@ -1321,7 +1332,7 @@ static ssize_t fuse_dev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 	return fuse_dev_do_read(fc, file, &cs, iov_length(to->iov, to->nr_segs));
 }
-#endif 
+#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
 static int fuse_dev_pipe_buf_steal(struct pipe_inode_info *pipe,
@@ -1476,10 +1487,11 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 {
 	struct fuse_req *req;
 
-	list_for_each_entry(req, &fc->processing, list) {
+	hlist_for_each_entry(req, &fc->hash[unique % FUSE_HASH_SIZE],
+			     hash_entry)
 		if (req->in.h.unique == unique || req->intr_unique == unique)
 			return req;
-	}
+
 	return NULL;
 }
 
@@ -1634,7 +1646,7 @@ static ssize_t fuse_dev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	return fuse_dev_do_write(fc, &cs, iov_length(from->iov, from->nr_segs));
 }
 #endif
- 
+
 static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 				     struct file *out, loff_t *ppos,
 				     size_t len, unsigned int flags)
@@ -1814,8 +1826,10 @@ static void end_polls(struct fuse_conn *fc)
 	}
 }
 
-void fuse_conn_init(struct fuse_conn *fc)
+int fuse_conn_init(struct fuse_conn *fc)
 {
+	int i;
+
 	memset(fc, 0, sizeof(*fc));
 	spin_lock_init(&fc->lock);
 	init_rwsem(&fc->killsb);
@@ -1829,6 +1843,11 @@ void fuse_conn_init(struct fuse_conn *fc)
 	INIT_LIST_HEAD(&fc->interrupts);
 	INIT_LIST_HEAD(&fc->bg_queue);
 	INIT_LIST_HEAD(&fc->entry);
+	fc->hash = kmalloc(FUSE_HASH_SIZE * sizeof(*fc->hash), GFP_KERNEL);
+	if (!fc->hash)
+		return -ENOMEM;
+	for (i = 0; i < FUSE_HASH_SIZE; ++i)
+		INIT_HLIST_HEAD(&fc->hash[i]);
 	fc->forget_list_tail = &fc->forget_list_head;
 	atomic_set(&fc->num_waiting, 0);
 	fc->max_background = FUSE_DEFAULT_MAX_BACKGROUND;
@@ -1840,6 +1859,7 @@ void fuse_conn_init(struct fuse_conn *fc)
 	fc->initialized = 0;
 	fc->attr_version = 1;
 	get_random_bytes(&fc->scramble_key, sizeof(fc->scramble_key));
+	return 0;
 }
 
 void fuse_conn_put(struct fuse_conn *fc)
@@ -1847,6 +1867,8 @@ void fuse_conn_put(struct fuse_conn *fc)
 	if (atomic_dec_and_test(&fc->count)) {
 		if (fc->destroy_req)
 			fuse_request_free(fc->destroy_req);
+		if (fc->hash)
+			kfree(fc->hash);
 		fc->release(fc);
 	}
 }

@@ -1009,10 +1009,13 @@ static void pxd_timeout(unsigned long args)
 	printk(KERN_INFO "PXD_TIMEOUT (%s): Aborting all requests...", ctx->name);
 }
 
-void pxd_context_init(struct pxd_context *ctx, int i)
+int pxd_context_init(struct pxd_context *ctx, int i)
 {
+	int err;
 	spin_lock_init(&ctx->lock);
-	fuse_conn_init(&ctx->fc);
+	err = fuse_conn_init(&ctx->fc);
+	if (err)
+		return err;
 	ctx->id = i;
 	ctx->fc.release = pxd_fuse_conn_release;
 	ctx->fc.allow_disconnected = 1;
@@ -1027,6 +1030,7 @@ void pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.fops = &ctx->fops;
 	INIT_LIST_HEAD(&ctx->pending_requests);
 	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
+	return 0;
 }
 
 int pxd_init(void)
@@ -1045,7 +1049,12 @@ int pxd_init(void)
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		struct pxd_context *ctx = &pxd_contexts[i];
-		pxd_context_init(ctx, i);
+		err = pxd_context_init(ctx, i);
+		if (err) {
+			printk(KERN_ERR "%s: failed to initialize connection\n",
+				__func__);
+			goto out_pxd_contexts;
+		}
 		err = misc_register(&ctx->miscdev);
 		if (err) {
 			printk(KERN_ERR "%s: failed to register dev %s %d: %d\n", __func__,
@@ -1080,6 +1089,8 @@ out_misc:
 out_fuse:
 	for (i = 0; i < pxd_num_contexts; ++i)
 		fuse_conn_put(&pxd_contexts[i].fc);
+out_pxd_contexts:
+	kfree(pxd_contexts);
 out_fuse_dev:
 	fuse_dev_cleanup();
 out:

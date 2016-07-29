@@ -22,6 +22,7 @@
 #include <linux/rbtree.h>
 #include <linux/poll.h>
 #include <linux/workqueue.h>
+#include <linux/hash.h>
 #include "pxd.h"
 
 /** Max number of pages that can be used in a single read request */
@@ -255,6 +256,9 @@ struct fuse_req {
 	    fuse_conn */
 	struct list_head list;
 
+	/** hash table entry */
+	struct hlist_node hash_entry;
+
 	/** Entry on the interrupts list  */
 	struct list_head intr_entry;
 
@@ -446,6 +450,9 @@ struct fuse_conn {
 	/** The list of background requests set aside for later queuing */
 	struct list_head bg_queue;
 
+	/** hash table of pending requests */
+	struct hlist_head *hash;
+
 	/** Pending interrupts */
 	struct list_head interrupts;
 
@@ -621,7 +628,7 @@ struct fuse_conn {
 	struct rw_semaphore killsb;
 
 	/* Alow operations on disconnected fuse conenction. */
-	int allow_disconnected;	
+	int allow_disconnected;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
@@ -838,7 +845,7 @@ void fuse_conn_kill(struct fuse_conn *fc);
 /**
  * Initialize fuse_conn
  */
-void fuse_conn_init(struct fuse_conn *fc);
+int fuse_conn_init(struct fuse_conn *fc);
 
 /**
  * Release reference to fuse_conn
