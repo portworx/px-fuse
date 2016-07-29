@@ -335,9 +335,6 @@ struct fuse_req {
 
 		/** Associated request structrure. */
 		struct request *rq;
-
-		/** Associated bio structrure. */
- 		struct bio *bio;
 	};
 
 	/** Request completion callback */
@@ -345,9 +342,6 @@ struct fuse_req {
 
 	/** Request is stolen from fuse_file->reserved_req */
 	struct file *stolen_file;
-
-	/** Associate request queue */
-	struct request_queue *queue;
 
 	/** start processing */
 	struct timespec start;

@@ -84,8 +84,8 @@ TRACE_EVENT(
 	pxd_request,
 	TP_PROTO(
 		uint64_t reqctr, uint64_t unique, uint32_t size, uint64_t off,
-		uint32_t minor, uint32_t flags, bool qfn),
-	TP_ARGS(reqctr, unique, size, off, minor, flags, qfn),
+		uint32_t minor, uint32_t flags),
+	TP_ARGS(reqctr, unique, size, off, minor, flags),
 	TP_STRUCT__entry(
 		__field(uint64_t, reqctr)
 		__field(uint64_t, unique)
@@ -93,7 +93,6 @@ TRACE_EVENT(
 		__field(uint64_t, off)
 		__field(uint32_t, minor)
 		__field(uint32_t, flags)
-		__field(bool, qfn)
 	),
 	TP_fast_assign(
 		__entry->reqctr = reqctr,
@@ -101,12 +100,12 @@ TRACE_EVENT(
 		__entry->size = size,
 		__entry->off = off,
 		__entry->minor = minor,
-		__entry->flags = flags,
-		__entry->qfn = qfn),
+		__entry->flags = flags
+	),
 	TP_printk(
-		"reqctr %llu unique %llu size %u off %llu minor %u flags %x qrn %u",
+		"reqctr %llu unique %llu size %u off %llu minor %u flags %x",
 		__entry->reqctr, __entry->unique, __entry->size, __entry->off,
-		__entry->minor, __entry->flags, __entry->qfn)
+		__entry->minor, __entry->flags)
 );
 
 TRACE_EVENT(
