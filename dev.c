@@ -58,7 +58,6 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(pages, 0, sizeof(*pages) * npages);
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
-	INIT_LIST_HEAD(&req->intr_entry);
 	INIT_HLIST_NODE(&req->hash_entry);
 	init_waitqueue_head(&req->waitq);
 	atomic_set(&req->count, 1);
@@ -132,13 +131,6 @@ static void restore_sigs(sigset_t *oldset)
 void __fuse_get_request(struct fuse_req *req)
 {
 	atomic_inc(&req->count);
-}
-
-/* Must be called with > 1 refcount */
-static void __fuse_put_request(struct fuse_req *req)
-{
-	BUG_ON(atomic_read(&req->count) < 2);
-	atomic_dec(&req->count);
 }
 
 static void fuse_req_init_context(struct fuse_req *req)
@@ -378,7 +370,6 @@ __releases(fc->lock)
 	if (!hlist_unhashed(&req->hash_entry))
 		hlist_del_init(&req->hash_entry);
 	list_del(&req->list);
-	list_del(&req->intr_entry);
 	req->state = FUSE_REQ_FINISHED;
 	if (req->background) {
 		req->background = 0;
@@ -404,117 +395,6 @@ __releases(fc->lock)
 	if (end)
 		end(fc, req);
 	fuse_put_request(fc, req);
-}
-
-static void wait_answer_interruptible(struct fuse_conn *fc,
-				      struct fuse_req *req)
-__releases(fc->lock)
-__acquires(fc->lock)
-{
-	if (signal_pending(current))
-		return;
-
-	spin_unlock(&fc->lock);
-	wait_event_interruptible(req->waitq, req->state == FUSE_REQ_FINISHED);
-	spin_lock(&fc->lock);
-}
-
-static void queue_interrupt(struct fuse_conn *fc, struct fuse_req *req)
-{
-	list_add_tail(&req->intr_entry, &fc->interrupts);
-	wake_up(&fc->waitq);
-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
-}
-
-static void request_wait_answer(struct fuse_conn *fc, struct fuse_req *req)
-__releases(fc->lock)
-__acquires(fc->lock)
-{
-	if (!fc->no_interrupt) {
-		/* Any signal may interrupt this */
-		wait_answer_interruptible(fc, req);
-
-		if (req->aborted)
-			goto aborted;
-		if (req->state == FUSE_REQ_FINISHED)
-			return;
-
-		req->interrupted = 1;
-		if (req->state == FUSE_REQ_SENT)
-			queue_interrupt(fc, req);
-	}
-
-	if (!req->force) {
-		sigset_t oldset;
-
-		/* Only fatal signals may interrupt this */
-		block_sigs(&oldset);
-		wait_answer_interruptible(fc, req);
-		restore_sigs(&oldset);
-
-		if (req->aborted)
-			goto aborted;
-		if (req->state == FUSE_REQ_FINISHED)
-			return;
-
-		/* Request is not yet in userspace, bail out */
-		if (req->state == FUSE_REQ_PENDING) {
-			list_del(&req->list);
-			__fuse_put_request(req);
-			req->out.h.error = -EINTR;
-			return;
-		}
-	}
-
-	/*
-	 * Either request is already in userspace, or it was forced.
-	 * Wait it out.
-	 */
-	spin_unlock(&fc->lock);
-	wait_event(req->waitq, req->state == FUSE_REQ_FINISHED);
-	spin_lock(&fc->lock);
-
-	if (!req->aborted)
-		return;
-
- aborted:
-	BUG_ON(req->state != FUSE_REQ_FINISHED);
-	if (req->locked) {
-		/* This is uninterruptible sleep, because data is
-		   being copied to/from the buffers of req.  During
-		   locked state, there mustn't be any filesystem
-		   operation (e.g. page fault), since that could lead
-		   to deadlock */
-		spin_unlock(&fc->lock);
-		wait_event(req->waitq, !req->locked);
-		spin_lock(&fc->lock);
-	}
-}
-
-static void __fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
-{
-	BUG_ON(req->background);
-	spin_lock(&fc->lock);
-	if (!fc->connected)
-		req->out.h.error = -ENOTCONN;
-	else if (fc->conn_error)
-		req->out.h.error = -ECONNREFUSED;
-	else {
-		req->in.h.unique = fuse_get_unique(fc);
-		queue_request(fc, req);
-		/* acquire extra reference, since request is still needed
-		   after request_end() */
-		__fuse_get_request(req);
-
-		request_wait_answer(fc, req);
-	}
-	spin_unlock(&fc->lock);
-}
-
-void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
-{
-	req->isreply = 1;
-	__fuse_request_send(fc, req);
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
@@ -552,39 +432,6 @@ void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->isreply = 1;
 	fuse_request_send_nowait(fc, req);
-}
-
-/*
- * Called under fc->lock
- *
- * fc->connected must have been checked previously
- */
-void fuse_request_send_background_locked(struct fuse_conn *fc,
-					 struct fuse_req *req)
-{
-	req->isreply = 1;
-	fuse_request_send_nowait_locked(fc, req);
-}
-
-void fuse_force_forget(struct file *file, u64 nodeid)
-{
-	struct inode *inode = file_inode(file);
-	struct fuse_conn *fc = get_fuse_conn(inode);
-	struct fuse_req *req;
-	struct fuse_forget_in inarg;
-
-	memset(&inarg, 0, sizeof(inarg));
-	inarg.nlookup = 1;
-	req = fuse_get_req_nofail_nopages(fc, file);
-	req->in.h.opcode = FUSE_FORGET;
-	req->in.h.nodeid = nodeid;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(inarg);
-	req->in.args[0].value = &inarg;
-	req->isreply = 0;
-	__fuse_request_send(fc, req);
-	/* ignore errors */
-	fuse_put_request(fc, req);
 }
 
 /*
@@ -991,7 +838,7 @@ static int fuse_copy_args(struct fuse_copy_state *cs, unsigned numargs,
 
 static int request_pending(struct fuse_conn *fc)
 {
-	return !list_empty(&fc->pending) || !list_empty(&fc->interrupts);
+	return !list_empty(&fc->pending);
 }
 
 /* Wait until a request is available on the pending list */
@@ -1013,44 +860,6 @@ __acquires(fc->lock)
 	}
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&fc->waitq, &wait);
-}
-
-/*
- * Transfer an interrupt request to userspace
- *
- * Unlike other requests this is assembled on demand, without a need
- * to allocate a separate fuse_req structure.
- *
- * Called with fc->lock held, releases it
- */
-static int fuse_read_interrupt(struct fuse_conn *fc, struct fuse_copy_state *cs,
-			       size_t nbytes, struct fuse_req *req)
-__releases(fc->lock)
-{
-	struct fuse_in_header ih;
-	struct fuse_interrupt_in arg;
-	unsigned reqsize = sizeof(ih) + sizeof(arg);
-	int err;
-
-	list_del_init(&req->intr_entry);
-	req->intr_unique = fuse_get_unique(fc);
-	memset(&ih, 0, sizeof(ih));
-	memset(&arg, 0, sizeof(arg));
-	ih.len = reqsize;
-	ih.opcode = FUSE_INTERRUPT;
-	ih.unique = req->intr_unique;
-	arg.unique = req->in.h.unique;
-
-	spin_unlock(&fc->lock);
-	if (nbytes < reqsize)
-		return -EINVAL;
-
-	err = fuse_copy_one(cs, &ih, sizeof(ih));
-	if (!err)
-		err = fuse_copy_one(cs, &arg, sizeof(arg));
-	fuse_copy_finish(cs);
-
-	return err ? err : reqsize;
 }
 
 /*
@@ -1084,12 +893,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	err = -ERESTARTSYS;
 	if (!request_pending(fc))
 		goto err_unlock;
-
-	if (!list_empty(&fc->interrupts)) {
-		req = list_entry(fc->interrupts.next, struct fuse_req,
-				 intr_entry);
-		return fuse_read_interrupt(fc, cs, nbytes, req);
-	}
 
 	req = list_entry(fc->pending.next, struct fuse_req, list);
 	req->state = FUSE_REQ_READING;
@@ -1131,8 +934,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	else {
 		req->state = FUSE_REQ_SENT;
 		list_move_tail(&req->list, &fc->processing);
-		if (req->interrupted)
-			queue_interrupt(fc, req);
 		spin_unlock(&fc->lock);
 	}
 	return reqsize;
@@ -1327,7 +1128,7 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 
 	hlist_for_each_entry(req, &fc->hash[unique % FUSE_HASH_SIZE],
 			     hash_entry)
-		if (req->in.h.unique == unique || req->intr_unique == unique)
+		if (req->in.h.unique == unique)
 			return req;
 
 	return NULL;
@@ -1412,22 +1213,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 		request_end(fc, req);
 		return -ENOENT;
 	}
-	/* Is it an interrupt reply? */
-	if (req->intr_unique == oh.unique) {
-		err = -EINVAL;
-		if (nbytes != sizeof(struct fuse_out_header))
-			goto err_unlock;
-
-		if (oh.error == -ENOSYS)
-			fc->no_interrupt = 1;
-		else if (oh.error == -EAGAIN)
-			queue_interrupt(fc, req);
-
-		spin_unlock(&fc->lock);
-		fuse_copy_finish(cs);
-		return nbytes;
-	}
-
 	req->state = FUSE_REQ_WRITING;
 	list_move(&req->list, &fc->io);
 	req->out.h = oh;
@@ -1676,7 +1461,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	INIT_LIST_HEAD(&fc->pending);
 	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->io);
-	INIT_LIST_HEAD(&fc->interrupts);
 	INIT_LIST_HEAD(&fc->bg_queue);
 	INIT_LIST_HEAD(&fc->entry);
 	fc->hash = kmalloc(FUSE_HASH_SIZE * sizeof(*fc->hash), GFP_KERNEL);

@@ -259,14 +259,8 @@ struct fuse_req {
 	/** hash table entry */
 	struct hlist_node hash_entry;
 
-	/** Entry on the interrupts list  */
-	struct list_head intr_entry;
-
 	/** refcount */
 	atomic_t count;
-
-	/** Unique ID for the interrupt request */
-	u64 intr_unique;
 
 	/*
 	 * The following bitfields are either set once before the
@@ -285,9 +279,6 @@ struct fuse_req {
 
 	/** Request is sent in the background */
 	unsigned background:1;
-
-	/** The request has been interrupted */
-	unsigned interrupted:1;
 
 	/** Data is being copied to/from the request */
 	unsigned locked:1;
@@ -660,9 +651,6 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, struct qstr *name,
 
 struct fuse_forget_link *fuse_alloc_forget(void);
 
-/* Used by READDIRPLUS */
-void fuse_force_forget(struct file *file, u64 nodeid);
-
 /**
  * Initialize READ or READDIR request
  */
@@ -787,11 +775,6 @@ struct fuse_req *fuse_get_req_nofail_nopages(struct fuse_conn *fc,
 void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req);
 
 /**
- * Send a request (synchronous)
- */
-void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req);
-
-/**
  * Send a request to head of pending queue.
  */
 void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
@@ -800,9 +783,6 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
  * Send a request in the background
  */
 void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req);
-
-void fuse_request_send_background_locked(struct fuse_conn *fc,
-					 struct fuse_req *req);
 
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);
