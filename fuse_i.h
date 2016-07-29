@@ -271,9 +271,6 @@ struct fuse_req {
 	/** True if the request has reply */
 	unsigned isreply:1;
 
-	/** Force sending of the request even if interrupted */
-	unsigned force:1;
-
 	/** Request is sent in the background */
 	unsigned background:1;
 
@@ -285,9 +282,6 @@ struct fuse_req {
 
 	/** The request output */
 	struct fuse_out out;
-
-	/** Used to wake up the task waiting for completion of request*/
-	wait_queue_head_t waitq;
 
 	/** Data for asynchronous requests */
 	union {
@@ -335,12 +329,6 @@ struct fuse_req {
 	/** number of pages in vector */
 	unsigned num_pages;
 
-	/** File used in the request (or NULL) */
-	struct fuse_file *ff;
-
-	/** Inode used in the request or NULL */
-	struct inode *inode;
-
 	union {
 		/** AIO control block */
 		struct fuse_io_priv *io;
@@ -351,9 +339,6 @@ struct fuse_req {
 		/** Associated bio structrure. */
  		struct bio *bio;
 	};
-
-	/** Link on fi->writepages */
-	struct list_head writepages_entry;
 
 	/** Request completion callback */
 	void (*end)(struct fuse_conn *, struct fuse_req *);
