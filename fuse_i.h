@@ -292,9 +292,6 @@ struct fuse_req {
 	/** Data is being copied to/from the request */
 	unsigned locked:1;
 
-	/** Request is counted as "waiting" */
-	unsigned waiting:1;
-
 	/** State of the request */
 	enum fuse_req_state state;
 
@@ -577,9 +574,6 @@ struct fuse_conn {
 
 	/** Does the filesystem support asynchronous direct-IO submission? */
 	unsigned async_dio:1;
-
-	/** The number of requests waiting for completion */
-	atomic_t num_waiting;
 
 	/** Negotiated minor version */
 	unsigned minor;

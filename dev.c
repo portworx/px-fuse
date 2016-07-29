@@ -158,7 +158,6 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 {
 	struct fuse_req *req;
 	int err;
-	atomic_inc(&fc->num_waiting);
 
 	if (fuse_block_alloc(fc, for_background)) {
 		sigset_t oldset;
@@ -186,12 +185,10 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 	}
 
 	fuse_req_init_context(req);
-	req->waiting = 1;
 	req->background = for_background;
 	return req;
 
  out:
-	atomic_dec(&fc->num_waiting);
 	return ERR_PTR(err);
 }
 
@@ -266,14 +263,12 @@ struct fuse_req *fuse_get_req_nofail_nopages(struct fuse_conn *fc,
 {
 	struct fuse_req *req;
 
-	atomic_inc(&fc->num_waiting);
 	wait_event(fc->blocked_waitq, fc->initialized);
 	req = fuse_request_alloc(0);
 	if (!req)
 		req = get_reserved_req(fc, file);
 
 	fuse_req_init_context(req);
-	req->waiting = 1;
 	req->background = 0;
 	return req;
 }
@@ -291,9 +286,6 @@ void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
 				wake_up(&fc->blocked_waitq);
 			spin_unlock(&fc->lock);
 		}
-
-		if (req->waiting)
-			atomic_dec(&fc->num_waiting);
 
 		if (req->stolen_file)
 			put_reserved_req(fc, req);
@@ -332,10 +324,6 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 	req->state = FUSE_REQ_PENDING;
-	if (!req->waiting) {
-		req->waiting = 1;
-		atomic_inc(&fc->num_waiting);
-	}
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 }
@@ -353,10 +341,6 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 	req->state = FUSE_REQ_PENDING;
-	if (!req->waiting) {
-		req->waiting = 1;
-		atomic_inc(&fc->num_waiting);
-	}
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	spin_unlock(&fc->lock);
@@ -1700,7 +1684,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 		return -ENOMEM;
 	for (i = 0; i < FUSE_HASH_SIZE; ++i)
 		INIT_HLIST_HEAD(&fc->hash[i]);
-	atomic_set(&fc->num_waiting, 0);
 	fc->max_background = FUSE_DEFAULT_MAX_BACKGROUND;
 	fc->congestion_threshold = FUSE_DEFAULT_CONGESTION_THRESHOLD;
 	fc->khctr = 0;
