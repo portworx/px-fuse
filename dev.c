@@ -444,10 +444,7 @@ static int lock_request(struct fuse_conn *fc, struct fuse_req *req)
 	int err = 0;
 	if (req) {
 		spin_lock(&fc->lock);
-		if (req->aborted)
-			err = -ENOENT;
-		else
-			req->locked = 1;
+		req->locked = 1;
 		spin_unlock(&fc->lock);
 	}
 	return err;
@@ -463,8 +460,6 @@ static void unlock_request(struct fuse_conn *fc, struct fuse_req *req)
 	if (req) {
 		spin_lock(&fc->lock);
 		req->locked = 0;
-		if (req->aborted)
-			wake_up(&req->waitq);
 		spin_unlock(&fc->lock);
 	}
 }
@@ -685,11 +680,9 @@ static int fuse_try_move_page(struct fuse_copy_state *cs, struct page **pagep)
 		lru_cache_add_file(newpage);
 
 	err = 0;
+
 	spin_lock(&cs->fc->lock);
-	if (cs->req->aborted)
-		err = -ENOENT;
-	else
-		*pagep = newpage;
+	*pagep = newpage;
 	spin_unlock(&cs->fc->lock);
 
 	if (err) {
@@ -920,10 +913,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	fuse_copy_finish(cs);
 	spin_lock(&fc->lock);
 	req->locked = 0;
-	if (req->aborted) {
-		request_end(fc, req);
-		return -ENODEV;
-	}
 	if (err) {
 		req->out.h.error = -EIO;
 		request_end(fc, req);
@@ -1206,13 +1195,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 	if (!req)
 		goto err_unlock;
 
-	if (req->aborted) {
-		spin_unlock(&fc->lock);
-		fuse_copy_finish(cs);
-		spin_lock(&fc->lock);
-		request_end(fc, req);
-		return -ENOENT;
-	}
 	req->state = FUSE_REQ_WRITING;
 	list_move(&req->list, &fc->io);
 	req->out.h = oh;
@@ -1227,10 +1209,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 
 	spin_lock(&fc->lock);
 	req->locked = 0;
-	if (!err) {
-		if (req->aborted)
-			err = -ENOENT;
-	} else if (!req->aborted)
+	if (err)
 		req->out.h.error = -EIO;
 	request_end(fc, req);
 
@@ -1405,7 +1384,6 @@ __acquires(fc->lock)
 			list_entry(fc->io.next, struct fuse_req, list);
 		void (*end) (struct fuse_conn *, struct fuse_req *) = req->end;
 
-		req->aborted = 1;
 		req->out.h.error = -ECONNABORTED;
 		req->state = FUSE_REQ_FINISHED;
 		list_del_init(&req->list);
