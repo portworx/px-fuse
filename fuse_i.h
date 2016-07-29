@@ -456,13 +456,6 @@ struct fuse_conn {
 	/** Pending interrupts */
 	struct list_head interrupts;
 
-	/** Queue of pending forgets */
-	struct fuse_forget_link forget_list_head;
-	struct fuse_forget_link *forget_list_tail;
-
-	/** Batching of FORGET requests (positive indicates FORGET batch) */
-	int forget_batch;
-
 	/** Flag indicating that INIT reply has been received. Allocating
 	 * any fuse request will be suspended until the flag is set */
 	int initialized;
@@ -670,12 +663,6 @@ struct inode *fuse_iget(struct super_block *sb, u64 nodeid,
 
 int fuse_lookup_name(struct super_block *sb, u64 nodeid, struct qstr *name,
 		     struct fuse_entry_out *outarg, struct inode **inode);
-
-/**
- * Send FORGET command
- */
-void fuse_queue_forget(struct fuse_conn *fc, struct fuse_forget_link *forget,
-		       u64 nodeid, u64 nlookup);
 
 struct fuse_forget_link *fuse_alloc_forget(void);
 
