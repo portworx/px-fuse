@@ -194,76 +194,6 @@ struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
 	return __fuse_get_req(fc, npages, true);
 }
 
-/*
- * Return request in fuse_file->reserved_req.  However that may
- * currently be in use.  If that is the case, wait for it to become
- * available.
- */
-static struct fuse_req *get_reserved_req(struct fuse_conn *fc,
-					 struct file *file)
-{
-	struct fuse_req *req = NULL;
-	struct fuse_file *ff = file->private_data;
-
-	do {
-		wait_event(fc->reserved_req_waitq, ff->reserved_req);
-		spin_lock(&fc->lock);
-		if (ff->reserved_req) {
-			req = ff->reserved_req;
-			ff->reserved_req = NULL;
-			req->stolen_file = get_file(file);
-		}
-		spin_unlock(&fc->lock);
-	} while (!req);
-
-	return req;
-}
-
-/*
- * Put stolen request back into fuse_file->reserved_req
- */
-static void put_reserved_req(struct fuse_conn *fc, struct fuse_req *req)
-{
-	struct file *file = req->stolen_file;
-	struct fuse_file *ff = file->private_data;
-
-	spin_lock(&fc->lock);
-	fuse_request_init(req, req->pages, req->page_descs, req->max_pages);
-	BUG_ON(ff->reserved_req);
-	ff->reserved_req = req;
-	wake_up_all(&fc->reserved_req_waitq);
-	spin_unlock(&fc->lock);
-	fput(file);
-}
-
-/*
- * Gets a requests for a file operation, always succeeds
- *
- * This is used for sending the FLUSH request, which must get to
- * userspace, due to POSIX locks which may need to be unlocked.
- *
- * If allocation fails due to OOM, use the reserved request in
- * fuse_file.
- *
- * This is very unlikely to deadlock accidentally, since the
- * filesystem should not have it's own file open.  If deadlock is
- * intentional, it can still be broken by "aborting" the filesystem.
- */
-struct fuse_req *fuse_get_req_nofail_nopages(struct fuse_conn *fc,
-					     struct file *file)
-{
-	struct fuse_req *req;
-
-	wait_event(fc->blocked_waitq, fc->initialized);
-	req = fuse_request_alloc(0);
-	if (!req)
-		req = get_reserved_req(fc, file);
-
-	fuse_req_init_context(req);
-	req->background = 0;
-	return req;
-}
-
 void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
 {
 	if (atomic_dec_and_test(&req->count)) {
@@ -278,10 +208,7 @@ void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
 			spin_unlock(&fc->lock);
 		}
 
-		if (req->stolen_file)
-			put_reserved_req(fc, req);
-		else
-			fuse_request_free(req);
+		fuse_request_free(req);
 	}
 }
 
@@ -1391,7 +1318,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
 	init_waitqueue_head(&fc->blocked_waitq);
-	init_waitqueue_head(&fc->reserved_req_waitq);
 	INIT_LIST_HEAD(&fc->pending);
 	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->io);

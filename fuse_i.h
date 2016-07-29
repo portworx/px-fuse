@@ -130,9 +130,6 @@ struct fuse_file {
 	/** Fuse connection for this file */
 	struct fuse_conn *fc;
 
-	/** Request reserved for flush and release */
-	struct fuse_req *reserved_req;
-
 	/** Kernel file handle guaranteed to be unique */
 	u64 kh;
 
@@ -340,9 +337,6 @@ struct fuse_req {
 	/** Request completion callback */
 	void (*end)(struct fuse_conn *, struct fuse_req *);
 
-	/** Request is stolen from fuse_file->reserved_req */
-	struct file *stolen_file;
-
 	/** start processing */
 	struct timespec start;
 };
@@ -428,9 +422,6 @@ struct fuse_conn {
 
 	/** waitq for blocked connection */
 	wait_queue_head_t blocked_waitq;
-
-	/** waitq for reserved requests */
-	wait_queue_head_t reserved_req_waitq;
 
 	/** The next unique request id */
 	u64 reqctr;
@@ -734,12 +725,6 @@ static inline struct fuse_req *fuse_get_req_nopages(struct fuse_conn *fc)
 {
 	return fuse_get_req(fc, 0);
 }
-
-/**
- * Gets a requests for a file operation, always succeeds
- */
-struct fuse_req *fuse_get_req_nofail_nopages(struct fuse_conn *fc,
-					     struct file *file);
 
 /**
  * Decrement reference count of a request.  If count goes to zero free
