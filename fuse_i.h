@@ -336,9 +336,6 @@ struct fuse_req {
 
 	/** Request completion callback */
 	void (*end)(struct fuse_conn *, struct fuse_req *);
-
-	/** start processing */
-	struct timespec start;
 };
 
 /**
