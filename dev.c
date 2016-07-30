@@ -197,6 +197,10 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 	req->state = FUSE_REQ_PENDING;
+}
+
+static void fuse_conn_wakeup(struct fuse_conn *fc)
+{
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 }
@@ -214,9 +218,9 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 	req->state = FUSE_REQ_PENDING;
-	wake_up(&fc->waitq);
-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	spin_unlock(&fc->lock);
+
+	fuse_conn_wakeup(fc);
 }
 
 /*
@@ -279,6 +283,8 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		}
 		fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
+
+		fuse_conn_wakeup(fc);
 	} else {
 		req->out.h.error = -ENOTCONN;
 		request_end(fc, req);
