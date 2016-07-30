@@ -114,19 +114,6 @@ void fuse_request_free(struct fuse_req *req)
 	kmem_cache_free(fuse_req_cachep, req);
 }
 
-static void block_sigs(sigset_t *oldset)
-{
-	sigset_t mask;
-
-	siginitsetinv(&mask, sigmask(SIGKILL));
-	sigprocmask(SIG_BLOCK, &mask, oldset);
-}
-
-static void restore_sigs(sigset_t *oldset)
-{
-	sigprocmask(SIG_SETMASK, oldset, NULL);
-}
-
 void __fuse_get_request(struct fuse_req *req)
 {
 	atomic_inc(&req->count);
@@ -139,29 +126,11 @@ static void fuse_req_init_context(struct fuse_req *req)
 	req->in.h.pid = current->pid;
 }
 
-static bool fuse_block_alloc(struct fuse_conn *fc, bool for_background)
-{
-	return !fc->initialized || (for_background && fc->blocked);
-}
-
 static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 				       bool for_background)
 {
 	struct fuse_req *req;
 	int err;
-
-	if (fuse_block_alloc(fc, for_background)) {
-		sigset_t oldset;
-		int intr;
-
-		block_sigs(&oldset);
-		intr = wait_event_interruptible_exclusive(fc->blocked_waitq,
-				!fuse_block_alloc(fc, for_background));
-		restore_sigs(&oldset);
-		err = -EINTR;
-		if (intr)
-			goto out;
-	}
 
 	err = -ENOTCONN;
 	if (!fc->connected && !fc->allow_disconnected)
@@ -170,8 +139,6 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 	req = fuse_request_alloc(npages);
 	err = -ENOMEM;
 	if (!req) {
-		if (for_background)
-			wake_up(&fc->blocked_waitq);
 		goto out;
 	}
 
@@ -196,20 +163,8 @@ struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
 
 void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
 {
-	if (atomic_dec_and_test(&req->count)) {
-		if (unlikely(req->background)) {
-			/*
-			 * We get here in the unlikely case that a background
-			 * request was allocated but not sent
-			 */
-			spin_lock(&fc->lock);
-			if (!fc->blocked)
-				wake_up(&fc->blocked_waitq);
-			spin_unlock(&fc->lock);
-		}
-
+	if (atomic_dec_and_test(&req->count))
 		fuse_request_free(req);
-	}
 }
 
 static unsigned len_args(unsigned numargs, struct fuse_arg *args)
@@ -264,20 +219,6 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 	spin_unlock(&fc->lock);
 }
 
-static void flush_bg_queue(struct fuse_conn *fc)
-{
-	while (fc->active_background < fc->max_background &&
-	       !list_empty(&fc->bg_queue)) {
-		struct fuse_req *req;
-
-		req = list_entry(fc->bg_queue.next, struct fuse_req, list);
-		list_del(&req->list);
-		fc->active_background++;
-		req->in.h.unique = fuse_get_unique(fc);
-		queue_request(fc, req);
-	}
-}
-
 /*
  * This function is called when a request is finished.  Either a reply
  * has arrived or it was aborted (and not yet sent) or some error
@@ -300,13 +241,6 @@ __releases(fc->lock)
 	if (req->background) {
 		req->background = 0;
 
-		if (fc->num_background == fc->max_background)
-			fc->blocked = 0;
-
-		/* Wake up next waiter, if any */
-		if (!fc->blocked && waitqueue_active(&fc->blocked_waitq))
-			wake_up(&fc->blocked_waitq);
-
 		if (fc->num_background == fc->congestion_threshold &&
 		    fc->connected && fc->bdi_initialized) {
 			clear_bdi_congested(&fc->bdi, BLK_RW_SYNC);
@@ -314,7 +248,6 @@ __releases(fc->lock)
 		}
 		fc->num_background--;
 		fc->active_background--;
-		flush_bg_queue(fc);
 	}
 	spin_unlock(&fc->lock);
 	if (end)
@@ -327,15 +260,14 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 {
 	BUG_ON(!req->background);
 	fc->num_background++;
-	if (fc->num_background == fc->max_background)
-		fc->blocked = 1;
 	if (fc->num_background == fc->congestion_threshold &&
 	    fc->bdi_initialized) {
 		set_bdi_congested(&fc->bdi, BLK_RW_SYNC);
 		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 	}
-	list_add_tail(&req->list, &fc->bg_queue);
-	flush_bg_queue(fc);
+	fc->active_background++;
+	req->in.h.unique = fuse_get_unique(fc);
+	queue_request(fc, req);
 }
 
 static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
@@ -1288,7 +1220,6 @@ __releases(fc->lock)
 __acquires(fc->lock)
 {
 	fc->max_background = UINT_MAX;
-	flush_bg_queue(fc);
 	end_requests(fc, &fc->pending);
 	end_requests(fc, &fc->processing);
 }
@@ -1317,11 +1248,9 @@ int fuse_conn_init(struct fuse_conn *fc)
 	init_rwsem(&fc->killsb);
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
-	init_waitqueue_head(&fc->blocked_waitq);
 	INIT_LIST_HEAD(&fc->pending);
 	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->io);
-	INIT_LIST_HEAD(&fc->bg_queue);
 	INIT_LIST_HEAD(&fc->entry);
 	fc->hash = kmalloc(FUSE_HASH_SIZE * sizeof(*fc->hash), GFP_KERNEL);
 	if (!fc->hash)
@@ -1333,7 +1262,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	fc->khctr = 0;
 	fc->polled_files = RB_ROOT;
 	fc->reqctr = 0;
-	fc->blocked = 0;
 	fc->initialized = 0;
 	fc->attr_version = 1;
 	get_random_bytes(&fc->scramble_key, sizeof(fc->scramble_key));
@@ -1381,13 +1309,11 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	spin_lock(&fc->lock);
 	if (fc->connected) {
 		fc->connected = 0;
-		fc->blocked = 0;
 		fc->initialized = 1;
 		end_io_requests(fc);
 		end_queued_requests(fc);
 		end_polls(fc);
 		wake_up_all(&fc->waitq);
-		wake_up_all(&fc->blocked_waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	}
 	spin_unlock(&fc->lock);
@@ -1399,11 +1325,9 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	if (fc) {
 		spin_lock(&fc->lock);
 		fc->connected = 0;
-		fc->blocked = 0;
 		fc->initialized = 1;
 		end_queued_requests(fc);
 		end_polls(fc);
-		wake_up_all(&fc->blocked_waitq);
 		spin_unlock(&fc->lock);
 		fuse_conn_put(fc);
 	}
@@ -1437,7 +1361,6 @@ void fuse_end_matching_requests(struct fuse_conn *fc,
 	INIT_LIST_HEAD(&del_list);
 
 	spin_lock(&fc->lock);
-	move_matching(fc, &fc->bg_queue, &del_list, filter, arg);
 	move_matching(fc, &fc->pending, &del_list, filter, arg);
 	move_matching(fc, &fc->processing, &del_list, filter, arg);
 	end_requests(fc, &del_list);

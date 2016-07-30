@@ -164,11 +164,12 @@ static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
 			}
 			printk(KERN_INFO "%s: pxd_ctx: %s ndevices: %lu",
 				__func__, ctx->name, ctx->num_devices);
-			printk(KERN_INFO "\tFC: connected: %d blocked: %d "
-				"max: %d threshold: %d nb: %d ab: %d", ctx->fc.connected,
-				ctx->fc.blocked, ctx->fc.max_background,
-				ctx->fc.congestion_threshold, ctx->fc.num_background,
-				ctx->fc.active_background);
+			printk(KERN_INFO "\tFC: connected: %d "
+				 "max: %d threshold: %d nb: %d ab: %d",
+			       ctx->fc.connected, ctx->fc.max_background,
+			       ctx->fc.congestion_threshold,
+			       ctx->fc.num_background,
+			       ctx->fc.active_background);
 		}
 		status = 0;
 		break;

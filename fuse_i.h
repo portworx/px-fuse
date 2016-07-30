@@ -402,26 +402,12 @@ struct fuse_conn {
 	/** Number of background requests currently queued for userspace */
 	unsigned active_background;
 
-	/** The list of background requests set aside for later queuing */
-	struct list_head bg_queue;
-
 	/** hash table of pending requests */
 	struct hlist_head *hash;
-
-	/** Pending interrupts */
-	struct list_head interrupts;
 
 	/** Flag indicating that INIT reply has been received. Allocating
 	 * any fuse request will be suspended until the flag is set */
 	int initialized;
-
-	/** Flag indicating if connection is blocked.  This will be
-	    the case before the INIT reply is received, and if there
-	    are too many outstading backgrounds requests */
-	int blocked;
-
-	/** waitq for blocked connection */
-	wait_queue_head_t blocked_waitq;
 
 	/** The next unique request id */
 	u64 reqctr;
