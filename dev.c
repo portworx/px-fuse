@@ -190,8 +190,6 @@ static u64 fuse_get_unique(struct fuse_conn *fc)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
-	req->in.h.len = sizeof(struct fuse_in_header) +
-		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
 	list_add_tail(&req->list, &fc->pending);
 	if (hlist_unhashed(&req->hash_entry))
 		hlist_add_head(&req->hash_entry,
@@ -276,6 +274,9 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 
 static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
+	req->in.h.len = sizeof(struct fuse_in_header) +
+		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
+
 	spin_lock(&fc->lock);
 	if (fc->connected || fc->allow_disconnected) {
 		if (!fc->connected) {
