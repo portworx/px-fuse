@@ -271,6 +271,9 @@ struct fuse_req {
 	/** Request is sent in the background */
 	unsigned background:1;
 
+	/** Request page descriptor is struct request *rq */
+	unsigned bio_pages:1;
+
 	/** State of the request */
 	enum fuse_req_state state;
 

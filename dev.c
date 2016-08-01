@@ -22,6 +22,8 @@
 #include <linux/aio.h>
 #include <linux/random.h>
 #include <linux/version.h>
+#include <linux/blkdev.h>
+#include "pxd_compat.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -298,364 +300,6 @@ void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
 	fuse_request_send_nowait(fc, req);
 }
 
-struct fuse_copy_state {
-	struct fuse_conn *fc;
-	int write;
-	struct fuse_req *req;
-	const struct iovec *iov;
-	struct pipe_buffer *pipebufs;
-	struct pipe_buffer *currbuf;
-	struct pipe_inode_info *pipe;
-	unsigned long nr_segs;
-	unsigned long seglen;
-	unsigned long addr;
-	struct page *pg;
-	unsigned len;
-	unsigned offset;
-	unsigned move_pages:1;
-};
-
-static void fuse_copy_init(struct fuse_copy_state *cs, struct fuse_conn *fc,
-			   int write,
-			   const struct iovec *iov, unsigned long nr_segs)
-{
-	memset(cs, 0, sizeof(*cs));
-	cs->fc = fc;
-	cs->write = write;
-	cs->iov = iov;
-	cs->nr_segs = nr_segs;
-}
-
-/* Unmap and put previous page of userspace buffer */
-static void fuse_copy_finish(struct fuse_copy_state *cs)
-{
-	if (cs->currbuf) {
-		struct pipe_buffer *buf = cs->currbuf;
-
-		if (cs->write)
-			buf->len = PAGE_SIZE - cs->len;
-		cs->currbuf = NULL;
-	} else if (cs->pg) {
-		if (cs->write) {
-			flush_dcache_page(cs->pg);
-			set_page_dirty_lock(cs->pg);
-		}
-		put_page(cs->pg);
-	}
-	cs->pg = NULL;
-}
-
-/*
- * Get another pagefull of userspace buffer, and map it to kernel
- * address space, and lock request
- */
-static int fuse_copy_fill(struct fuse_copy_state *cs)
-{
-	struct page *page;
-	int err;
-
-	fuse_copy_finish(cs);
-	if (cs->pipebufs) {
-		struct pipe_buffer *buf = cs->pipebufs;
-
-		if (!cs->write) {
-			err = buf->ops->confirm(cs->pipe, buf);
-			if (err)
-				return err;
-
-			BUG_ON(!cs->nr_segs);
-			cs->currbuf = buf;
-			cs->pg = buf->page;
-			cs->offset = buf->offset;
-			cs->len = buf->len;
-			cs->pipebufs++;
-			cs->nr_segs--;
-		} else {
-			if (cs->nr_segs == cs->pipe->buffers)
-				return -EIO;
-
-			page = alloc_page(GFP_HIGHUSER);
-			if (!page)
-				return -ENOMEM;
-
-			buf->page = page;
-			buf->offset = 0;
-			buf->len = 0;
-
-			cs->currbuf = buf;
-			cs->pg = page;
-			cs->offset = 0;
-			cs->len = PAGE_SIZE;
-			cs->pipebufs++;
-			cs->nr_segs++;
-		}
-	} else {
-		if (!cs->seglen) {
-			BUG_ON(!cs->nr_segs);
-			cs->seglen = cs->iov[0].iov_len;
-			cs->addr = (unsigned long) cs->iov[0].iov_base;
-			cs->iov++;
-			cs->nr_segs--;
-		}
-		err = get_user_pages_fast(cs->addr, 1, cs->write, &page);
-		if (err < 0)
-			return err;
-		BUG_ON(err != 1);
-		cs->pg = page;
-		cs->offset = cs->addr % PAGE_SIZE;
-		cs->len = min(PAGE_SIZE - cs->offset, cs->seglen);
-		cs->seglen -= cs->len;
-		cs->addr += cs->len;
-	}
-
-	return 0;
-}
-
-/* Do as much copy to/from userspace buffer as we can */
-static int fuse_copy_do(struct fuse_copy_state *cs, void **val, unsigned *size)
-{
-	unsigned ncpy = min(*size, cs->len);
-	if (val) {
-		void *pgaddr = kmap_atomic(cs->pg);
-		void *buf = pgaddr + cs->offset;
-
-		if (cs->write)
-			memcpy(buf, *val, ncpy);
-		else
-			memcpy(*val, buf, ncpy);
-
-		kunmap_atomic(pgaddr);
-		*val += ncpy;
-	}
-	*size -= ncpy;
-	cs->len -= ncpy;
-	cs->offset += ncpy;
-	return ncpy;
-}
-
-static int fuse_check_page(struct page *page)
-{
-	if (page_mapcount(page) ||
-	    page->mapping != NULL ||
-	    page_count(page) != 1 ||
-	    (page->flags & PAGE_FLAGS_CHECK_AT_PREP &
-	     ~(1 << PG_locked |
-	       1 << PG_referenced |
-	       1 << PG_uptodate |
-	       1 << PG_lru |
-	       1 << PG_active |
-	       1 << PG_reclaim))) {
-		printk(KERN_WARNING "fuse: trying to steal weird page\n");
-		printk(KERN_WARNING "  page=%p index=%li flags=%08lx, count=%i, mapcount=%i, mapping=%p\n", page, page->index, page->flags, page_count(page), page_mapcount(page), page->mapping);
-		return 1;
-	}
-	return 0;
-}
-
-static int fuse_try_move_page(struct fuse_copy_state *cs, struct page **pagep)
-{
-	int err;
-	struct page *oldpage = *pagep;
-	struct page *newpage;
-	struct pipe_buffer *buf = cs->pipebufs;
-
-	fuse_copy_finish(cs);
-
-	err = buf->ops->confirm(cs->pipe, buf);
-	if (err)
-		return err;
-
-	BUG_ON(!cs->nr_segs);
-	cs->currbuf = buf;
-	cs->len = buf->len;
-	cs->pipebufs++;
-	cs->nr_segs--;
-
-	if (cs->len != PAGE_SIZE)
-		goto out_fallback;
-
-	if (buf->ops->steal(cs->pipe, buf) != 0)
-		goto out_fallback;
-
-	newpage = buf->page;
-
-	if (WARN_ON(!PageUptodate(newpage)))
-		return -EIO;
-
-	ClearPageMappedToDisk(newpage);
-
-	if (fuse_check_page(newpage) != 0)
-		goto out_fallback_unlock;
-
-	/*
-	 * This is a new and locked page, it shouldn't be mapped or
-	 * have any special flags on it
-	 */
-	if (WARN_ON(page_mapped(oldpage)))
-		goto out_fallback_unlock;
-	if (WARN_ON(page_has_private(oldpage)))
-		goto out_fallback_unlock;
-	if (WARN_ON(PageDirty(oldpage) || PageWriteback(oldpage)))
-		goto out_fallback_unlock;
-	if (WARN_ON(PageMlocked(oldpage)))
-		goto out_fallback_unlock;
-
-	err = replace_page_cache_page(oldpage, newpage, GFP_KERNEL);
-	if (err) {
-		unlock_page(newpage);
-		return err;
-	}
-
-	PAGE_CACHE_GET(newpage);
-
-	if (!(buf->flags & PIPE_BUF_FLAG_LRU))
-		lru_cache_add_file(newpage);
-
-	err = 0;
-
-	spin_lock(&cs->fc->lock);
-	*pagep = newpage;
-	spin_unlock(&cs->fc->lock);
-
-	if (err) {
-		unlock_page(newpage);
-		PAGE_CACHE_RELEASE(newpage);
-		return err;
-	}
-
-	unlock_page(oldpage);
-	PAGE_CACHE_RELEASE(oldpage);
-	cs->len = 0;
-
-	return 0;
-
-out_fallback_unlock:
-	unlock_page(newpage);
-out_fallback:
-	cs->pg = buf->page;
-	cs->offset = buf->offset;
-
-	return 1;
-}
-
-static int fuse_ref_page(struct fuse_copy_state *cs, struct page *page,
-			 unsigned offset, unsigned count)
-{
-	struct pipe_buffer *buf;
-
-	if (cs->nr_segs == cs->pipe->buffers)
-		return -EIO;
-
-	fuse_copy_finish(cs);
-
-	buf = cs->pipebufs;
-	PAGE_CACHE_GET(page);
-	buf->page = page;
-	buf->offset = offset;
-	buf->len = count;
-
-	cs->pipebufs++;
-	cs->nr_segs++;
-	cs->len = 0;
-
-	return 0;
-}
-
-/*
- * Copy a page in the request to/from the userspace buffer.  Must be
- * done atomically
- */
-static int fuse_copy_page(struct fuse_copy_state *cs, struct page **pagep,
-			  unsigned offset, unsigned count, int zeroing)
-{
-	int err;
-	struct page *page = *pagep;
-
-	if (page && zeroing && count < PAGE_SIZE)
-		clear_highpage(page);
-
-	while (count) {
-		if (cs->write && cs->pipebufs && page) {
-			return fuse_ref_page(cs, page, offset, count);
-		} else if (!cs->len) {
-			if (cs->move_pages && page &&
-			    offset == 0 && count == PAGE_SIZE) {
-				err = fuse_try_move_page(cs, pagep);
-				if (err <= 0)
-					return err;
-			} else {
-				err = fuse_copy_fill(cs);
-				if (err)
-					return err;
-			}
-		}
-		if (page) {
-			void *mapaddr = kmap_atomic(page);
-			void *buf = mapaddr + offset;
-			offset += fuse_copy_do(cs, &buf, &count);
-			kunmap_atomic(mapaddr);
-		} else
-			offset += fuse_copy_do(cs, NULL, &count);
-	}
-	if (page && !cs->write)
-		flush_dcache_page(page);
-	return 0;
-}
-
-/* Copy pages in the request to/from userspace buffer */
-static int fuse_copy_pages(struct fuse_copy_state *cs, unsigned nbytes,
-			   int zeroing)
-{
-	unsigned i;
-	struct fuse_req *req = cs->req;
-
-	for (i = 0; i < req->num_pages && (nbytes || zeroing); i++) {
-		int err;
-		unsigned offset = req->page_descs[i].offset;
-		unsigned count = min(nbytes, req->page_descs[i].length);
-
-		err = fuse_copy_page(cs, &req->pages[i], offset, count,
-				     zeroing);
-		if (err)
-			return err;
-
-		nbytes -= count;
-	}
-	return 0;
-}
-
-/* Copy a single argument in the request to/from userspace buffer */
-static int fuse_copy_one(struct fuse_copy_state *cs, void *val, unsigned size)
-{
-	while (size) {
-		if (!cs->len) {
-			int err = fuse_copy_fill(cs);
-			if (err)
-				return err;
-		}
-		fuse_copy_do(cs, &val, &size);
-	}
-	return 0;
-}
-
-/* Copy request arguments to/from userspace buffer */
-static int fuse_copy_args(struct fuse_copy_state *cs, unsigned numargs,
-			  unsigned argpages, struct fuse_arg *args,
-			  int zeroing)
-{
-	int err = 0;
-	unsigned i;
-
-	for (i = 0; !err && i < numargs; i++)  {
-		struct fuse_arg *arg = &args[i];
-		if (i == numargs - 1 && argpages)
-			err = fuse_copy_pages(cs, arg->size, zeroing);
-		else
-			err = fuse_copy_one(cs, arg->value, arg->size);
-	}
-	return err;
-}
-
 static int request_pending(struct fuse_conn *fc)
 {
 	return !list_empty(&fc->pending);
@@ -682,6 +326,64 @@ __acquires(fc->lock)
 	remove_wait_queue(&fc->waitq, &wait);
 }
 
+ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
+{
+	struct request *breq = req->rq;
+	size_t copied = 0;
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+#else
+	struct bio_vec *bvec = NULL;
+#endif
+	struct req_iterator breq_iter;
+	size_t len;
+
+	len = sizeof(req->in.h);
+	if (copy_to_iter(&req->in.h, len, iter) != len) {
+		printk(KERN_ERR "%s: copy header error\n", __func__);
+		return -EFAULT;
+	}
+	copied += len;
+
+	len = req->in.args[0].size;
+	if (copy_to_iter((void *)req->in.args[0].value, len, iter) != len) {
+		printk(KERN_ERR "%s: copy arg error\n", __func__);
+		return -EFAULT;
+	}
+	copied += len;
+
+	if (req->bio_pages && breq->nr_phys_segments &&
+		req->in.h.opcode == PXD_WRITE) {
+		int i = 0;
+		rq_for_each_segment(bvec, breq, breq_iter) {
+			len = BVEC(bvec).bv_len;
+			if (copy_page_to_iter(BVEC(bvec).bv_page,
+					      BVEC(bvec).bv_offset,
+					      len, iter) != len) {
+				printk(KERN_ERR "%s: copy page bio %d of %d error\n",
+				       __func__, i, breq->nr_phys_segments);
+				return -EFAULT;
+			}
+			copied += len;
+		}
+	} else if (req->num_pages) {
+		int i;
+		for (i = 0; i < req->num_pages; ++i) {
+			len = req->page_descs[i].length;
+			if (copy_page_to_iter(req->pages[i],
+					      req->page_descs[i].offset,
+					      len, iter) != len) {
+				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
+				       __func__, i, breq->nr_phys_segments);
+				return -EFAULT;
+			}
+			copied += len;
+		}
+	}
+
+	return copied;
+}
+
 /*
  * Read a single request into the userspace filesystem's buffer.  This
  * function waits until a request is available, then removes it from
@@ -692,14 +394,12 @@ __acquires(fc->lock)
  * the 'sent' flag.
  */
 static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
-				struct fuse_copy_state *cs, size_t nbytes)
+	struct iov_iter *iter)
 {
 	int err;
 	struct fuse_req *req;
-	struct fuse_in *in;
-	unsigned reqsize;
+	ssize_t copied;
 
- restart:
 	spin_lock(&fc->lock);
 	err = -EAGAIN;
 	if ((file->f_flags & O_NONBLOCK) && fc->connected &&
@@ -719,27 +419,12 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	list_move(&req->list, &fc->processing);
 	spin_unlock(&fc->lock);
 
-	in = &req->in;
-	reqsize = in->h.len;
-	/* If request is too large, reply with an error and restart the read */
-	if (nbytes < reqsize) {
-		printk("%s request is too large (%u), buffer size (%lu)",
-			__func__, reqsize, nbytes);
-		req->out.h.error = -EIO;
-		/* SETXATTR is special, since it may contain too large data */
-		if (in->h.opcode == FUSE_SETXATTR)
-			req->out.h.error = -E2BIG;
-		spin_lock(&fc->lock);
-		request_end(fc, req);
-		goto restart;
+	copied = fuse_copy_req_read(req, iter);
+	if (copied > 0) {
+		err = 0;
+	} else {
+		err = copied;
 	}
-
-	cs->req = req;
-	err = fuse_copy_one(cs, &in->h, sizeof(in->h));
-	if (likely(!err))
-		err = fuse_copy_args(cs, in->numargs, in->argpages,
-				     (struct fuse_arg *) in->args, 0);
-	fuse_copy_finish(cs);
 
 	if (unlikely(err)) {
 		req->out.h.error = -EIO;
@@ -752,7 +437,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 		request_end(fc, req);
 	}
 
-	return reqsize;
+	return copied;
 
  err_unlock:
 	spin_unlock(&fc->lock);
@@ -764,28 +449,24 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 static ssize_t fuse_dev_read(struct kiocb *iocb, const struct iovec *iov,
 			      unsigned long nr_segs, loff_t pos)
 {
-	struct fuse_copy_state cs;
 	struct file *file = iocb->ki_filp;
 	struct fuse_conn *fc = fuse_get_conn(file);
+	struct iov_iter iter;
 	if (!fc)
 		return -EPERM;
+	iov_iter_init(&iter, READ, iov, nr_segs, iov_length(iov, nr_segs));
 
-	fuse_copy_init(&cs, fc, 1, iov, nr_segs);
-
-	return fuse_dev_do_read(fc, file, &cs, iov_length(iov, nr_segs));
+	return fuse_dev_do_read(fc, file, &iter);
 }
 #else
 static ssize_t fuse_dev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	struct fuse_copy_state cs;
 	struct file *file = iocb->ki_filp;
 	struct fuse_conn *fc = fuse_get_conn(file);
 	if (!fc)
 		return -EPERM;
 
-	fuse_copy_init(&cs, fc, 1, to->iov, to->nr_segs);
-
-	return fuse_dev_do_read(fc, file, &cs, iov_length(to->iov, to->nr_segs));
+	return fuse_dev_do_read(fc, file, to);
 }
 #endif
 
@@ -810,129 +491,44 @@ static ssize_t fuse_dev_splice_read(struct file *in, loff_t *ppos,
 				    struct pipe_inode_info *pipe,
 				    size_t len, unsigned int flags)
 {
-	int ret;
-	int page_nr = 0;
-	int do_wakeup = 0;
-	struct pipe_buffer *bufs;
-	struct fuse_copy_state cs;
-	struct fuse_conn *fc = fuse_get_conn(in);
-	if (!fc)
-		return -EPERM;
-
-	bufs = kmalloc(pipe->buffers * sizeof(struct pipe_buffer), GFP_KERNEL);
-	if (!bufs)
-		return -ENOMEM;
-
-	fuse_copy_init(&cs, fc, 1, NULL, 0);
-	cs.pipebufs = bufs;
-	cs.pipe = pipe;
-	ret = fuse_dev_do_read(fc, in, &cs, len);
-	if (ret < 0)
-		goto out;
-
-	ret = 0;
-	pipe_lock(pipe);
-
-	if (!pipe->readers) {
-		send_sig(SIGPIPE, current, 0);
-		if (!ret)
-			ret = -EPIPE;
-		goto out_unlock;
-	}
-
-	if (pipe->nrbufs + cs.nr_segs > pipe->buffers) {
-		ret = -EIO;
-		goto out_unlock;
-	}
-
-	while (page_nr < cs.nr_segs) {
-		int newbuf = (pipe->curbuf + pipe->nrbufs) & (pipe->buffers - 1);
-		struct pipe_buffer *buf = pipe->bufs + newbuf;
-
-		buf->page = bufs[page_nr].page;
-		buf->offset = bufs[page_nr].offset;
-		buf->len = bufs[page_nr].len;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
-		buf->ops = &fuse_dev_pipe_buf_ops;
-#else
-		/*
-		 * Need to be careful about this.  Having buf->ops in module
-		 * code can Oops if the buffer persists after module unload.
-		 */
-		buf->ops = &nosteal_pipe_buf_ops;
-#endif
-
-		pipe->nrbufs++;
-		page_nr++;
-		ret += buf->len;
-
-		if (pipe->files)
-			do_wakeup = 1;
-	}
-
-out_unlock:
-	pipe_unlock(pipe);
-
-	if (do_wakeup) {
-		smp_mb();
-		if (waitqueue_active(&pipe->wait))
-			wake_up_interruptible(&pipe->wait);
-		kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
-	}
-
-out:
-	for (; page_nr < cs.nr_segs; page_nr++)
-		PAGE_CACHE_RELEASE(bufs[page_nr].page);
-
-	kfree(bufs);
-	return ret;
+	return -EINVAL;
 }
 
 static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
-		struct fuse_copy_state *cs)
+		struct iov_iter *iter)
 {
-	int ret;
 	struct pxd_add_out add;
+	size_t len = sizeof(add);
 
-	ret = fuse_copy_one(cs, &add, sizeof(add));
-	if (ret < 0) {
-		fuse_copy_finish(cs);
-		return ret;
+	if (copy_from_iter(&add, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
 	}
-
-	ret = pxd_add(conn, &add);
-
-	return ret;
+	return pxd_add(conn, &add);
 }
 
 static int fuse_notify_remove(struct fuse_conn *conn, unsigned int size,
-		struct fuse_copy_state *cs)
+		struct iov_iter *iter)
 {
-	int ret;
 	struct pxd_remove_out remove;
+	size_t len = sizeof(remove);
 
-	ret = fuse_copy_one(cs, &remove, sizeof(remove));
-	if (ret < 0) {
-		fuse_copy_finish(cs);
-		return ret;
+	if (copy_from_iter(&remove, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
 	}
-
-	ret = pxd_remove(conn, &remove);
-
-	return ret;
+	return pxd_remove(conn, &remove);
 }
 
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
-		       unsigned int size, struct fuse_copy_state *cs)
+		       unsigned int size, struct iov_iter *iter)
 {
 	switch ((int)code) {
 	case PXD_ADD:
-		return fuse_notify_add(fc, size, cs);
+		return fuse_notify_add(fc, size, iter);
 	case PXD_REMOVE:
-		return fuse_notify_remove(fc, size, cs);
+		return fuse_notify_remove(fc, size, iter);
 	default:
-		fuse_copy_finish(cs);
 		return -EINVAL;
 	}
 }
@@ -950,29 +546,6 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 	return NULL;
 }
 
-static int copy_out_args(struct fuse_copy_state *cs, struct fuse_out *out,
-			 unsigned nbytes)
-{
-	unsigned reqsize = sizeof(struct fuse_out_header);
-
-	if (out->h.error)
-		return nbytes != reqsize ? -EINVAL : 0;
-
-	reqsize += len_args(out->numargs, out->args);
-
-	if (reqsize < nbytes || (reqsize > nbytes && !out->argvar))
-		return -EINVAL;
-	else if (reqsize > nbytes) {
-		struct fuse_arg *lastarg = &out->args[out->numargs-1];
-		unsigned diffsize = reqsize - nbytes;
-		if (diffsize > lastarg->size)
-			return -EINVAL;
-		lastarg->size -= diffsize;
-	}
-	return fuse_copy_args(cs, out->numargs, out->argpages, out->args,
-			      out->page_zeroing);
-}
-
 /*
  * Write a single reply to a request.  First the header is copied from
  * the write buffer.  The request is then searched on the processing
@@ -980,38 +553,39 @@ static int copy_out_args(struct fuse_copy_state *cs, struct fuse_out *out,
  * it from the list and copy the rest of the buffer to the request.
  * The request is finished by calling request_end()
  */
-static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
-				 struct fuse_copy_state *cs, size_t nbytes)
+static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 {
 	int err;
 	struct fuse_req *req;
 	struct fuse_out_header oh;
+	size_t copied = 0;
+	size_t len;
+	size_t nbytes = iter->count;
 
-	if (nbytes < sizeof(struct fuse_out_header))
+	if (iter->count < sizeof(struct fuse_out_header))
 		return -EINVAL;
 
-	err = fuse_copy_one(cs, &oh, sizeof(oh));
-
-	if (err)
-		goto err_finish;
-
-	err = -EINVAL;
+	len = sizeof(oh);
+	if (copy_from_iter(&oh, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy header\n", __func__);
+		return -EFAULT;
+	}
+	copied += len;
 
 	if (oh.len != nbytes)
-		goto err_finish;
+		return -EINVAL;
 
 	/*
 	 * Zero oh.unique indicates unsolicited notification message
 	 * and error contains notification code.
 	 */
 	if (!oh.unique) {
-		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), cs);
+		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), iter);
 		return err ? err : nbytes;
 	}
 
-	err = -EINVAL;
 	if (oh.error <= -1000 || oh.error > 0)
-		goto err_finish;
+		return -EINVAL;
 
 	spin_lock(&fc->lock);
 	err = -ENOENT;
@@ -1024,26 +598,44 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 
 	req->state = FUSE_REQ_WRITING;
 	list_del_init(&req->list);
-	req->out.h = oh;
-	cs->req = req;
-	if (!req->out.page_replace)
-		cs->move_pages = 0;
 	spin_unlock(&fc->lock);
 
-	err = copy_out_args(cs, &req->out, nbytes);
-	fuse_copy_finish(cs);
+	req->out.h = oh;
+
+	if (req->bio_pages && req->out.numargs && iter->count > 0) {
+		struct request *breq = req->rq;
+#ifdef HAVE_BVEC_ITER
+		struct bio_vec bvec;
+#else
+		struct bio_vec *bvec = NULL;
+#endif
+		struct req_iterator breq_iter;
+		if (breq->nr_phys_segments && req->in.h.opcode == PXD_READ) {
+			int i = 0;
+			rq_for_each_segment(bvec, breq, breq_iter) {
+				len = BVEC(bvec).bv_len;
+				if (copy_page_from_iter(BVEC(bvec).bv_page,
+							BVEC(bvec).bv_offset,
+							len, iter) != len) {
+					printk(KERN_ERR "%s: copy page %d of %d error\n",
+					       __func__, i, breq->nr_phys_segments);
+					return -EFAULT;
+				}
+				copied += len;
+			}
+		}
+	}
+	err = 0;
 
 	spin_lock(&fc->lock);
 	if (err)
 		req->out.h.error = -EIO;
 	request_end(fc, req);
 
-	return err ? err : nbytes;
+	return err ? err : nbytes ;
 
  err_unlock:
 	spin_unlock(&fc->lock);
- err_finish:
-	fuse_copy_finish(cs);
 	return err;
 }
 
@@ -1051,26 +643,25 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 			      unsigned long nr_segs, loff_t pos)
 {
-	struct fuse_copy_state cs;
 	struct fuse_conn *fc = fuse_get_conn(iocb->ki_filp);
+	struct iov_iter iter;
 	if (!fc)
 		return -EPERM;
 
-	fuse_copy_init(&cs, fc, 0, iov, nr_segs);
+	iov_iter_init(&iter, WRITE, iov, nr_segs, iov_length(iov, nr_segs));
 
-	return fuse_dev_do_write(fc, &cs, iov_length(iov, nr_segs));
+	return fuse_dev_do_write(fc, &iter);
 }
 #else
 static ssize_t fuse_dev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
-	struct fuse_copy_state cs;
 	struct fuse_conn *fc = fuse_get_conn(iocb->ki_filp);
 	if (!fc)
 		return -EPERM;
 
 	fuse_copy_init(&cs, fc, 0, from->iov, from->nr_segs);
 
-	return fuse_dev_do_write(fc, &cs, iov_length(from->iov, from->nr_segs));
+	return fuse_dev_do_write(fc, from);
 }
 #endif
 
@@ -1078,78 +669,7 @@ static ssize_t fuse_dev_splice_write(struct pipe_inode_info *pipe,
 				     struct file *out, loff_t *ppos,
 				     size_t len, unsigned int flags)
 {
-	unsigned nbuf;
-	unsigned idx;
-	struct pipe_buffer *bufs;
-	struct fuse_copy_state cs;
-	struct fuse_conn *fc;
-	size_t rem;
-	ssize_t ret;
-
-	fc = fuse_get_conn(out);
-	if (!fc)
-		return -EPERM;
-
-	bufs = kmalloc(pipe->buffers * sizeof(struct pipe_buffer), GFP_KERNEL);
-	if (!bufs)
-		return -ENOMEM;
-
-	pipe_lock(pipe);
-	nbuf = 0;
-	rem = 0;
-	for (idx = 0; idx < pipe->nrbufs && rem < len; idx++)
-		rem += pipe->bufs[(pipe->curbuf + idx) & (pipe->buffers - 1)].len;
-
-	ret = -EINVAL;
-	if (rem < len) {
-		pipe_unlock(pipe);
-		goto out;
-	}
-
-	rem = len;
-	while (rem) {
-		struct pipe_buffer *ibuf;
-		struct pipe_buffer *obuf;
-
-		BUG_ON(nbuf >= pipe->buffers);
-		BUG_ON(!pipe->nrbufs);
-		ibuf = &pipe->bufs[pipe->curbuf];
-		obuf = &bufs[nbuf];
-
-		if (rem >= ibuf->len) {
-			*obuf = *ibuf;
-			ibuf->ops = NULL;
-			pipe->curbuf = (pipe->curbuf + 1) & (pipe->buffers - 1);
-			pipe->nrbufs--;
-		} else {
-			ibuf->ops->get(pipe, ibuf);
-			*obuf = *ibuf;
-			obuf->flags &= ~PIPE_BUF_FLAG_GIFT;
-			obuf->len = rem;
-			ibuf->offset += obuf->len;
-			ibuf->len -= obuf->len;
-		}
-		nbuf++;
-		rem -= obuf->len;
-	}
-	pipe_unlock(pipe);
-
-	fuse_copy_init(&cs, fc, 0, NULL, nbuf);
-	cs.pipebufs = bufs;
-	cs.pipe = pipe;
-
-	if (flags & SPLICE_F_MOVE)
-		cs.move_pages = 1;
-
-	ret = fuse_dev_do_write(fc, &cs, len);
-
-	for (idx = 0; idx < nbuf; idx++) {
-		struct pipe_buffer *buf = &bufs[idx];
-		buf->ops->release(pipe, buf);
-	}
-out:
-	kfree(bufs);
-	return ret;
+	return -EINVAL;
 }
 
 static unsigned fuse_dev_poll(struct file *file, poll_table *wait)

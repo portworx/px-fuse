@@ -13,46 +13,7 @@
 #include <pxd_trace.h>
 #undef CREATE_TRACE_POINTS
 
-#include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
-#include <linux/timekeeping.h>
-#else
-#include <linux/idr.h>
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,16,0)
-#define HAVE_BVEC_ITER
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
-#define BLK_QUEUE_FLUSH(q) \
-	blk_queue_write_cache(q, true, true)
-#else
-#define BLK_QUEUE_FLUSH(q) \
-	blk_queue_flush(q, REQ_FLUSH | REQ_FUA)
-#endif
-
-#ifdef HAVE_BVEC_ITER
-#define BIO_SECTOR(bio) bio->bi_iter.bi_sector
-#define BIO_SIZE(bio) bio->bi_iter.bi_size
-#define BVEC(bvec) (bvec)
-#else
-#define BIO_SECTOR(bio) bio->bi_sector
-#define BIO_SIZE(bio) bio->bi_size
-#define BVEC(bvec) (*(bvec))
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-#define BIO_ENDIO(bio, err) do { 		\
-	if (err != 0) { 			\
-		bio_io_error((bio)); 		\
-	} else {				\
-		bio_endio((bio));		\
-	} 					\
-} while (0)
-#else
-#define BIO_ENDIO(bio, err) bio_endio((bio), (err))
-#endif
+#include "pxd_compat.h"
 
 /** enables time tracing */
 //#define GD_TIME_LOG
@@ -247,7 +208,6 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 	int status;
 
 	while (req == NULL) {
-		trace_pxd_get_fuse_req(REQCTR(fc), nr_pages);
 		req = fuse_get_req_for_background(fc, nr_pages);
 		if (IS_ERR(req) && PTR_ERR(req) == -EINTR) {
 			req = NULL;
@@ -263,13 +223,13 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 		printk(KERN_ERR "%s: request alloc (%d pages) failed: %d",
 			 __func__, nr_pages, status);
 	}
-	trace_pxd_get_fuse_req_result(REQCTR(fc), status, eintr);
 	return req;
 }
 
 static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	req->bio_pages = true;
 	req->in.h.pid = current->pid;
 	req->misc.pxd_rdwr_in.minor = minor;
 	req->misc.pxd_rdwr_in.offset = off;
@@ -407,13 +367,6 @@ static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	struct req_iterator iter;
-#ifdef HAVE_BVEC_ITER
-	struct bio_vec bvec;
-#else
-	struct bio_vec *bvec = NULL;
-#endif
-	int i, nr_pages;
 
 	for (;;) {
 		struct request *rq;
@@ -436,13 +389,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 			rq->nr_phys_segments, rq->cmd_flags);
 
-		nr_pages = 0;
-		if (rq->nr_phys_segments) {
-			rq_for_each_segment(bvec, rq, iter) {
-				nr_pages++;
-			}
-		}
-		req = pxd_fuse_req(pxd_dev, nr_pages);
+		req = pxd_fuse_req(pxd_dev, 0);
 		if (IS_ERR(req)) {
   			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
@@ -450,19 +397,10 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			pxd_dev->minor, rq->cmd_flags, true, REQCTR(&pxd_dev->ctx->fc));
+			    pxd_dev->minor, rq->cmd_flags, true,
+			    REQCTR(&pxd_dev->ctx->fc));
 
-		req->num_pages = nr_pages;
-		if (rq->nr_phys_segments) {
-			i = 0;
-			rq_for_each_segment(bvec, rq, iter) {
-				BUG_ON(i >= req->max_pages);
-				req->pages[i] = BVEC(bvec).bv_page;
-				req->page_descs[i].offset = BVEC(bvec).bv_offset;
-				req->page_descs[i].length = BVEC(bvec).bv_len;
-				++i;
-			}
-		}
+		req->num_pages = 0;
 		req->misc.pxd_rdwr_in.chksum = 0;
 		req->rq = rq;
 		req->queue = q;
