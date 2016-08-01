@@ -715,8 +715,9 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 		goto err_unlock;
 
 	req = list_entry(fc->pending.next, struct fuse_req, list);
-	req->state = FUSE_REQ_READING;
-	list_move(&req->list, &fc->io);
+	req->state = FUSE_REQ_SENT;
+	list_move(&req->list, &fc->processing);
+	spin_unlock(&fc->lock);
 
 	in = &req->in;
 	reqsize = in->h.len;
@@ -728,29 +729,29 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 		/* SETXATTR is special, since it may contain too large data */
 		if (in->h.opcode == FUSE_SETXATTR)
 			req->out.h.error = -E2BIG;
+		spin_lock(&fc->lock);
 		request_end(fc, req);
 		goto restart;
 	}
-	spin_unlock(&fc->lock);
+
 	cs->req = req;
 	err = fuse_copy_one(cs, &in->h, sizeof(in->h));
-	if (!err)
+	if (likely(!err))
 		err = fuse_copy_args(cs, in->numargs, in->argpages,
 				     (struct fuse_arg *) in->args, 0);
 	fuse_copy_finish(cs);
-	spin_lock(&fc->lock);
-	if (err) {
+
+	if (unlikely(err)) {
 		req->out.h.error = -EIO;
+		spin_lock(&fc->lock);
 		request_end(fc, req);
 		return err;
 	}
-	if (!req->isreply)
+	if (unlikely(!req->isreply)) {
+		spin_lock(&fc->lock);
 		request_end(fc, req);
-	else {
-		req->state = FUSE_REQ_SENT;
-		list_move_tail(&req->list, &fc->processing);
-		spin_unlock(&fc->lock);
 	}
+
 	return reqsize;
 
  err_unlock:
@@ -1022,7 +1023,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc,
 		goto err_unlock;
 
 	req->state = FUSE_REQ_WRITING;
-	list_move(&req->list, &fc->io);
+	list_del_init(&req->list);
 	req->out.h = oh;
 	cs->req = req;
 	if (!req->out.page_replace)
@@ -1188,40 +1189,6 @@ __acquires(fc->lock)
 	}
 }
 
-/*
- * Abort requests under I/O
- *
- * The requests are set to aborted and finished, and the request
- * waiter is woken up.  This will make request_wait_answer() wait
- * until the request is unlocked and then return.
- *
- * If the request is asynchronous, then the end function needs to be
- * called after waiting for the request to be unlocked (if it was
- * locked).
- */
-static void end_io_requests(struct fuse_conn *fc)
-__releases(fc->lock)
-__acquires(fc->lock)
-{
-	while (!list_empty(&fc->io)) {
-		struct fuse_req *req =
-			list_entry(fc->io.next, struct fuse_req, list);
-		void (*end) (struct fuse_conn *, struct fuse_req *) = req->end;
-
-		req->out.h.error = -ECONNABORTED;
-		req->state = FUSE_REQ_FINISHED;
-		list_del_init(&req->list);
-		if (end) {
-			req->end = NULL;
-			__fuse_get_request(req);
-			spin_unlock(&fc->lock);
-			end(fc, req);
-			fuse_put_request(fc, req);
-			spin_lock(&fc->lock);
-		}
-	}
-}
-
 static void end_queued_requests(struct fuse_conn *fc)
 __releases(fc->lock)
 __acquires(fc->lock)
@@ -1257,7 +1224,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	init_waitqueue_head(&fc->waitq);
 	INIT_LIST_HEAD(&fc->pending);
 	INIT_LIST_HEAD(&fc->processing);
-	INIT_LIST_HEAD(&fc->io);
 	INIT_LIST_HEAD(&fc->entry);
 	fc->hash = kmalloc(FUSE_HASH_SIZE * sizeof(*fc->hash), GFP_KERNEL);
 	if (!fc->hash)
@@ -1317,7 +1283,6 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	if (fc->connected) {
 		fc->connected = 0;
 		fc->initialized = 1;
-		end_io_requests(fc);
 		end_queued_requests(fc);
 		end_polls(fc);
 		wake_up_all(&fc->waitq);
