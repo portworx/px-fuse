@@ -189,6 +189,15 @@ static const struct block_device_operations pxd_bd_ops = {
 	.ioctl			= pxd_ioctl,
 };
 
+static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
+{
+	struct pxd_device *pxd_dev = req->queue->queuedata;
+	int cpu = part_stat_lock();
+	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
+	part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
+	part_stat_unlock();
+}
+
 /*
  * This is macroized because reqctr moves into a substructure
  * in Linux versions 4.2 and later.  However, we have a private
@@ -208,6 +217,22 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
 			__func__, req, req->in.h.unique,
 			req->misc.pxd_rdwr_in.offset, req->out.h.error);
+}
+
+static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
+{
+	trace_pxd_reply(REQCTR(fc), req->in.h.unique, 0u);
+	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	BIO_ENDIO(req->bio, req->out.h.error);
+	pxd_request_complete(fc, req);
+}
+
+static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
+{
+	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
+	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	BIO_ENDIO(req->bio, req->out.h.error);
+	pxd_request_complete(fc, req);
 }
 
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
@@ -263,7 +288,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 
 static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags)
+			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_READ;
 	req->in.numargs = 1;
@@ -274,13 +299,13 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->out.argpages = 1;
 	req->out.args[0].size = size;
 	req->out.args[0].value = NULL;
-	req->end = pxd_process_read_reply_q;
+	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
 static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags)
+			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
 	req->in.numargs = 2;
@@ -290,13 +315,13 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->in.args[1].size = size;
 	req->in.args[1].value = NULL;
 	req->out.numargs = 0;
-	req->end = pxd_process_write_reply_q;
+	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
 static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags)
+			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_DISCARD;
 	req->in.numargs = 1;
@@ -304,28 +329,86 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	req->in.argpages = 0;
 	req->out.numargs = 0;
-	req->end = pxd_process_write_reply_q;
+	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, uint64_t reqctr)
+			uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
 {
-	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
+	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags, qfn);
 	switch (flags & (REQ_WRITE | REQ_DISCARD)) {
 	case REQ_WRITE:
-		pxd_write_request(req, size, off, minor, flags);
+		pxd_write_request(req, size, off, minor, flags, qfn);
 		break;
 	case 0:
-		pxd_read_request(req, size, off, minor, flags);
+		pxd_read_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
 	case REQ_WRITE | REQ_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags);
+		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
 	}
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+#else
+static void pxd_make_request(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL
+#endif
+{
+	struct pxd_device *pxd_dev = q->queuedata;
+	struct fuse_req *req;
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+	struct bvec_iter iter;
+#else
+	unsigned index = 0;
+	struct bio_vec *bvec = NULL;
+#endif
+	int i;
+
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags %lx\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
+			bio->bi_vcnt, bio->bi_rw);
+
+	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
+	if (IS_ERR(req)) {
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
+	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+		pxd_dev->minor, bio->bi_rw, false, REQCTR(&pxd_dev->ctx->fc));
+
+	req->num_pages = bio->bi_vcnt;
+	if (bio->bi_vcnt) {
+		i = 0;
+#ifdef HAVE_BVEC_ITER
+		bio_for_each_segment(bvec, bio, iter) {
+#else
+		bio_for_each_segment(bvec, bio, index) {
+#endif
+			BUG_ON(i >= req->max_pages);
+			req->pages[i] = BVEC(bvec).bv_page;
+			req->page_descs[i].offset = BVEC(bvec).bv_offset;
+			req->page_descs[i].length = BVEC(bvec).bv_len;
+			++i;
+		}
+	}
+	req->misc.pxd_rdwr_in.chksum = 0;
+	req->bio = bio;
+	req->queue = q;
+
+	fuse_request_send_background(&pxd_dev->ctx->fc, req);
+	return BLK_QC_RETVAL;
 }
 
 static void pxd_rq_fn(struct request_queue *q)
@@ -375,7 +458,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			pxd_dev->minor, rq->cmd_flags, REQCTR(&pxd_dev->ctx->fc));
+			pxd_dev->minor, rq->cmd_flags, true, REQCTR(&pxd_dev->ctx->fc));
 
 		req->num_pages = nr_pages;
 		if (rq->nr_phys_segments) {
@@ -390,6 +473,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 		req->misc.pxd_rdwr_in.chksum = 0;
 		req->rq = rq;
+		req->queue = q;
 		fuse_request_send_background(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
@@ -417,15 +501,23 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
-	if (!q)
-		goto out_disk;
+	/* Bypass queue if queue_depth is zero. */
+	if (add->queue_depth == 0) {
+		q = blk_alloc_queue(GFP_KERNEL);
+		if (!q)
+			goto out_disk;
+		blk_queue_make_request(q, pxd_make_request);
+	} else {
+		q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
+		if (!q)
+			goto out_disk;
 
-	/* Switch queue to TCQ mode; allocate tag map. */
-	rc = BLK_QUEUE_INIT_TAGS(q, add->queue_depth);
-	if (rc) {
-		blk_cleanup_queue(q);
-		goto out_disk;
+		/* Switch queue to TCQ mode; allocate tag map. */
+		rc = BLK_QUEUE_INIT_TAGS(q, add->queue_depth);
+		if (rc) {
+			blk_cleanup_queue(q);
+			goto out_disk;
+		}
 	}
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
@@ -446,7 +538,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	/* Enable flush support. */
 	BLK_QUEUE_FLUSH(q);
 
-	blk_queue_prep_rq(q, blk_queue_start_tag);
+	if (add->queue_depth != 0) {
+		blk_queue_prep_rq(q, blk_queue_start_tag);
+	}
 
 	disk->queue = q;
 	q->queuedata = pxd_dev;

@@ -332,10 +332,16 @@ struct fuse_req {
 
 		/** Associated request structrure. */
 		struct request *rq;
+
+		/** Associated bio structrure. */
+ 		struct bio *bio;
 	};
 
 	/** Request completion callback */
 	void (*end)(struct fuse_conn *, struct fuse_req *);
+
+	/** Associate request queue */
+	struct request_queue *queue;
 };
 
 /**
