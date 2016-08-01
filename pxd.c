@@ -24,14 +24,6 @@
 #define HAVE_BVEC_ITER
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-#define BLK_QUEUE_INIT_TAGS(q, sz) \
-	blk_queue_init_tags((q), (sz), NULL, BLK_TAG_ALLOC_FIFO)
-#else
-#define BLK_QUEUE_INIT_TAGS(q, sz) \
-	blk_queue_init_tags((q), (sz), NULL)
-#endif
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 #define BLK_QUEUE_FLUSH(q) \
 	blk_queue_write_cache(q, true, true)
@@ -336,7 +328,7 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
 {
-	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags, qfn);
+	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
 	switch (flags & (REQ_WRITE | REQ_DISCARD)) {
 	case REQ_WRITE:
 		pxd_write_request(req, size, off, minor, flags, qfn);
@@ -425,8 +417,8 @@ static void pxd_rq_fn(struct request_queue *q)
 	for (;;) {
 		struct request *rq;
 
-		/* Peek at request from block layer. */
-		rq = blk_peek_request(q);
+		/* Fetch request from block layer. */
+		rq = blk_fetch_request(q);
 		if (!rq)
 			break;
 
@@ -482,7 +474,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
-	int rc;
 
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
 		return -EINVAL;
@@ -510,13 +501,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 		if (!q)
 			goto out_disk;
-
-		/* Switch queue to TCQ mode; allocate tag map. */
-		rc = BLK_QUEUE_INIT_TAGS(q, add->queue_depth);
-		if (rc) {
-			blk_cleanup_queue(q);
-			goto out_disk;
-		}
 	}
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
@@ -536,10 +520,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 
 	/* Enable flush support. */
 	BLK_QUEUE_FLUSH(q);
-
-	if (add->queue_depth != 0) {
-		blk_queue_prep_rq(q, blk_queue_start_tag);
-	}
 
 	disk->queue = q;
 	q->queuedata = pxd_dev;
