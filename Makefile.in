@@ -1,4 +1,4 @@
-px-objs = pxd.o dev.o
+px-objs = pxd.o dev.o iov_iter.o
 obj-m = px.o
 
 ccflags-y := -Werror -I$(src)
@@ -6,19 +6,19 @@ ccflags-y := -Werror -I$(src)
 KVERSION=$(shell uname -r)
 ifndef KERNELPATH
      KERNELPATH=/usr/src/kernels/$(KVERSION)
-endif 
+endif
 
 ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
 $(error Kernel path: $(KERNELPATH)  directory does not exist.)
-endif 
+endif
 
 ifeq ($(shell test  -f "/usr/bin/bc"; echo $$?),0)
 MINKVER=3.10
 KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
 ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
-endif 
-endif 
+endif
+endif
 
 MAJOR=$(shell echo $(KVERSION) | awk -F. '{print $$1}')
 MINOR=$(shell echo $(KVERSION) | awk -F. '{print $$2}')
@@ -30,29 +30,29 @@ export OUTPATH
 
 .PHONY: rpm
 
-all: 
+all:
 	make -C $(KERNELPATH) M=$(CURDIR) modules
 
 insert: all
-	insmod px.ko	
-	
+	insmod px.ko
+
 clean:
 	make -C $(KERNELPATH) M=$(CURDIR) clean
 
 install:
-	make V=1 -C $(KERNELPATH) M=$(CURDIR) modules_install 
+	make V=1 -C $(KERNELPATH) M=$(CURDIR) modules_install
 
-rpm: 
+rpm:
 	@cd rpm && ./buildrpm.sh
 
 docker-build-dev:
 	docker build -t portworx/px-fuse:dev -f Dockerfile .
-	
+
 docker-build: docker-build-dev
 	docker run --privileged \
 	-v /usr/src/:/usr/src  \
 	-v $(shell pwd):/home/px-fuse \
 	portworx/px-fuse:dev make
-	
+
 distclean: clean
 	@/bin/rm -f  config.* Makefile
