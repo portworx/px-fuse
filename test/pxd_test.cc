@@ -237,18 +237,6 @@ static ::testing::AssertionResult verify_pattern(std::vector<uint64_t> &v)
 	return ::testing::AssertionSuccess();
 }
 
-static ::testing::AssertionResult verify_pattern(void *buf, size_t len)
-{
-	uint64_t *d = (uint64_t *)buf;
-	for (size_t i = 0; i < len / sizeof(uint64_t); ++i) {
-		if (d[i] != i) {
-			return ::testing::AssertionFailure() << "at " <<
-					i << " val " << d[i];
-		}
-	}
-	return ::testing::AssertionSuccess();
-}
-
 static std::vector<uint64_t> make_pattern(size_t size)
 {
 	std::vector<uint64_t> v(size / sizeof(uint64_t));
@@ -399,10 +387,7 @@ TEST_F(GddTestWithControl, read_write)
 	ASSERT_EQ(wr->minor, minor);
 	ASSERT_EQ(wr->offset, 8192);
 	ASSERT_EQ(wr->size, write_len);
-	ASSERT_EQ(sizeof(fuse_in_header) + sizeof(pxd_rdwr_in) + write_len,
-			read_bytes);
-
-	ASSERT_TRUE(verify_pattern(wr + 1, write_len));
+	ASSERT_EQ(sizeof(fuse_in_header) + sizeof(pxd_rdwr_in), read_bytes);
 
 	fuse_out_header oh;
 	oh.unique = in->unique;

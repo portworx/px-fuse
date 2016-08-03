@@ -261,12 +261,10 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
-	req->in.numargs = 2;
-	req->in.argpages = 1;
+	req->in.numargs = 1;
+	req->in.argpages = 0;
 	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
 	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->in.args[1].size = size;
-	req->in.args[1].value = NULL;
 	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
@@ -316,14 +314,6 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-#ifdef HAVE_BVEC_ITER
-	struct bio_vec bvec;
-	struct bvec_iter iter;
-#else
-	unsigned index = 0;
-	struct bio_vec *bvec = NULL;
-#endif
-	int i;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags %lx\n", __func__,
@@ -341,21 +331,6 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio->bi_rw, false, REQCTR(&pxd_dev->ctx->fc));
 
-	req->num_pages = bio->bi_vcnt;
-	if (bio->bi_vcnt) {
-		i = 0;
-#ifdef HAVE_BVEC_ITER
-		bio_for_each_segment(bvec, bio, iter) {
-#else
-		bio_for_each_segment(bvec, bio, index) {
-#endif
-			BUG_ON(i >= req->max_pages);
-			req->pages[i] = BVEC(bvec).bv_page;
-			req->page_descs[i].offset = BVEC(bvec).bv_offset;
-			req->page_descs[i].length = BVEC(bvec).bv_len;
-			++i;
-		}
-	}
 	req->misc.pxd_rdwr_in.chksum = 0;
 	req->bio = bio;
 	req->queue = q;

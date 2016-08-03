@@ -33,6 +33,7 @@ enum pxd_opcode {
 	PXD_DISCARD,	/**< discard blocks */
 	PXD_ADD,	/**< add device to kernel */
 	PXD_REMOVE,	/**< remove device from kernel */
+	PXD_READ_DATA,	/**< read data from kernel */
 	PXD_LAST,
 };
 
@@ -97,6 +98,14 @@ struct pxd_remove_out {
 };
 
 /**
+ * PXD_READ_DATA request from user space
+ */
+struct pxd_read_data_out {
+	uint64_t unique;	/**< request id */
+	int iovcnt;		/**< number of iovec entries */
+};
+
+/**
  * PXD_READ/PXD_WRITE kernel request structure
  */
 struct pxd_rdwr_in {
@@ -133,6 +142,13 @@ static inline uint64_t pxd_aligned_offset(uint64_t offset)
 static inline uint64_t pxd_aligned_len(uint64_t len, uint64_t offset)
 {
 	return roundup(offset % PXD_LBS + len, PXD_LBS);
+}
+
+static inline uint64_t pxd_rdwr_blocks(const struct rdwr_in *rdwr)
+{
+	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
+	return prw->size && rdwr->in.opcode == PXD_WRITE ?
+	       	pxd_aligned_len(prw->size, prw->offset) / PXD_LBS : 0;
 }
 
 #endif /* PXD_H_ */

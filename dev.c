@@ -340,12 +340,6 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 	struct request *breq = req->rq;
 	size_t copied = 0;
-#ifdef HAVE_BVEC_ITER
-	struct bio_vec bvec;
-#else
-	struct bio_vec *bvec = NULL;
-#endif
-	struct req_iterator breq_iter;
 	size_t len;
 
 	len = sizeof(req->in.h);
@@ -362,21 +356,7 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 	}
 	copied += len;
 
-	if (req->bio_pages && breq->nr_phys_segments &&
-		req->in.h.opcode == PXD_WRITE) {
-		int i = 0;
-		rq_for_each_segment(bvec, breq, breq_iter) {
-			len = BVEC(bvec).bv_len;
-			if (copy_page_to_iter(BVEC(bvec).bv_page,
-					      BVEC(bvec).bv_offset,
-					      len, iter) != len) {
-				printk(KERN_ERR "%s: copy page bio %d of %d error\n",
-				       __func__, i, breq->nr_phys_segments);
-				return -EFAULT;
-			}
-			copied += len;
-		}
-	} else if (req->num_pages) {
+	if (unlikely(req->num_pages)) {
 		int i;
 		for (i = 0; i < req->num_pages; ++i) {
 			len = req->page_descs[i].length;
@@ -517,6 +497,116 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 	return pxd_add(conn, &add);
 }
 
+/* Look up request on processing list by unique ID */
+static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
+{
+	struct fuse_req *req;
+
+	hlist_for_each_entry(req, &fc->hash[unique % FUSE_HASH_SIZE],
+			     hash_entry)
+		if (req->in.h.unique == unique)
+			return req;
+
+	return NULL;
+}
+
+#define IOV_BUF_SIZE 64
+
+static int copy_in_read_data_iovec(struct iov_iter *iter,
+	struct pxd_read_data_out *read_data, struct iovec *iov,
+	struct iov_iter *data_iter)
+{
+	int iovcnt;
+	size_t len;
+
+	if (!read_data->iovcnt)
+		return -EFAULT;
+
+	iovcnt = min(read_data->iovcnt, IOV_BUF_SIZE);
+	len = iovcnt * sizeof(struct iovec);
+	if (copy_from_iter(iov, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy iovec\n", __func__);
+		return -EFAULT;
+	}
+	read_data->iovcnt -= iovcnt;
+
+	iov_iter_init(data_iter, READ, iov, iovcnt, iov_length(iov, iovcnt));
+
+	return 0;
+}
+
+static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
+				struct iov_iter *iter)
+{
+	struct pxd_read_data_out read_data;
+	size_t len = sizeof(read_data);
+	struct fuse_req *req;
+	struct iovec iov[IOV_BUF_SIZE];
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+#else
+	struct bio_vec *bvec = NULL;
+#endif
+	struct req_iterator breq_iter;
+	struct iov_iter data_iter;
+	size_t copied;
+	int ret;
+
+	if (copy_from_iter(&read_data, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy read_data arg\n", __func__);
+		return -EFAULT;
+	}
+
+	spin_lock(&conn->lock);
+	req = request_find(conn, read_data.unique);
+	if (!req) {
+		spin_unlock(&conn->lock);
+		printk(KERN_ERR "%s: request %lld not found\n", __func__,
+		       read_data.unique);
+		return -ENOENT;
+	}
+	spin_unlock(&conn->lock);
+
+	if (req->in.h.opcode != PXD_WRITE) {
+		printk(KERN_ERR "%s: request is not a write\n", __func__);
+		return -EINVAL;
+	}
+
+	ret = copy_in_read_data_iovec(iter, &read_data, iov, &data_iter);
+	if (ret)
+		return ret;
+
+	/* advance the iterator if data is unaligned */
+	if (unlikely(req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK))
+		iov_iter_advance(&data_iter,
+				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
+
+	rq_for_each_segment(bvec, req->rq, breq_iter) {
+		len = BVEC(bvec).bv_len;
+		copied = copy_page_to_iter(BVEC(bvec).bv_page,
+					   BVEC(bvec).bv_offset,
+					   len, &data_iter);
+		if (copied != len) {
+			/* out of space in destination, copy more iovec */
+			ret = copy_in_read_data_iovec(iter, &read_data,
+						      iov, &data_iter);
+			if (ret)
+				return ret;
+			len -= copied;
+			copied = copy_page_to_iter(BVEC(bvec).bv_page,
+						   BVEC(bvec).bv_offset + copied,
+						   len, &data_iter);
+			if (copied != len) {
+				printk(KERN_ERR "%s: copy failed new iovec\n",
+					__func__);
+				return -EFAULT;
+			}
+		}
+	}
+
+	return 0;
+}
+
 static int fuse_notify_remove(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
@@ -534,6 +624,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
 	switch ((int)code) {
+	case PXD_READ_DATA:
+		return fuse_notify_read_data(fc, size, iter);
 	case PXD_ADD:
 		return fuse_notify_add(fc, size, iter);
 	case PXD_REMOVE:
@@ -541,19 +633,6 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 	default:
 		return -EINVAL;
 	}
-}
-
-/* Look up request on processing list by unique ID */
-static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
-{
-	struct fuse_req *req;
-
-	hlist_for_each_entry(req, &fc->hash[unique % FUSE_HASH_SIZE],
-			     hash_entry)
-		if (req->in.h.unique == unique)
-			return req;
-
-	return NULL;
 }
 
 /*
