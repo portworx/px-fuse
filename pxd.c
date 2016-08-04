@@ -70,6 +70,7 @@
 
 #define PXD_TIMER_SECS 60
 
+extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
@@ -1049,7 +1050,7 @@ int pxd_init(void)
 	if (err)
 		goto out_blkdev;
 
-	printk(KERN_INFO "pxd driver loaded\n");
+	printk(KERN_INFO "pxd driver loaded version %s\n", gitversion);
 
 	return 0;
 
