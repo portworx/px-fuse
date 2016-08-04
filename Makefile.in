@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 px-objs = pxd.o dev.o iov_iter.o
+=======
+px-objs = pxd.o dev.o px_version.o
+>>>>>>> include SHA version in module
 obj-m = px.o
 
 ccflags-y := -Werror -I$(src)
@@ -30,7 +34,7 @@ export OUTPATH
 
 .PHONY: rpm
 
-all:
+all: px_version.c
 	make -C $(KERNELPATH) M=$(CURDIR) modules
 
 insert: all
@@ -53,6 +57,9 @@ docker-build: docker-build-dev
 	-v /usr/src/:/usr/src  \
 	-v $(shell pwd):/home/px-fuse \
 	portworx/px-fuse:dev make
+
+px_version.c: 
+	echo "const char *gitversion = \"$(shell git rev-parse HEAD)\";" > $@
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
