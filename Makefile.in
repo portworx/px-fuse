@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-px-objs = pxd.o dev.o iov_iter.o
-=======
-px-objs = pxd.o dev.o px_version.o
->>>>>>> include SHA version in module
+px-objs = pxd.o dev.o iov_iter.o px_version.o
 obj-m = px.o
 
 ccflags-y := -Werror -I$(src)
