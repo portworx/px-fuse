@@ -748,8 +748,6 @@ static ssize_t fuse_dev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	if (!fc)
 		return -EPERM;
 
-	fuse_copy_init(&cs, fc, 0, from->iov, from->nr_segs);
-
 	return fuse_dev_do_write(fc, from);
 }
 #endif
