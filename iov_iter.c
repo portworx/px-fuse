@@ -11,6 +11,14 @@
 #include <net/checksum.h>
 #include "iov_iter.h"
 
+void kvfree(const void *addr)
+{
+         if (is_vmalloc_addr(addr))
+                 vfree(addr);
+         else
+                 kfree(addr);
+}
+
 #define iterate_iovec(i, n, __v, __p, skip, STEP) {	\
 	size_t left;					\
 	size_t wanted = n;				\
