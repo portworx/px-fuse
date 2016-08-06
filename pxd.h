@@ -16,7 +16,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 2		/**< driver version */
+#define PXD_VERSION 3		/**< driver version */
 
 #define PXD_IOCTL_MAGIC			(('P' << 8) | 'X')
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
