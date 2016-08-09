@@ -68,7 +68,7 @@
 #define SECTOR_SIZE 512
 #define SEGMENT_SIZE (1024 * 1024)
 
-#define PXD_TIMER_SECS 60
+#define PXD_TIMER_SECS 600
 
 extern const char *gitversion;
 static dev_t pxd_major;
