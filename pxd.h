@@ -6,6 +6,7 @@
 #else
 #include <stdint.h>
 #include <sys/param.h>
+#include <string.h>
 #endif
 
 #include "linux/fuse.h"
@@ -130,6 +131,15 @@ struct pxd_rdwr_in {
  * PXD_READ/PXD_WRITE kernel request structure
  */
 struct rdwr_in {
+#ifdef __cplusplus
+	rdwr_in(uint32_t i_minor, uint32_t i_size, uint64_t i_offset,
+		uint64_t i_chksum, uint32_t i_flags) :
+		rdwr(i_minor, i_size, i_offset, i_chksum, i_flags) {
+		memset(&in, 0, sizeof(in));
+	}
+
+	rdwr_in() = default;
+#endif
 	struct fuse_in_header in;	/**< fuse header */
 	struct pxd_rdwr_in rdwr;	/**< read/write request */
 };
