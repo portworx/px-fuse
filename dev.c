@@ -389,49 +389,103 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 {
 	int err;
 	struct fuse_req *req;
-	ssize_t copied;
+	struct list_head *entry, *first, *last, tmp, *next;
+	ssize_t copied, copied_this_time;
+	ssize_t remain = iter->count;
+	bool no_reply = false;
+
+	INIT_LIST_HEAD(&tmp);
 
 	spin_lock(&fc->lock);
-	err = -EAGAIN;
-	if ((file->f_flags & O_NONBLOCK) && fc->connected &&
-	    !request_pending(fc))
+	if (!request_pending(fc)) {
+		err = -EAGAIN;
+		if ((file->f_flags & O_NONBLOCK) && fc->connected)
+			goto err_unlock;
+		request_wait(fc);
+		err = -ENODEV;
+		if (!fc->connected)
+			goto err_unlock;
+		err = -ERESTARTSYS;
+		if (!request_pending(fc))
+			goto err_unlock;
+	}
+
+	entry = fc->pending.next;
+	first = fc->pending.next;
+	last = &fc->pending;
+	while (entry != &fc->pending) {
+		req = list_entry(entry, struct fuse_req, list);
+		if (req->in.h.len <= remain) {
+			req->state = FUSE_REQ_SENT;
+			last = entry;
+			remain -= req->in.h.len;
+			entry = entry->next;
+		} else {
+			break;
+		}
+	}
+
+	err = -EINVAL;
+	if (last == &fc->pending)
 		goto err_unlock;
 
-	request_wait(fc);
-	err = -ENODEV;
-	if (!fc->connected)
-		goto err_unlock;
-	err = -ERESTARTSYS;
-	if (!request_pending(fc))
-		goto err_unlock;
+	list_cut_position(&tmp, &fc->pending, last);
+	list_splice_tail(&tmp, &fc->processing);
 
-	req = list_entry(fc->pending.next, struct fuse_req, list);
-	req->state = FUSE_REQ_SENT;
-	list_move(&req->list, &fc->processing);
 	spin_unlock(&fc->lock);
 
-	copied = fuse_copy_req_read(req, iter);
-	if (copied > 0) {
-		err = 0;
-	} else {
-		err = copied;
+	entry = first;
+	copied = 0;
+	err = 0;
+	while (1) {
+		req = list_entry(entry, struct fuse_req, list);
+		copied_this_time = fuse_copy_req_read(req, iter);
+		if (copied_this_time > 0) {
+			copied += copied_this_time;
+		} else {
+			err = copied_this_time;
+			goto err_reqs;
+		}
+
+		no_reply = no_reply || !req->isreply;
+		if (entry == last)
+			break;
+		entry = entry->next;
 	}
 
-	if (unlikely(err)) {
-		req->out.h.error = -EIO;
-		spin_lock(&fc->lock);
-		request_end(fc, req);
-		return err;
-	}
-	if (unlikely(!req->isreply)) {
-		spin_lock(&fc->lock);
-		request_end(fc, req);
+	if (unlikely(no_reply)) {
+		entry = first;
+		while (1) {
+			req = list_entry(entry, struct fuse_req, list);
+			next = entry->next;
+			if (!req->isreply) {
+				spin_lock(&fc->lock);
+				request_end(fc, req);
+			}
+			if (entry == last)
+				break;
+			entry = next;
+		}
 	}
 
 	return copied;
 
  err_unlock:
 	spin_unlock(&fc->lock);
+	return err;
+
+ err_reqs:
+	entry = first;
+	while (1) {
+		req = list_entry(entry, struct fuse_req, list);
+		next = entry->next;
+		req->out.h.error = -EIO;
+		spin_lock(&fc->lock);
+		request_end(fc, req);
+		if (entry == last)
+			break;
+		entry = next;
+	}
 	return err;
 }
 
