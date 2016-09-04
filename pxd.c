@@ -74,18 +74,24 @@ static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	int err = 0;
 
-	spin_lock(&pxd_dev->lock);
-	if (pxd_dev->removing)
-		err = -EBUSY;
-	else
-		pxd_dev->open_count++;
-	spin_unlock(&pxd_dev->lock);
+	spin_lock(&fc->lock);
+	if (!fc->connected) {
+		err = -ENXIO;
+	} else {
+		spin_lock(&pxd_dev->lock);
+		if (pxd_dev->removing)
+			err = -EBUSY;
+		else
+			pxd_dev->open_count++;
+		spin_unlock(&pxd_dev->lock);
 
-	if (!err)
-		(void)get_device(&pxd_dev->dev);
-
+		if (!err)
+			(void)get_device(&pxd_dev->dev);
+	}
+	spin_unlock(&fc->lock);
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
 }
