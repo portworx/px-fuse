@@ -21,6 +21,7 @@
 
 #define PXD_IOCTL_MAGIC			(('P' << 8) | 'X')
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
+#define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -161,4 +162,8 @@ static inline uint64_t pxd_rdwr_blocks(const struct rdwr_in *rdwr)
 	       	pxd_aligned_len(prw->size, prw->offset) / PXD_LBS : 0;
 }
 
+struct pxd_ioctl_version_args {
+	int piv_len;
+	char piv_data[64];
+};
 #endif /* PXD_H_ */

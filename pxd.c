@@ -108,12 +108,14 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	put_device(&pxd_dev->dev);
 }
 
-static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
-			unsigned int cmd, unsigned long arg)
+static long pxd_control_ioctl(
+	struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
+	void __user *argp = (void __user *)arg;
 	struct pxd_context *ctx = NULL;
 	int i, status = -ENOTTY;
+	char ver_data[64];
+	int ver_len = 0;
 
 	switch (cmd) {
 	case PXD_IOC_DUMP_FC_INFO:
@@ -133,12 +135,28 @@ static int pxd_ioctl(struct block_device *bdev, fmode_t mode,
 		}
 		status = 0;
 		break;
+
+	case PXD_IOC_GET_VERSION:
+		if (argp) {
+			ver_len = strlen(gitversion) < 64 ? strlen(gitversion) : 64;
+			strncpy(ver_data, gitversion, ver_len);
+			if (copy_to_user(argp +
+				offsetof(struct pxd_ioctl_version_args, piv_len),
+				&ver_len, sizeof(ver_len))) {
+				return -EFAULT;
+			}
+			if (copy_to_user(argp +
+				offsetof(struct pxd_ioctl_version_args, piv_data),
+				ver_data, ver_len)) {
+				return -EFAULT;
+			}
+		}
+		printk(KERN_INFO "pxd driver at version: %s\n", gitversion);
+		status = 0;
+		break;
 	default:
 		break;
 	}
-	trace_pxd_ioctl(
-		pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor,
-		mode, cmd, arg, status);
 	return status;
 }
 
@@ -146,7 +164,6 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
-	.ioctl			= pxd_ioctl,
 };
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
@@ -923,6 +940,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
+	ctx->fops.unlocked_ioctl = pxd_control_ioctl;
 	ctx->fops.release = pxd_control_release;
 	INIT_LIST_HEAD(&ctx->list);
 	sprintf(ctx->name, "/pxd/pxd-control-%d", i);
