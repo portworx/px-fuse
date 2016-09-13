@@ -50,7 +50,7 @@ struct pxd_context {
 };
 
 struct pxd_context *pxd_contexts;
-uint32_t pxd_num_contexts = 10;
+uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 
 module_param(pxd_num_contexts, uint, 0644);
 
@@ -864,6 +864,9 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	ctx = container_of(file->f_op, struct pxd_context, fops);
+	if (ctx->id >= PXD_NUM_CONTEXT_EXPORTED) {
+		return 0;
+	}
 
 	fc = &ctx->fc;
 	if (fc->pend_open == 1) {
@@ -894,6 +897,9 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;
 	ctx = container_of(file->f_op, struct pxd_context, fops);
+	if (ctx->id >= PXD_NUM_CONTEXT_EXPORTED) {
+		return 0;
+	}
 	if (ctx->fc.connected == 0)
 		pxd_printk("%s: not opened\n", __func__);
 	else
@@ -940,7 +946,9 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
-	ctx->fops.unlocked_ioctl = pxd_control_ioctl;
+	if (i >= PXD_NUM_CONTEXT_EXPORTED) {
+		ctx->fops.unlocked_ioctl = pxd_control_ioctl;
+	}
 	ctx->fops.release = pxd_control_release;
 	INIT_LIST_HEAD(&ctx->list);
 	sprintf(ctx->name, "/pxd/pxd-control-%d", i);
