@@ -5,7 +5,11 @@ ccflags-y := -Wno-error=frame-larger-than= -Werror -I$(src)
 
 KVERSION=$(shell uname -r)
 ifndef KERNELPATH
+ifeq ($(shell test -d "/usr/src/linux-headers-$(KVERSION)"; echo $$?),0)
+     KERNELPATH=/usr/src/linux-headers-$(KVERSION)
+else
      KERNELPATH=/usr/src/kernels/$(KVERSION)
+endif
 endif
 
 ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
