@@ -960,52 +960,69 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	return 0;
 }
 
+static void pxd_context_destroy(struct pxd_context *ctx)
+{
+	misc_deregister(&ctx->miscdev);
+	del_timer_sync(&ctx->timer);
+	fuse_abort_conn(&ctx->fc);
+	fuse_conn_put(&ctx->fc);
+}
+
 int pxd_init(void)
 {
 	int err, i;
 
 	err = fuse_dev_init();
-	if (err)
+	if (err) {
+		printk(KERN_ERR "pxd: failed to initialize fuse: %d\n", err);
 		goto out;
+	}
 
 	pxd_contexts = kzalloc(sizeof(pxd_contexts[0]) * pxd_num_contexts,
 		GFP_KERNEL);
 	err = -ENOMEM;
-	if (!pxd_contexts)
+	if (!pxd_contexts) {
+		printk(KERN_ERR "pxd: failed to allocate memory\n");
 		goto out_fuse_dev;
+	}
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		struct pxd_context *ctx = &pxd_contexts[i];
 		err = pxd_context_init(ctx, i);
 		if (err) {
-			printk(KERN_ERR "%s: failed to initialize connection\n",
-				__func__);
+			printk(KERN_ERR "pxd: failed to initialize connection\n");
 			goto out_pxd_contexts;
 		}
 		err = misc_register(&ctx->miscdev);
 		if (err) {
-			printk(KERN_ERR "%s: failed to register dev %s %d: %d\n", __func__,
-				ctx->miscdev.name, i, -err);
+			printk(KERN_ERR "pxd: failed to register dev %s %d: %d\n",
+				ctx->miscdev.name, i, err);
 			goto out_fuse;
 		}
 	}
 
 	pxd_miscdev.fops = &pxd_contexts[0].fops;
 	err = misc_register(&pxd_miscdev);
-	if (err)
+	if (err) {
+		printk(KERN_ERR "pxd: failed to register dev %s: %d\n", 
+			pxd_miscdev.name, err);
 		goto out_fuse;
+	}
 
 	pxd_major = register_blkdev(0, "pxd");
 	if (pxd_major < 0) {
 		err = pxd_major;
+		printk(KERN_ERR "pxd: failed to register dev pxd: %d\n", err);
 		goto out_misc;
 	}
 
 	err = pxd_sysfs_init();
-	if (err)
+	if (err) {
+		printk(KERN_ERR "pxd: failed to initialize sysfs: %d\n", err);
 		goto out_blkdev;
+	}
 
-	printk(KERN_INFO "pxd driver loaded version %s\n", gitversion);
+	printk(KERN_INFO "pxd: driver loaded version %s\n", gitversion);
 
 	return 0;
 
@@ -1014,8 +1031,9 @@ out_blkdev:
 out_misc:
 	misc_deregister(&pxd_miscdev);
 out_fuse:
-	for (i = 0; i < pxd_num_contexts; ++i)
-		fuse_conn_put(&pxd_contexts[i].fc);
+	for (i = 0; i < pxd_num_contexts; ++i) {
+		pxd_context_destroy(&pxd_contexts[i]);
+	}
 out_pxd_contexts:
 	kfree(pxd_contexts);
 out_fuse_dev:
@@ -1033,21 +1051,16 @@ void pxd_exit(void)
 	misc_deregister(&pxd_miscdev);
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
-
-		misc_deregister(&pxd_contexts[i].miscdev);
-		del_timer_sync(&pxd_contexts[i].timer);
-
 		/* force cleanup @@@ */
 		pxd_contexts[i].fc.connected = true;
-		fuse_abort_conn(&pxd_contexts[i].fc);
-		fuse_conn_put(&pxd_contexts[i].fc);
+		pxd_context_destroy(&pxd_contexts[i]);
 	}
 
 	fuse_dev_cleanup();
 
 	kfree(pxd_contexts);
 
-	printk(KERN_INFO "pxd driver unloaded\n");
+	printk(KERN_INFO "pxd: driver unloaded\n");
 }
 
 module_init(pxd_init);
