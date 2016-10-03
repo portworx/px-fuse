@@ -12,14 +12,19 @@
 
 #include <linux/kernel.h>
 #include <linux/uio.h>
+#include <linux/version.h>
 
 struct page;
 
+#if LINUX_VERSION_CODE <  KERNEL_VERSION(3,16,0) || \
+    LINUX_VERSION_CODE >= KERNEL_VERSION(3,18,0)
+/* Linux 3.16.x and 3.17.x already have this declaration. */
 enum {
 	ITER_IOVEC = 0,
 	ITER_KVEC = 2,
 	ITER_BVEC = 4,
 };
+#endif
 
 struct __iov_iter {
 	int type;
@@ -41,13 +46,6 @@ static inline struct iovec __iov_iter_iovec(const struct __iov_iter *iter)
 			       iter->iov->iov_len - iter->iov_offset),
 	};
 }
-
-#define iov_for_each(iov, iter, start)				\
-	if (!((start).type & ITER_BVEC))			\
-	for (iter = (start);					\
-	     (iter).count &&					\
-	     ((iov = __iov_iter_iovec(&(iter))), 1);		\
-	     __iov_iter_advance(&(iter), (iov).iov_len))
 
 unsigned long iov_shorten(struct iovec *iov, unsigned long nr_segs, size_t to);
 
