@@ -510,7 +510,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 				    GFP_KERNEL);
 	if (new_minor < 0) {
 		err = new_minor;
-		goto out;
+		goto out_module;
 	}
 
 	pxd_dev->dev_id = add->dev_id;
@@ -522,25 +522,24 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	if (err)
 		goto out_id;
 
-	err = pxd_bus_add_dev(pxd_dev);
-	if (err)
-		goto out_disk;
-
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == add->dev_id) {
 			err = -EEXIST;
-			break;
+			spin_unlock(&ctx->lock);
+			goto out_disk;
 		}
 	}
-	if (!err) {
-		list_add(&pxd_dev->node, &ctx->list);
-		++ctx->num_devices;
+
+	err = pxd_bus_add_dev(pxd_dev);
+	if (err) {
 		spin_unlock(&ctx->lock);
-	} else {
-		spin_unlock(&ctx->lock);
-		goto out_id;
+		goto out_disk;
 	}
+
+	list_add(&pxd_dev->node, &ctx->list);
+	++ctx->num_devices;
+	spin_unlock(&ctx->lock);
 
 	add_disk(pxd_dev->disk);
 
