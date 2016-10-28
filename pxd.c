@@ -206,7 +206,11 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_OP_WRITE);
+#else
 	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
+#endif
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 	pxd_request_complete(fc, req);
@@ -258,9 +262,15 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->misc.pxd_rdwr_in.minor = minor;
 	req->misc.pxd_rdwr_in.offset = off;
 	req->misc.pxd_rdwr_in.size = size;
-	req->misc.pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
-		((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	req->misc.pxd_rdwr_in.flags =
+		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
+#else
+	req->misc.pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
+				      ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+				      ((flags & REQ_META) ? PXD_FLAGS_META : 0);
+#endif
 }
 
 static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
@@ -308,10 +318,36 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
+			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
+			uint64_t reqctr)
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
+
+	switch (op) {
+	case REQ_OP_WRITE:
+		pxd_write_request(req, size, off, minor, flags, qfn);
+		break;
+	case REQ_OP_READ:
+		pxd_read_request(req, size, off, minor, flags, qfn);
+		break;
+	case REQ_OP_DISCARD:
+		pxd_discard_request(req, size, off, minor, flags, qfn);
+		break;
+	case REQ_OP_FLUSH:
+		pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
+		break;
+	}
+}
+
+#else
+
+static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
+	uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
+{
+	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
+
 	switch (flags & (REQ_WRITE | REQ_DISCARD)) {
 	case REQ_WRITE:
 		pxd_write_request(req, size, off, minor, flags, qfn);
@@ -326,6 +362,7 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		break;
 	}
 }
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
@@ -343,7 +380,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_rw);
+			bio->bi_vcnt, bio->bi_opf);
 
 	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
 	if (IS_ERR(req)) {
@@ -351,8 +388,14 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio->bi_rw, false, REQCTR(&pxd_dev->ctx->fc));
+		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc));
+#else
+	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+		    pxd_dev->minor, bio->bi_rw, false,
+		    REQCTR(&pxd_dev->ctx->fc));
+#endif
 
 	req->misc.pxd_rdwr_in.chksum = 0;
 	req->bio = bio;
@@ -395,9 +438,15 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
+			    REQCTR(&pxd_dev->ctx->fc));
+#else
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, rq->cmd_flags, true,
 			    REQCTR(&pxd_dev->ctx->fc));
+#endif
 
 		req->num_pages = 0;
 		req->misc.pxd_rdwr_in.chksum = 0;
@@ -1003,7 +1052,7 @@ int pxd_init(void)
 	pxd_miscdev.fops = &pxd_contexts[0].fops;
 	err = misc_register(&pxd_miscdev);
 	if (err) {
-		printk(KERN_ERR "pxd: failed to register dev %s: %d\n", 
+		printk(KERN_ERR "pxd: failed to register dev %s: %d\n",
 			pxd_miscdev.name, err);
 		goto out_fuse;
 	}
