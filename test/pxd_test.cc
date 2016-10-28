@@ -41,20 +41,20 @@ class GddBasicTest : public ::testing::Test {
 };
 
 TEST_F(GddBasicTest, insert_module) {
-	seteuid(0);
-	ASSERT_EQ(0, system("/usr/bin/sudo /usr/sbin/insmod px_fuse/px.ko"));
-	ASSERT_EQ(0, system("/usr/bin/sudo /usr/sbin/rmmod px_fuse/px.ko"));
+	ASSERT_EQ(0, seteuid(0));
+	ASSERT_EQ(0, system("sudo insmod px_fuse/px.ko"));
+	ASSERT_EQ(0, system("sudo rmmod px_fuse/px.ko"));
 }
 
 class GddTest : public ::testing::Test {
 protected:
 	virtual void SetUp() {
-		seteuid(0);
-		ASSERT_EQ(0, system("/usr/bin/sudo /usr/sbin/insmod px_fuse/px.ko"));
+		ASSERT_EQ(0, seteuid(0));
+		ASSERT_EQ(0, system("sudo insmod px_fuse/px.ko"));
 	}
 
 	virtual void TearDown() {
-		ASSERT_EQ(0, system("/usr/bin/sudo /usr/sbin/rmmod px_fuse/px.ko"));
+		ASSERT_EQ(0, system("sudo rmmod px_fuse/px.ko"));
 	}
 };
 
@@ -136,8 +136,8 @@ public:
 
 void GddTestWithControl::SetUp()
 {
-	seteuid(0);
-	ASSERT_EQ(0, system("/usr/bin/sudo /usr/sbin/insmod px_fuse/px.ko"));
+	ASSERT_EQ(0, seteuid(0));
+	ASSERT_EQ(0, system("sudo insmod px_fuse/px.ko"));
 
 	fd = open(PXD_CONTROL_DEV, O_RDWR);
 	ASSERT_GT(fd, 0);
@@ -161,7 +161,7 @@ void GddTestWithControl::TearDown()
 		fd = -1;
 	}
 
-	ASSERT_EQ(0, system("/usr/bin/sudo /usr/sbin/rmmod px_fuse/px.ko"));
+	ASSERT_EQ(0, system("sudo rmmod px_fuse/px.ko"));
 }
 
 void GddTestWithControl::dev_add(pxd_add_out &add, int &minor, std::string &name)
