@@ -1018,7 +1018,7 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 
 int pxd_init(void)
 {
-	int err, i;
+	int err, i, j;
 
 	err = fuse_dev_init();
 	if (err) {
@@ -1039,7 +1039,7 @@ int pxd_init(void)
 		err = pxd_context_init(ctx, i);
 		if (err) {
 			printk(KERN_ERR "pxd: failed to initialize connection\n");
-			goto out_pxd_contexts;
+			goto out_fuse;
 		}
 		err = misc_register(&ctx->miscdev);
 		if (err) {
@@ -1079,10 +1079,9 @@ out_blkdev:
 out_misc:
 	misc_deregister(&pxd_miscdev);
 out_fuse:
-	for (i = 0; i < pxd_num_contexts; ++i) {
-		pxd_context_destroy(&pxd_contexts[i]);
+	for (j = 0; j < i; ++j) {
+		pxd_context_destroy(&pxd_contexts[j]);
 	}
-out_pxd_contexts:
 	kfree(pxd_contexts);
 out_fuse_dev:
 	fuse_dev_cleanup();
