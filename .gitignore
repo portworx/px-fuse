@@ -20,6 +20,7 @@ Makefile
 Module.symvers
 modules.order
 px.mod.c
+test/.libs/
 test/.deps/
 test/.dirstamp
 test/pxd_test
