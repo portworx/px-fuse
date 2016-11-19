@@ -24,6 +24,10 @@ $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif
 endif
 
+ifdef KERNELOTHER
+KERNELOTHEROPT=O=$(KERNELOTHER) 
+endif
+
 MAJOR=$(shell echo $(KVERSION) | awk -F. '{print $$1}')
 MINOR=$(shell echo $(KVERSION) | awk -F. '{print $$2}')
 PATCH=$(shell echo $(KVERSION) | awk -F. '{print $$3}' | awk -F- '{print $$1}')
@@ -35,16 +39,16 @@ export OUTPATH
 .PHONY: rpm
 
 all: px_version.c
-	make -C $(KERNELPATH) M=$(CURDIR) modules
+	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
 
 insert: all
 	insmod px.ko
 
 clean:
-	make -C $(KERNELPATH) M=$(CURDIR) clean
+	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) clean
 
 install:
-	make V=1 -C $(KERNELPATH) M=$(CURDIR) modules_install
+	make V=1 -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules_install
 
 rpm:
 	@cd rpm && ./buildrpm.sh

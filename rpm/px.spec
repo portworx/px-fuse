@@ -30,8 +30,12 @@ BuildRequires: %required_rpms
 
 %build
 
-%if 0%{?kernalpath:1}
-export KERNALPATH="%kernalpath"
+%if 0%{?kernelpath:1}
+export KERNELPATH="%kernelpath"
+%endif
+
+%if 0%{?kernelother:1}
+export KERNELOTHER="%kernelother"
 %endif
 
 autoreconf

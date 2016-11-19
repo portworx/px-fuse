@@ -49,7 +49,9 @@ for dir in ${BLDDIRS}; do mkdir -p ${dir}; done
 PXSPEC=px.spec
 cp -a ${BUILDDIR}/${PXSPEC} ${RPMSPECSROOT}/${PXSPEC}
 
-EXTRA_DEFINES="--define 'kernelpath "${KERNELPATH}"' --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10'"
+[ -n "${KERNELOTHER}" ] && KERNELOTHERDEFINE=" --define 'kernelother "${KERNELOTHER}"'"
+#EXTRA_DEFINES="--define 'kernelpath "${KERNELPATH}"' --define 'kernelother "${KERNELOTHER}"' --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10'"
+EXTRA_DEFINES="--define 'kernelpath "${KERNELPATH}"'"${KERNELOTHERDEFINE}" --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10'"
 
 SOURCE_ROOT=${BUILDDIR}/..
 RPM_NAME="${NAME}"
