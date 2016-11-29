@@ -108,7 +108,8 @@ struct pxd_remove_out {
  */
 struct pxd_read_data_out {
 	uint64_t unique;	/**< request id */
-	int iovcnt;		/**< number of iovec entries */
+	int32_t iovcnt;		/**< number of iovec entries */
+	int32_t pad;
 };
 
 /**
