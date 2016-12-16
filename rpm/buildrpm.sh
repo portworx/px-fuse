@@ -50,7 +50,6 @@ PXSPEC=px.spec
 cp -a ${BUILDDIR}/${PXSPEC} ${RPMSPECSROOT}/${PXSPEC}
 
 [ -n "${KERNELOTHER}" ] && KERNELOTHERDEFINE=" --define 'kernelother "${KERNELOTHER}"'"
-#EXTRA_DEFINES="--define 'kernelpath "${KERNELPATH}"' --define 'kernelother "${KERNELOTHER}"' --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10'"
 EXTRA_DEFINES="--define 'kernelpath "${KERNELPATH}"'"${KERNELOTHERDEFINE}" --define 'rpmdescription "${DESCRIPTION}"' --define 'required kernel >= 3.10'"
 
 SOURCE_ROOT=${BUILDDIR}/..
@@ -64,24 +63,24 @@ mkdir -p ${MBUILDROOT}/${RPM_NAME}-src
 cd ${SOURCE_ROOT} && tar --exclude .git --exclude rpm -czf - * | (cd ${MBUILDROOT}/${RPM_NAME}-src; tar -xzf -)
 cd ${MBUILDROOT} && tar -czf ${RPMSRCROOT}/${RPM_NAME}-${RPMVERSION}.tar.gz ${RPM_NAME}-src
 cd ${RPMSPECSROOT} && eval rpmbuild -vv -ba ${BLD_MACROS[@]} ${RPMVERSION_DEFINES[@]} ${RPM_DEFINES[@]} ${PXSPEC}
- 
+
 if [ $? -eq 0 -a -e /etc/debian_version ]; then
     ALIEN=$(which alien)
     [ -z "${ALIEN}" ] && echo "Error: Debian 'alien' package not installed.  Please install using apt-get install alien and rerun this script." && exit 1;
     cd ${RPMRPMSROOT}/${PLATFORM} && DEBPKG=$(${ALIEN} -k ${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm --scripts)
     [ $? -ne 0 ] && echo "Error: Failed to build debian package." && exit 1
-    DEBPKG=$(echo "${DEBPKG}" | /bin/sed 's/ generated.*//') 
+    DEBPKG=$(echo "${DEBPKG}" | /bin/sed 's/ generated.*//')
 fi
 
-RPMPATH="${RPMRPMSROOT}/${PLATFORM}/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm" 
-DPKGPATH="${RPMRPMSROOT}/${PLATFORM}/${DEBPKG}" 
+RPMPATH="${RPMRPMSROOT}/${PLATFORM}/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm"
+DPKGPATH="${RPMRPMSROOT}/${PLATFORM}/${DEBPKG}"
 
 if [ !  -z "${OUTPATH}" ]; then
 	cp  ${RPMPATH} ${OUTPATH}
 	RPMPATH="$OUTPATH/${RPM_NAME}-${VERSION}-${REVISION}.${PLATFORM}.rpm"
 	if [ -n "${DEBPKG}" ]; then
 		cp ${RPMRPMSROOT}/${PLATFORM}/${DEBPKG} ${OUTPATH}
-		DPKGPATH="${OUTPATH}/${DEBPKG}" 
+		DPKGPATH="${OUTPATH}/${DEBPKG}"
 	fi
 fi
 
@@ -95,4 +94,4 @@ echo "Uninstall commands for the built ${RPM_NAME} packages:"
 echo
 echo "  RHEL/Centos: rpm -e ${RPM_NAME}"
 [ -n "${DEBPKG}" ] && echo "       Debian: dpkg --purge ${RPM_NAME}"
-echo                                                                                                   
+echo

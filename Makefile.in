@@ -1,7 +1,9 @@
 px-objs = pxd.o dev.o iov_iter.o px_version.o
 obj-m = px.o
 
-ccflags-y := -Wno-error=frame-larger-than= -Werror -I$(src)
+PXDEFINES := -D__PXKERNEL__
+
+ccflags-y := -Wno-error=frame-larger-than= -Werror -I$(src) $(PXDEFINES)
 
 KVERSION=$(shell uname -r)
 ifndef KERNELPATH
@@ -25,7 +27,7 @@ endif
 endif
 
 ifdef KERNELOTHER
-KERNELOTHEROPT=O=$(KERNELOTHER) 
+KERNELOTHEROPT=O=$(KERNELOTHER)
 endif
 
 MAJOR=$(shell echo $(KVERSION) | awk -F. '{print $$1}')
@@ -62,7 +64,7 @@ docker-build: docker-build-dev
 	-v $(shell pwd):/home/px-fuse \
 	portworx/px-fuse:dev make
 
-px_version.c: 
+px_version.c:
 	echo "const char *gitversion = \"$(shell git rev-parse HEAD)\";" > $@
 
 distclean: clean
