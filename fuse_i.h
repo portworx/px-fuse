@@ -9,7 +9,6 @@
 #ifndef _FS_FUSE_I_H
 #define _FS_FUSE_I_H
 
-#include <linux/fuse.h>
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/wait.h>
@@ -23,6 +22,8 @@
 #include <linux/poll.h>
 #include <linux/workqueue.h>
 #include <linux/hash.h>
+
+#include "fuse.h"
 #include "pxd.h"
 
 /** Max number of pages that can be used in a single read request */

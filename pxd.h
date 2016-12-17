@@ -9,7 +9,7 @@
 #include <string.h>
 #endif
 
-#include "linux/fuse.h"
+#include "fuse.h"
 
 /// @file px_fuse/pxd.h
 
