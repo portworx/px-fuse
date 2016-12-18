@@ -1,9 +1,10 @@
 px-objs = pxd.o dev.o iov_iter.o px_version.o
 obj-m = px.o
 
+KBUILD_CPPFLAGS := -D__KERNEL__
 PXDEFINES := -D__PXKERNEL__
 
-ccflags-y := -Wno-error=frame-larger-than= -Werror -I$(src) $(PXDEFINES)
+ccflags-y := -Wno-error=frame-larger-than= -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES) 
 
 KVERSION=$(shell uname -r)
 ifndef KERNELPATH
