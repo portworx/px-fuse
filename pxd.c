@@ -936,7 +936,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	if (rc)
 		return rc;
 
-	printk(KERN_INFO "%s: open OK\n", __func__);
+	printk(KERN_INFO "%s: pxd-control-%d open OK\n", __func__, ctx->id);
 	return 0;
 }
 
@@ -954,6 +954,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		ctx->fc.connected = 0;
 	ctx->fc.pend_open = 0;
 	mod_timer(&ctx->timer, jiffies + (PXD_TIMER_SECS * HZ));
+	printk(KERN_INFO "%s: pxd-control-%d close OK\n", __func__, ctx->id);
 	return 0;
 }
 
