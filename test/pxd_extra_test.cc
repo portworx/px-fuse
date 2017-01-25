@@ -3,7 +3,6 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <linux/fuse.h>
 #include <sys/poll.h>
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <sys/uio.h>
