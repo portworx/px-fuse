@@ -57,6 +57,9 @@ enum pxd_opcode {
  * Makes snapshot writeable */
 #define PXD_FLAGS_REPAIR 0x20000
 
+/** Force read and resync from all nodes */
+#define PXD_FLAGS_READ_RESYNC 0x40000
+
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
 
