@@ -47,6 +47,7 @@ struct pxd_context {
 	struct list_head pending_requests;
 	struct timer_list timer;
 	bool init_sent;
+	uint64_t unique;
 };
 
 struct pxd_context *pxd_contexts;
@@ -828,10 +829,15 @@ static void pxd_fill_init(struct fuse_conn *fc, struct fuse_req *req,
 static void pxd_process_init_reply(struct fuse_conn *fc,
 		struct fuse_req *req)
 {
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+
+	printk(KERN_INFO "%s: pxd-control-%d:%llu init OK\n",
+		__func__, ctx->id, req->out.h.unique);
 	pxd_printk("%s: req %p err %d len %d un %lld\n",
 		__func__, req, req->out.h.error,
 		req->out.h.len, req->out.h.unique);
 
+	ctx->unique = req->out.h.unique;
 	if (req->out.h.error != 0)
 		fc->connected = 0;
 	fc->pend_open = 0;
@@ -921,6 +927,10 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		printk(KERN_ERR "%s: too many outstanding opened\n", __func__);
 		return -EINVAL;
 	}
+	if (fc->connected == 1) {
+		printk(KERN_ERR "%s: pxd-control-%d already open\n", __func__, ctx->id);
+		return -EINVAL;
+	}
 
 	del_timer_sync(&ctx->timer);
 
@@ -954,7 +964,8 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		ctx->fc.connected = 0;
 	ctx->fc.pend_open = 0;
 	mod_timer(&ctx->timer, jiffies + (PXD_TIMER_SECS * HZ));
-	printk(KERN_INFO "%s: pxd-control-%d close OK\n", __func__, ctx->id);
+	printk(KERN_INFO "%s: pxd-control-%d:%llu close OK\n", __func__,
+		ctx->id, ctx->unique);
 	return 0;
 }
 
@@ -979,7 +990,8 @@ static void pxd_timeout(unsigned long args)
 	fc->connected = true;
 	fc->allow_disconnected = 0;
 	fuse_abort_conn(fc);
-	printk(KERN_INFO "PXD_TIMEOUT (%s): Aborting all requests...", ctx->name);
+	printk(KERN_INFO "PXD_TIMEOUT (%s:%llu): Aborting all requests...",
+		ctx->name, ctx->unique);
 }
 
 int pxd_context_init(struct pxd_context *ctx, int i)
