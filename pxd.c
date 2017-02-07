@@ -375,13 +375,20 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
+	unsigned int flags;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	flags = bi_flags(bio);
+#else
+	flags = bio->bi_flags;
+#endif
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags %lx\n", __func__,
+			"flags %u\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_opf);
+			bio->bi_vcnt, flags);
 
 	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
 	if (IS_ERR(req)) {
@@ -659,6 +666,37 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	ida_simple_remove(&pxd_minor_ida, minor);
 
 	module_put(THIS_MODULE);
+
+	return 0;
+out:
+	return err;
+}
+
+ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
+{
+	bool found = false;
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	int err;
+	struct pxd_device *pxd_dev;
+
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		if (pxd_dev->dev_id == update_size->dev_id) {
+			spin_lock(&pxd_dev->lock);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	if (!found) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+	revalidate_disk(pxd_dev->disk);
+	spin_unlock(&pxd_dev->lock);
 
 	return 0;
 out:

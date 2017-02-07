@@ -675,6 +675,19 @@ static int fuse_notify_remove(struct fuse_conn *conn, unsigned int size,
 	return pxd_remove(conn, &remove);
 }
 
+static int fuse_notify_update_size(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter)
+{
+	struct pxd_update_size_out update_size;
+	size_t len = sizeof(update_size);
+
+	if (copy_from_iter(&update_size, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+	return pxd_update_size(conn, &update_size);
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -685,6 +698,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_add(fc, size, iter);
 	case PXD_REMOVE:
 		return fuse_notify_remove(fc, size, iter);
+	case PXD_UPDATE_SIZE:
+		return fuse_notify_update_size(fc, size, iter);
 	default:
 		return -EINVAL;
 	}

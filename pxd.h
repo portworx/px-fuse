@@ -39,6 +39,7 @@ enum pxd_opcode {
 	PXD_ADD,	/**< add device to kernel */
 	PXD_REMOVE,	/**< remove device from kernel */
 	PXD_READ_DATA,	/**< read data from kernel */
+	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_LAST,
 };
 
@@ -113,6 +114,14 @@ struct pxd_read_data_out {
 	uint64_t unique;	/**< request id */
 	int32_t iovcnt;		/**< number of iovec entries */
 	int32_t pad;
+};
+
+/**
+ * PXD_UPDATE_SIZE request from user space
+ */
+struct pxd_update_size_out {
+	uint64_t dev_id;
+	size_t size;
 };
 
 /**
