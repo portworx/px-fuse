@@ -128,6 +128,7 @@ protected:
 	void read_zeroes(fuse_in_header *in, pxd_rdwr_in *rd);
 	void read_pattern(fuse_in_header *in, pxd_rdwr_in *rd);
 	void read_all_zeroes(int timeout);
+	int dev_update_size(uint64_t dev_id, size_t size);
 public:
 	void write_thread(const char *name);
 	void read_thread(const char *name);
@@ -330,6 +331,24 @@ void GddTestWithControl::dev_remove(uint64_t dev_id)
 	added_ids.erase(dev_id);
 }
 
+int GddTestWithControl::dev_update_size(uint64_t dev_id, size_t size)
+{
+	fuse_out_header oh;
+	struct iovec iov[2];
+	pxd_update_size_out update_size = { dev_id , size };
+
+	oh.unique = 0;
+	oh.error = PXD_UPDATE_SIZE;
+	oh.len = sizeof(oh) + sizeof(update_size);
+
+	iov[0].iov_base = &oh;
+	iov[0].iov_len = sizeof(oh);
+	iov[1].iov_base = &update_size;
+	iov[1].iov_len = sizeof(update_size);
+
+	return writev(fd, iov, 2) == oh.len ? 0 : -errno;
+}
+
 TEST_F(GddTestWithControl, device_size)
 {
 	pxd_add_out add;
@@ -422,6 +441,50 @@ TEST_F(GddTestWithControl, read_write)
 	read_pattern(in, rd);
 
 	rt.join();
+}
+
+TEST_F(GddTestWithControl, device_update_size)
+{
+	pxd_add_out add;
+	std::string name;
+	int minor, ret;
+	uint64_t dev_size;
+	uint64_t target_dev_size = 1024 * 1024;
+
+	add.dev_id = 1;
+	add.size = target_dev_size;
+	add.queue_depth = 0;
+	dev_add(add, minor, name);
+
+	boost::iostreams::file_descriptor dev_fd(name);
+	ASSERT_GT(dev_fd.handle(), 0);
+
+	ret = ioctl(dev_fd.handle(), BLKGETSIZE64, &dev_size);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(dev_size, target_dev_size);
+
+	target_dev_size = 4 * 1024 * 1024;
+	ret = dev_update_size(1, target_dev_size);
+	ASSERT_EQ(0, ret);
+
+	ret = ioctl(dev_fd.handle(), BLKGETSIZE64, &dev_size);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(dev_size, target_dev_size);
+
+	ret = dev_update_size(999, target_dev_size);
+	ASSERT_EQ(-ENOENT, ret);
+
+	ret = ioctl(dev_fd.handle(), BLKGETSIZE64, &dev_size);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(dev_size, target_dev_size);
+
+	target_dev_size = 1024 * 1024;
+	ret = dev_update_size(1, target_dev_size);
+	ASSERT_EQ(0, ret);
+
+	ret = ioctl(dev_fd.handle(), BLKGETSIZE64, &dev_size);
+	ASSERT_EQ(0, ret);
+	ASSERT_EQ(dev_size, target_dev_size);
 }
 
 int main(int argc, char **argv)
