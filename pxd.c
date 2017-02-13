@@ -684,7 +684,7 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if (pxd_dev->dev_id == update_size->dev_id) {
+		if ((pxd_dev->dev_id == update_size->dev_id) && !pxd_dev->removing) {
 			spin_lock(&pxd_dev->lock);
 			found = true;
 			break;
@@ -698,7 +698,8 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 	}
 
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
-	revalidate_disk(pxd_dev->disk);
+	err = revalidate_disk(pxd_dev->disk);
+	BUG_ON(err);
 	spin_unlock(&pxd_dev->lock);
 
 	return 0;
