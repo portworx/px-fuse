@@ -697,10 +697,14 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 		goto out;
 	}
 
+	(void)get_device(&pxd_dev->dev);
+
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+	spin_unlock(&pxd_dev->lock);
+
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
-	spin_unlock(&pxd_dev->lock);
+	put_device(&pxd_dev->dev);
 
 	return 0;
 out:
