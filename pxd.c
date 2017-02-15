@@ -387,7 +387,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 #endif
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags %u op_flags %u\n", __func__,
+			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
