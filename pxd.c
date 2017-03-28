@@ -375,23 +375,16 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	unsigned int flags, op_flags;
+	unsigned int flags;
 
 	flags = bio->bi_flags;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
-	op_flags = 0; // Not present in older kernels
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
-	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
-#else
-	op_flags = bio_flags(bio);
-#endif
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, flags, op_flags);
+			bio->bi_vcnt, flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
 	if (IS_ERR(req)) {

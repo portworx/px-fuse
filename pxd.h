@@ -1,6 +1,7 @@
 #ifndef PXD_H_
 #define PXD_H_
 
+#include <linux/version.h>
 #ifdef __PXKERNEL__
 #include <linux/types.h>
 #else
@@ -171,4 +172,19 @@ struct pxd_ioctl_version_args {
 	int piv_len;
 	char piv_data[64];
 };
+
+static inline unsigned int get_bio_flags(struct bio *bio)
+{
+	unsigned int op_flags;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
+	op_flags = 0; // Not present in older kernels
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
+	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
+	op_flags = bio_flags(bio);
+#else
+	op_flags = (bio->bi_opf & REQ_OP_MASK);
+#endif
+	return op_flags;
+}
 #endif /* PXD_H_ */
