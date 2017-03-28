@@ -49,18 +49,6 @@ enum pxd_opcode {
 #define PXD_FLAGS_META	0x4	/**< REQ_META set on bio */
 #define PXD_FLAGS_SYNC (PXD_FLAGS_FLUSH | PXD_FLAGS_FUA)
 
-/** rpc request flags */
-
-/** force remote write to execute as multi-node */
-#define PXD_FLAGS_REQ_TYPE_MN 0x10000
-
-/** Force overwrite even for readonly snapshots.
- * Makes snapshot writeable */
-#define PXD_FLAGS_REPAIR 0x20000
-
-/** Force read and resync from all nodes */
-#define PXD_FLAGS_READ_RESYNC 0x40000
-
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
 
