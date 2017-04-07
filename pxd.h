@@ -21,7 +21,7 @@
 #define PXD_VERSION 4		/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
-#define PXD_NUM_CONTEXT_EXPORTED	10	/**< Available for external use */
+#define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
 
 #define PXD_IOCTL_MAGIC			(('P' << 8) | 'X')
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */

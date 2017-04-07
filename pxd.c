@@ -1037,19 +1037,21 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 {
 	int err;
 	spin_lock_init(&ctx->lock);
-	err = fuse_conn_init(&ctx->fc);
-	if (err)
-		return err;
 	ctx->id = i;
-	ctx->fc.release = pxd_fuse_conn_release;
-	ctx->fc.allow_disconnected = 1;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
-	if (i >= PXD_NUM_CONTEXT_EXPORTED) {
+	ctx->fops.release = pxd_control_release;
+
+	if (ctx->id < PXD_NUM_CONTEXT_EXPORTED) {
+		err = fuse_conn_init(&ctx->fc);
+		if (err)
+			return err;
+	} else {
 		ctx->fops.unlocked_ioctl = pxd_control_ioctl;
 	}
-	ctx->fops.release = pxd_control_release;
+	ctx->fc.release = pxd_fuse_conn_release;
+	ctx->fc.allow_disconnected = 1;
 	INIT_LIST_HEAD(&ctx->list);
 	sprintf(ctx->name, "/pxd/pxd-control-%d", i);
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
@@ -1064,8 +1066,10 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
 	del_timer_sync(&ctx->timer);
-	fuse_abort_conn(&ctx->fc);
-	fuse_conn_put(&ctx->fc);
+	if (ctx->id < PXD_NUM_CONTEXT_EXPORTED) {
+		fuse_abort_conn(&ctx->fc);
+		fuse_conn_put(&ctx->fc);
+	}
 }
 
 int pxd_init(void)
