@@ -173,7 +173,7 @@ struct pxd_ioctl_version_args {
 	char piv_data[64];
 };
 
-static inline unsigned int get_bio_flags(struct bio *bio)
+static inline unsigned int get_op_flags(struct bio *bio)
 {
 	unsigned int op_flags;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
@@ -183,7 +183,7 @@ static inline unsigned int get_bio_flags(struct bio *bio)
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
 	op_flags = bio_flags(bio);
 #else
-	op_flags = (bio->bi_opf & REQ_OP_MASK);
+	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
 #endif
 	return op_flags;
 }
