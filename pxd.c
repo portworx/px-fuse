@@ -52,7 +52,9 @@ struct pxd_context {
 
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
+uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 
+module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 
 struct pxd_device {
@@ -957,7 +959,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	ctx = container_of(file->f_op, struct pxd_context, fops);
-	if (ctx->id >= PXD_NUM_CONTEXT_EXPORTED) {
+	if (ctx->id >= pxd_num_contexts_exported) {
 		return 0;
 	}
 
@@ -994,7 +996,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;
 	ctx = container_of(file->f_op, struct pxd_context, fops);
-	if (ctx->id >= PXD_NUM_CONTEXT_EXPORTED) {
+	if (ctx->id >= pxd_num_contexts_exported) {
 		return 0;
 	}
 	if (ctx->fc.connected == 0)
@@ -1043,7 +1045,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops.open = pxd_control_open;
 	ctx->fops.release = pxd_control_release;
 
-	if (ctx->id < PXD_NUM_CONTEXT_EXPORTED) {
+	if (ctx->id < pxd_num_contexts_exported) {
 		err = fuse_conn_init(&ctx->fc);
 		if (err)
 			return err;
@@ -1066,7 +1068,7 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
 	del_timer_sync(&ctx->timer);
-	if (ctx->id < PXD_NUM_CONTEXT_EXPORTED) {
+	if (ctx->id < pxd_num_contexts_exported) {
 		fuse_abort_conn(&ctx->fc);
 		fuse_conn_put(&ctx->fc);
 	}
