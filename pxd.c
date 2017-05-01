@@ -1035,23 +1035,14 @@ static void pxd_timeout(unsigned long args)
 		ctx->name, ctx->unique);
 }
 
-int pxd_context_init(struct pxd_context *ctx, int i)
+static void pxd_context_init(struct pxd_context *ctx, int i)
 {
-	int err;
 	spin_lock_init(&ctx->lock);
 	ctx->id = i;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
 	ctx->fops.release = pxd_control_release;
-
-	if (ctx->id < pxd_num_contexts_exported) {
-		err = fuse_conn_init(&ctx->fc);
-		if (err)
-			return err;
-	} else {
-		ctx->fops.unlocked_ioctl = pxd_control_ioctl;
-	}
 	ctx->fc.release = pxd_fuse_conn_release;
 	ctx->fc.allow_disconnected = 1;
 	INIT_LIST_HEAD(&ctx->list);
@@ -1061,7 +1052,21 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.fops = &ctx->fops;
 	INIT_LIST_HEAD(&ctx->pending_requests);
 	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
-	return 0;
+}
+
+static int pxd_context_setup(struct pxd_context *ctx)
+{
+	int err;
+
+	if (ctx->id < pxd_num_contexts_exported) {
+		err = fuse_conn_init(&ctx->fc);
+		if (err)
+			return err;
+	} else {
+		ctx->fops.unlocked_ioctl = pxd_control_ioctl;
+	}
+
+	return misc_register(&ctx->miscdev);
 }
 
 static void pxd_context_destroy(struct pxd_context *ctx)
@@ -1094,14 +1099,12 @@ int pxd_init(void)
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		struct pxd_context *ctx = &pxd_contexts[i];
-		err = pxd_context_init(ctx, i);
+
+		pxd_context_init(ctx, i);
+
+		err = pxd_context_setup(ctx);
 		if (err) {
-			printk(KERN_ERR "pxd: failed to initialize connection\n");
-			goto out_fuse;
-		}
-		err = misc_register(&ctx->miscdev);
-		if (err) {
-			printk(KERN_ERR "pxd: failed to register dev %s %d: %d\n",
+			printk(KERN_ERR "pxd: failed to setup dev %s %d: %d\n",
 				ctx->miscdev.name, i, err);
 			goto out_fuse;
 		}
@@ -1137,7 +1140,7 @@ out_blkdev:
 out_misc:
 	misc_deregister(&pxd_miscdev);
 out_fuse:
-	for (j = 0; j < i; ++j) {
+	for (j = 0; j <= i; ++j) {
 		pxd_context_destroy(&pxd_contexts[j]);
 	}
 	kfree(pxd_contexts);
