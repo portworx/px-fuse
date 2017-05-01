@@ -1133,7 +1133,7 @@ int pxd_init(void)
 	return 0;
 
 out_blkdev:
-	unregister_blkdev(0, "pxd");
+	unregister_blkdev(pxd_major, "pxd");
 out_misc:
 	misc_deregister(&pxd_miscdev);
 out_fuse:
