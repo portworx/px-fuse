@@ -1115,12 +1115,12 @@ int pxd_init(void)
 		goto out_fuse;
 	}
 
-	pxd_major = register_blkdev(0, "pxd");
-	if (pxd_major < 0) {
-		err = pxd_major;
+	err = register_blkdev(0, "pxd");
+	if (err < 0) {
 		printk(KERN_ERR "pxd: failed to register dev pxd: %d\n", err);
 		goto out_misc;
 	}
+	pxd_major = err;
 
 	err = pxd_sysfs_init();
 	if (err) {
