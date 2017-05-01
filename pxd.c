@@ -896,7 +896,6 @@ static int pxd_send_init(struct fuse_conn *fc)
 	int rc;
 	struct fuse_req *req;
 	struct pxd_init_in *arg;
-	void *outarg;
 	int i;
 	int num_pages = (sizeof(struct pxd_dev_id) * ctx->num_devices +
 				PAGE_SIZE - 1) / PAGE_SIZE;
@@ -919,10 +918,6 @@ static int pxd_send_init(struct fuse_conn *fc)
 
 	arg = &req->misc.pxd_init_in;
 	pxd_fill_init(fc, req, arg);
-
-	outarg = kzalloc(sizeof(struct pxd_init_out), GFP_KERNEL);
-	if (!outarg)
-		goto err_free_pages;
 
 	req->in.h.opcode = PXD_INIT;
 	req->in.numargs = 2;
