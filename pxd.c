@@ -425,7 +425,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (rq->cmd_type != REQ_TYPE_FS) {
+		if (blk_rq_is_passthrough(rq)) {
 				__blk_end_request_all(rq, 0);
 				continue;
 		}
