@@ -605,6 +605,7 @@ out_disk:
 out_id:
 	ida_simple_remove(&pxd_minor_ida, new_minor);
 out_module:
+	kfree(pxd_dev);
 	module_put(THIS_MODULE);
 out:
 	return err;
@@ -658,6 +659,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	device_unregister(&pxd_dev->dev);
 	pxd_free_disk(pxd_dev);
+	kfree(pxd_dev);
 
 	fuse_end_matching_requests(fc, match_minor, (void *)(uintptr_t)minor);
 
@@ -786,6 +788,7 @@ static void pxd_dev_device_release(struct device *dev)
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	pxd_free_disk(pxd_dev);
+	kfree(pxd_dev);
 }
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev)
