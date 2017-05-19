@@ -425,9 +425,9 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (rq->cmd_type != REQ_TYPE_FS) {
-				__blk_end_request_all(rq, 0);
-				continue;
+		if (BLK_RQ_IS_PASSTHROUGH(rq)) {
+			__blk_end_request_all(rq, 0);
+			continue;
 		}
 		spin_unlock_irq(&pxd_dev->qlock);
 		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "

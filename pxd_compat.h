@@ -8,6 +8,10 @@
 #include <linux/idr.h>
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#include <linux/sched/signal.h>
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER
 #endif
@@ -40,6 +44,12 @@
 } while (0)
 #else
 #define BIO_ENDIO(bio, err) bio_endio((bio), (err))
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#define BLK_RQ_IS_PASSTHROUGH(rq)	(blk_rq_is_passthrough(rq))
+#else
+#define BLK_RQ_IS_PASSTHROUGH(rq)	(rq->cmd_type != REQ_TYPE_FS)
 #endif
 
 #endif //GDFS_PXD_COMPAT_H
