@@ -622,7 +622,8 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	}
 	spin_unlock(&conn->lock);
 
-	if (req->in.h.opcode != PXD_WRITE) {
+	if (req->in.h.opcode != PXD_WRITE && 
+		req->in.h.opcode != PXD_WRITE_SAME) {
 		printk(KERN_ERR "%s: request is not a write\n", __func__);
 		return -EINVAL;
 	}

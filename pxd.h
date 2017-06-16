@@ -33,14 +33,15 @@
 
 /** fuse opcodes */
 enum pxd_opcode {
-	PXD_INIT = 8192, /**< send on device open from kernel */
-	PXD_WRITE,	/**< write to device */
-	PXD_READ,	/**< read from device */
-	PXD_DISCARD,	/**< discard blocks */
-	PXD_ADD,	/**< add device to kernel */
-	PXD_REMOVE,	/**< remove device from kernel */
-	PXD_READ_DATA,	/**< read data from kernel */
+	PXD_INIT = 8192,	/**< send on device open from kernel */
+	PXD_WRITE,			/**< write to device */
+	PXD_READ,			/**< read from device */
+	PXD_DISCARD,		/**< discard blocks */
+	PXD_ADD,			/**< add device to kernel */
+	PXD_REMOVE,			/**< remove device from kernel */
+	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
+	PXD_WRITE_SAME,		/**< write_same operation */
 	PXD_LAST,
 };
 
@@ -164,7 +165,10 @@ static inline uint64_t pxd_aligned_len(uint64_t len, uint64_t offset)
 static inline uint64_t pxd_rdwr_blocks(const struct rdwr_in *rdwr)
 {
 	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
-	return prw->size && rdwr->in.opcode == PXD_WRITE ?
+	if (prw->size && rdwr->in.opcode == PXD_WRITE_SAME)
+		return 1;
+	else
+		return prw->size && rdwr->in.opcode == PXD_WRITE ?
 	       	pxd_aligned_len(prw->size, prw->offset) / PXD_LBS : 0;
 }
 
