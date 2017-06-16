@@ -654,7 +654,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
 		if (pxd_dev->dev_id == remove->dev_id) {
 			spin_lock(&pxd_dev->lock);
-			if (!pxd_dev->open_count) {
+			if (!pxd_dev->open_count || remove->force) {
 				list_del(&pxd_dev->node);
 				--ctx->num_devices;
 			}
@@ -669,7 +669,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
-	if (pxd_dev->open_count) {
+	if (pxd_dev->open_count && !remove->force) {
 		err = -EBUSY;
 		spin_unlock(&pxd_dev->lock);
 		goto out;
@@ -682,8 +682,9 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&pxd_dev->lock);
 
 	device_unregister(&pxd_dev->dev);
-	/* device_release should have cleaned up pxd_dev->disk */
-	BUG_ON(pxd_dev->disk);
+	if (pxd_dev->disk) {
+		pxd_free_disk(pxd_dev);
+	}
 	kfree(pxd_dev);
 
 	fuse_end_matching_requests(fc, match_minor, (void *)(uintptr_t)minor);
