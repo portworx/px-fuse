@@ -123,7 +123,7 @@ protected:
 	virtual void TearDown();
 
 	void dev_add(pxd_add_out &add, int &minor, std::string &name);
-	void dev_remove(uint64_t dev_id);
+	void dev_remove(uint64_t dev_id, bool force);
 	int wait_msg(int timeout); // timeout in seconds
 	void read_zeroes(fuse_in_header *in, pxd_rdwr_in *rd);
 	void read_pattern(fuse_in_header *in, pxd_rdwr_in *rd);
@@ -154,7 +154,7 @@ void GddTestWithControl::TearDown()
 {
 	sleep(1);
 	std::for_each(added_ids.begin(), added_ids.end(),
-			std::bind(&GddTestWithControl::dev_remove, this, _1));
+			std::bind(&GddTestWithControl::dev_remove, this, _1, false));
 
 	if (fd >= 0) {
 		close(fd);
@@ -297,7 +297,7 @@ void GddTestWithControl::read_thread(const char *name)
 	ASSERT_TRUE(verify_pattern(read_buf));
 }
 
-void GddTestWithControl::dev_remove(uint64_t dev_id)
+void GddTestWithControl::dev_remove(uint64_t dev_id, bool force)
 {
 	pxd_remove_out remove;
 	fuse_out_header oh;
@@ -311,6 +311,7 @@ void GddTestWithControl::dev_remove(uint64_t dev_id)
 		oh.len = sizeof(oh) + sizeof(remove);
 
 		remove.dev_id = dev_id;
+		remove.force = force;
 
 		iov[0].iov_base = &oh;
 		iov[0].iov_len = sizeof(oh);
@@ -485,6 +486,25 @@ TEST_F(GddTestWithControl, device_update_size)
 	ret = ioctl(dev_fd.handle(), BLKGETSIZE64, &dev_size);
 	ASSERT_EQ(0, ret);
 	ASSERT_EQ(dev_size, target_dev_size);
+}
+
+TEST_F(GddTestWithControl, force_remove_device)
+{
+	pxd_add_out add;
+	std::string name;
+	int minor;
+	uint64_t target_dev_size = 1024 * 1024;
+
+	add.dev_id = 1;
+	add.size = target_dev_size;
+	add.queue_depth = 0;
+	dev_add(add, minor, name);
+
+	boost::iostreams::file_descriptor dev_fd(name);
+	ASSERT_GT(dev_fd.handle(), 0);
+
+	// Force remove the device with an open handle, shouldn't hang
+	dev_remove(add.dev_id, true);
 }
 
 int main(int argc, char **argv)
