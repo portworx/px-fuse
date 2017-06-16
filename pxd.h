@@ -141,8 +141,14 @@ struct pxd_rdwr_in {
  */
 struct rdwr_in {
 #ifdef __cplusplus
-	rdwr_in(uint32_t i_minor, uint32_t i_size, uint64_t i_offset,
-		uint64_t i_chksum, uint32_t i_flags) :
+	rdwr_in(uint32_t opcode, uint32_t i_minor, uint32_t i_size,
+		uint64_t i_offset, uint64_t i_chksum, uint32_t i_flags) :
+		rdwr(i_minor, i_size, i_offset, i_chksum, i_flags) {
+		memset(&in, 0, sizeof(in));
+		in.opcode = opcode;
+	}
+	rdwr_in(uint32_t i_minor, uint32_t i_size,
+		uint64_t i_offset, uint64_t i_chksum, uint32_t i_flags) :
 		rdwr(i_minor, i_size, i_offset, i_chksum, i_flags) {
 		memset(&in, 0, sizeof(in));
 	}
@@ -163,7 +169,7 @@ static inline uint64_t pxd_aligned_len(uint64_t len, uint64_t offset)
 	return roundup(offset % PXD_LBS + len, PXD_LBS);
 }
 
-static inline uint64_t pxd_rdwr_blocks(const struct rdwr_in *rdwr)
+static inline uint64_t pxd_wr_blocks(const struct rdwr_in *rdwr)
 {
 	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
 	if (prw->size && rdwr->in.opcode == PXD_WRITE_SAME)
@@ -171,6 +177,12 @@ static inline uint64_t pxd_rdwr_blocks(const struct rdwr_in *rdwr)
 	else
 		return prw->size && rdwr->in.opcode == PXD_WRITE ?
 	       	pxd_aligned_len(prw->size, prw->offset) / PXD_LBS : 0;
+}
+
+static inline uint64_t pxd_rd_blocks(const struct rdwr_in *rdwr)
+{
+	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
+	return pxd_aligned_len(prw->size, prw->offset) / PXD_LBS;
 }
 
 struct pxd_ioctl_version_args {
