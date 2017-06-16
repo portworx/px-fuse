@@ -2,6 +2,7 @@
 #include <pxd.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <sys/poll.h>
 #include <boost/iostreams/device/file_descriptor.hpp>
@@ -500,11 +501,18 @@ TEST_F(GddTestWithControl, force_remove_device)
 	add.queue_depth = 0;
 	dev_add(add, minor, name);
 
-	boost::iostreams::file_descriptor dev_fd(name);
-	ASSERT_GT(dev_fd.handle(), 0);
+	int dev_fd = open(name.c_str(), O_RDWR | O_DIRECT);
+	ASSERT_GT(dev_fd, 0);
 
 	// Force remove the device with an open handle, shouldn't hang
 	dev_remove(add.dev_id, true);
+	std::vector<uint64_t> v(make_pattern(write_len));
+
+	// Device is gone, so writes should fail
+	ssize_t write_bytes = write(dev_fd, v.data(), write_len);
+	EXPECT_EQ(-1, write_bytes);
+
+	close(dev_fd);
 }
 
 int main(int argc, char **argv)
