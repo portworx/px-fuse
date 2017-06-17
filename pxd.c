@@ -1037,7 +1037,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 
 static struct miscdevice pxd_miscdev = {
 	.minor		= MISC_DYNAMIC_MINOR,
-	.name		= "/pxd/pxd-control",
+	.name		= "pxd/pxd-control",
 };
 
 MODULE_ALIAS("devname:pxd-control");
@@ -1080,7 +1080,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fc.release = pxd_fuse_conn_release;
 	ctx->fc.allow_disconnected = 1;
 	INIT_LIST_HEAD(&ctx->list);
-	sprintf(ctx->name, "/pxd/pxd-control-%d", i);
+	sprintf(ctx->name, "pxd/pxd-control-%d", i);
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
