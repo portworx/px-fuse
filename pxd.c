@@ -401,6 +401,16 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	struct fuse_req *req;
 	unsigned int flags;
 
+	// Don't process requests if the device is being removed
+	spin_lock(&pxd_dev->lock);
+	if (pxd_dev->removing) {
+		spin_unlock(&pxd_dev->lock);
+		bio->bi_error = -ENODEV;
+		bio_endio(bio);
+		return BLK_QC_RETVAL;
+	}
+	spin_unlock(&pxd_dev->lock);
+
 	flags = bio->bi_flags;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
