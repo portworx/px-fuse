@@ -508,10 +508,6 @@ TEST_F(GddTestWithControl, force_remove_device)
 	dev_remove(add.dev_id, true);
 	std::vector<uint64_t> v(make_pattern(write_len));
 
-	// Device is gone, so writes should fail
-	ssize_t write_bytes = write(dev_fd, v.data(), write_len);
-	EXPECT_EQ(-1, write_bytes);
-
 	close(dev_fd);
 }
 
