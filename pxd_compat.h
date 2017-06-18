@@ -34,6 +34,8 @@
 #define BVEC(bvec) (*(bvec))
 #endif
 
+// TODO: bio_io_error() always sets the error to EIO
+//	 Should set bi_error to err and then call bio_endio instead
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 #define BIO_ENDIO(bio, err) do { 		\
 	if (err != 0) { 			\
