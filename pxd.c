@@ -663,8 +663,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	fuse_end_matching_requests(fc, match_minor, (void *)(uintptr_t)minor);
 
-	ida_simple_remove(&pxd_minor_ida, minor);
-
 	module_put(THIS_MODULE);
 
 	return 0;
@@ -786,6 +784,8 @@ static struct device_type pxd_device_type = {
 static void pxd_dev_device_release(struct device *dev)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
 
 	pxd_free_disk(pxd_dev);
 	kfree(pxd_dev);
