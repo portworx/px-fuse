@@ -622,7 +622,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	}
 	spin_unlock(&conn->lock);
 
-	if (req->in.h.opcode != PXD_WRITE && 
+	if (req->in.h.opcode != PXD_WRITE &&
 		req->in.h.opcode != PXD_WRITE_SAME) {
 		printk(KERN_ERR "%s: request is not a write\n", __func__);
 		return -EINVAL;
@@ -983,38 +983,6 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	}
 
 	return 0;
-}
-
-static void move_matching(struct fuse_conn *fc,
-		struct list_head *from, struct list_head *to,
-		int (*filter)(struct fuse_conn *fc, struct fuse_req *req,
-				void *arg),
-		void *arg)
-{
-	struct fuse_req *req, *tmp;
-
-	list_for_each_entry_safe(req, tmp, from, list) {
-		if (filter(fc, req, arg)) {
-			list_del(&req->list);
-			list_add_tail(&req->list, to);
-		}
-	}
-}
-
-void fuse_end_matching_requests(struct fuse_conn *fc,
-		int (*filter)(struct fuse_conn *fc, struct fuse_req *req,
-				void *arg),
-		void *arg)
-{
-	struct list_head del_list;
-
-	INIT_LIST_HEAD(&del_list);
-
-	spin_lock(&fc->lock);
-	move_matching(fc, &fc->pending, &del_list, filter, arg);
-	move_matching(fc, &fc->processing, &del_list, filter, arg);
-	end_requests(fc, &del_list);
-	spin_unlock(&fc->lock);
 }
 
 void fuse_restart_requests(struct fuse_conn *fc)

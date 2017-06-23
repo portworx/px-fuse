@@ -836,10 +836,6 @@ long fuse_ioctl_common(struct file *file, unsigned int cmd,
 		       unsigned long arg, unsigned int flags);
 unsigned fuse_file_poll(struct file *file, poll_table *wait);
 int fuse_dev_release(struct inode *inode, struct file *file);
-void fuse_end_matching_requests(struct fuse_conn *fc,
-		int (*filter)(struct fuse_conn *fc, struct fuse_req *req,
-				void *arg),
-		void *arg);
 void fuse_restart_requests(struct fuse_conn *fc);
 
 bool fuse_write_update_size(struct inode *inode, loff_t pos);

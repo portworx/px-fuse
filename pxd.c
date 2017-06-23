@@ -650,13 +650,6 @@ out:
 	return err;
 }
 
-static int match_minor(struct fuse_conn *conn, struct fuse_req *req, void *arg)
-{
-	/* device id is always first field in the argument */
-	return req->in.h.opcode != PXD_INIT &&
-		*(uint32_t *)req->in.args[0].value == (uint32_t)(uintptr_t)arg;
-}
-
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
@@ -697,8 +690,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&pxd_dev->lock);
 
 	device_unregister(&pxd_dev->dev);
-
-	fuse_end_matching_requests(fc, match_minor, (void *)(uintptr_t)minor);
 
 	module_put(THIS_MODULE);
 
