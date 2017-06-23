@@ -807,9 +807,8 @@ static void pxd_dev_device_release(struct device *dev)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
-	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
-
 	pxd_free_disk(pxd_dev);
+	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
 	kfree(pxd_dev);
 }
 
