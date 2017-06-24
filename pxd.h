@@ -96,6 +96,7 @@ struct pxd_add_out {
 struct pxd_remove_out {
 	uint64_t dev_id;	/**< device global id */
 	bool force;		/**< force remove device */
+	char pad[7];
 };
 
 /**
