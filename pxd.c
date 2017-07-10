@@ -157,6 +157,25 @@ static long pxd_control_ioctl(
 		printk(KERN_INFO "pxd driver at version: %s\n", gitversion);
 		status = 0;
 		break;
+
+	case PXD_IOC_VERSION:
+		if (argp) {
+		  ver_len = 8;
+		  sprintf(ver_data, "%d", PXD_VERSION);
+			if (copy_to_user(argp +
+				offsetof(struct pxd_ioctl_version_args, piv_len),
+				&ver_len, sizeof(ver_len))) {
+				return -EFAULT;
+			}
+			if (copy_to_user(argp +
+				offsetof(struct pxd_ioctl_version_args, piv_data),
+				ver_data, ver_len)) {
+				return -EFAULT;
+			}
+		}
+		printk(KERN_INFO "pxd driver module version: %s\n", ver_data);
+		status = 0;
+		break;
 	default:
 		break;
 	}
