@@ -31,6 +31,9 @@
 
 #define PXD_TIMER_SECS 600
 
+#define TOSTRING_(x) #x
+#define VERTOSTR(x) TOSTRING_(x)
+
 extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
@@ -155,25 +158,6 @@ static long pxd_control_ioctl(
 			}
 		}
 		printk(KERN_INFO "pxd driver at version: %s\n", gitversion);
-		status = 0;
-		break;
-
-	case PXD_IOC_VERSION:
-		if (argp) {
-		  ver_len = 8;
-		  sprintf(ver_data, "%d", PXD_VERSION);
-			if (copy_to_user(argp +
-				offsetof(struct pxd_ioctl_version_args, piv_len),
-				&ver_len, sizeof(ver_len))) {
-				return -EFAULT;
-			}
-			if (copy_to_user(argp +
-				offsetof(struct pxd_ioctl_version_args, piv_data),
-				ver_data, ver_len)) {
-				return -EFAULT;
-			}
-		}
-		printk(KERN_INFO "pxd driver module version: %s\n", ver_data);
 		status = 0;
 		break;
 	default:
@@ -1221,3 +1205,4 @@ module_init(pxd_init);
 module_exit(pxd_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_VERSION(VERTOSTR(PXD_VERSION));
