@@ -31,6 +31,9 @@
 
 #define PXD_TIMER_SECS 600
 
+#define TOSTRING_(x) #x
+#define VERTOSTR(x) TOSTRING_(x)
+
 extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
@@ -1165,3 +1168,4 @@ module_init(pxd_init);
 module_exit(pxd_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_VERSION(VERTOSTR(PXD_VERSION));
