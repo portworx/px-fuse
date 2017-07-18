@@ -45,7 +45,7 @@ all: px_version.c
 	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
 
 insert: all
-	insmod px.ko
+	insmod px.ko $(PXD_NUM_CONTEXT_EXPORTED)
 
 clean:
 	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) clean
