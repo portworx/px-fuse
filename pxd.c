@@ -29,7 +29,8 @@
 #define SECTOR_SIZE 512
 #define SEGMENT_SIZE (1024 * 1024)
 
-#define PXD_TIMER_SECS 600
+#define PXD_TIMER_SECS_MIN 30
+#define PXD_TIMER_SECS_MAX 600
 
 #define TOSTRING_(x) #x
 #define VERTOSTR(x) TOSTRING_(x)
@@ -56,6 +57,7 @@ struct pxd_context {
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
+uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
@@ -782,14 +784,45 @@ static ssize_t pxd_minor_show(struct device *dev,
 			(unsigned long long)pxd_dev->minor);
 }
 
+static ssize_t pxd_timeout_show(struct device *dev,
+		     struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", pxd_timeout_secs);
+}
+
+ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	uint32_t new_timeout_secs = 0;
+	struct pxd_context *ctx = pxd_dev->ctx;
+
+	if (ctx == NULL)
+		return -ENXIO;
+
+	sscanf(buf, "%d", &new_timeout_secs);
+	if (new_timeout_secs < PXD_TIMER_SECS_MIN ||
+			new_timeout_secs > PXD_TIMER_SECS_MAX) {
+		return -EINVAL;
+	}
+
+	spin_lock(&ctx->lock);
+	pxd_timeout_secs = new_timeout_secs;
+	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
+	spin_unlock(&ctx->lock);
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
+static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
 	&dev_attr_major.attr,
 	&dev_attr_minor.attr,
+	&dev_attr_timeout.attr,
 	NULL
 };
 
@@ -1037,7 +1070,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	else
 		ctx->fc.connected = 0;
 	ctx->fc.pend_open = 0;
-	mod_timer(&ctx->timer, jiffies + (PXD_TIMER_SECS * HZ));
+	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
 	printk(KERN_INFO "%s: pxd-control-%d:%llu close OK\n", __func__,
 		ctx->id, ctx->unique);
 	return 0;
