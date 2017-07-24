@@ -1040,6 +1040,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	del_timer_sync(&ctx->timer);
+	pxd_timeout_secs = PXD_TIMER_SECS_MAX;
 
 	fc->pend_open = 1;
 	fc->connected = 1;
