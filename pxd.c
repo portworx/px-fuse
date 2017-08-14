@@ -251,12 +251,12 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 		}
 	}
 	if (eintr > 0) {
-		printk(KERN_INFO "%s: alloc (%d pages) EINTR retries %d",
+		printk_ratelimited(KERN_INFO "%s: alloc (%d pages) EINTR retries %d",
 			 __func__, nr_pages, eintr);
 	}
 	status = IS_ERR(req) ? PTR_ERR(req) : 0;
 	if (status != 0) {
-		printk(KERN_ERR "%s: request alloc (%d pages) failed: %d",
+		printk_ratelimited(KERN_ERR "%s: request alloc (%d pages) failed: %d",
 			 __func__, nr_pages, status);
 	}
 	return req;
