@@ -689,10 +689,11 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	pxd_dev->removing = true;
 
+#if LINUX_VERSION_CODE != KERNEL_VERSION(3,19,3)
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue)
 		blk_set_queue_dying(pxd_dev->disk->queue);
-
+#endif
 	spin_unlock(&pxd_dev->lock);
 
 	device_unregister(&pxd_dev->dev);
