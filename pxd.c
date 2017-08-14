@@ -661,7 +661,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int found = false;
 	int err;
 	struct pxd_device *pxd_dev;
-	int minor;
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -690,7 +689,9 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	pxd_dev->removing = true;
 
-	minor = pxd_dev->minor;
+	/* Make sure the req_fn isn't called anymore even if the device hangs around */
+	if (pxd_dev->disk && pxd_dev->disk->queue)
+		blk_set_queue_dying(pxd_dev->disk->queue);
 
 	spin_unlock(&pxd_dev->lock);
 
