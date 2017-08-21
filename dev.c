@@ -604,7 +604,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 #endif
 	struct req_iterator breq_iter;
 	struct iov_iter data_iter;
-	size_t copied;
+	size_t copied, skipped = 0;
 	int ret;
 
 	if (copy_from_iter(&read_data, len, iter) != len) {
@@ -623,7 +623,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	spin_unlock(&conn->lock);
 
 	if (req->in.h.opcode != PXD_WRITE &&
-		req->in.h.opcode != PXD_WRITE_SAME) {
+	    req->in.h.opcode != PXD_WRITE_SAME) {
 		printk(KERN_ERR "%s: request is not a write\n", __func__);
 		return -EINVAL;
 	}
@@ -638,24 +638,39 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
+		copied = 0;
 		len = BVEC(bvec).bv_len;
-		copied = copy_page_to_iter(BVEC(bvec).bv_page,
-					   BVEC(bvec).bv_offset,
-					   len, &data_iter);
-		if (copied != len) {
-			/* out of space in destination, copy more iovec */
-			ret = copy_in_read_data_iovec(iter, &read_data,
-						      iov, &data_iter);
-			if (ret)
-				return ret;
-			len -= copied;
-			copied = copy_page_to_iter(BVEC(bvec).bv_page,
-						   BVEC(bvec).bv_offset + copied,
-						   len, &data_iter);
-			if (copied != len) {
-				printk(KERN_ERR "%s: copy failed new iovec\n",
-					__func__);
-				return -EFAULT;
+		if (skipped < read_data.offset) {
+			if (read_data.offset - skipped >= len) {
+				skipped += len;
+				copied = len;
+			} else {
+				copied = read_data.offset - skipped;
+				skipped = read_data.offset;
+			}
+		}
+		if (copied < len) {
+			size_t copy_this = copy_page_to_iter(BVEC(bvec).bv_page,
+				BVEC(bvec).bv_offset + copied,
+				len - copied, &data_iter);
+			if (copy_this != len - copied) {
+				if (!iter->count)
+					return 0;
+
+				/* out of space in destination, copy more iovec */
+				ret = copy_in_read_data_iovec(iter, &read_data,
+					iov, &data_iter);
+				if (ret)
+					return ret;
+				len -= copied;
+				copied = copy_page_to_iter(BVEC(bvec).bv_page,
+					BVEC(bvec).bv_offset + copied + copy_this,
+					len, &data_iter);
+				if (copied != len) {
+					printk(KERN_ERR "%s: copy failed new iovec\n",
+						__func__);
+					return -EFAULT;
+				}
 			}
 		}
 	}

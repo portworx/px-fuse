@@ -18,7 +18,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 5		/**< driver version */
+#define PXD_VERSION 6		/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -105,7 +105,7 @@ struct pxd_remove_out {
 struct pxd_read_data_out {
 	uint64_t unique;	/**< request id */
 	int32_t iovcnt;		/**< number of iovec entries */
-	int32_t pad;
+	uint32_t offset;	/**< offset into data */
 };
 
 /**
