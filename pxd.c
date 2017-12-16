@@ -771,7 +771,9 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = new_timeout_secs;
-	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
+	if (!ctx->fc.connected) {
+		mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
+	}
 	spin_unlock(&ctx->lock);
 	return count;
 }
@@ -1003,10 +1005,12 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	del_timer_sync(&ctx->timer);
+	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+	fc->connected = 1;
+	spin_unlock(&ctx->lock);
 
 	fc->pend_open = 1;
-	fc->connected = 1;
 	fc->initialized = 1;
 	fc->allow_disconnected = 1;
 	file->private_data = fc;
@@ -1029,12 +1033,16 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	if (ctx->id >= pxd_num_contexts_exported) {
 		return 0;
 	}
+
+	spin_lock(&ctx->lock);
 	if (ctx->fc.connected == 0)
 		pxd_printk("%s: not opened\n", __func__);
 	else
 		ctx->fc.connected = 0;
 	ctx->fc.pend_open = 0;
 	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
+	spin_unlock(&ctx->lock);
+
 	printk(KERN_INFO "%s: pxd-control-%d:%llu close OK\n", __func__,
 		ctx->id, ctx->unique);
 	return 0;
