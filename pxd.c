@@ -819,16 +819,58 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxd_reqs_show(struct device *dev,
+		     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	struct pxd_context *ctx = pxd_dev->ctx;
+
+	if (ctx == NULL)
+		return -ENXIO;
+	if (ctx->num_devices == 0)
+		return -ENXIO;
+	return sprintf(buf, "FC: connected: %d Total num_bg: %d active_bg: %d\n",
+		ctx->fc.connected, ctx->fc.num_background, ctx->fc.active_background);
+
+}
+
+ssize_t pxd_reqs_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	struct pxd_context *ctx = pxd_dev->ctx;
+	int code = 0;
+
+	if (ctx == NULL)
+		return -ENXIO;
+
+	sscanf(buf, "%d", &code);
+
+	if (code != 6 && code != 9)
+		return -ENXIO;
+
+	printk(KERN_ERR "Trying to kill request for minor: %d\n", pxd_dev->minor);
+
+	spin_lock(&ctx->lock);
+	if (!ctx->fc.connected) {
+		fuse_abort_conn_minor(&ctx->fc, pxd_dev->minor);
+	}
+	spin_unlock(&ctx->lock);
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
+static DEVICE_ATTR(reqs, S_IRUGO|S_IWUSR, pxd_reqs_show, pxd_reqs_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
 	&dev_attr_major.attr,
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
+	&dev_attr_reqs.attr,
 	NULL
 };
 

@@ -891,6 +891,39 @@ __acquires(fc->lock)
 	end_requests(fc, &fc->processing);
 }
 
+static void end_requests_minor(struct fuse_conn *fc, struct list_head *head,
+	uint32_t minor)
+__releases(fc->lock)
+__acquires(fc->lock)
+{
+	struct list_head *next;
+	struct list_head *tmp;
+	struct fuse_req *req;
+	int num_reqs = 0;
+
+	list_for_each_safe(next, tmp, head) {
+		req = list_entry(next, struct fuse_req, list);
+		if (req != NULL && req->misc.pxd_rdwr_in.minor == minor &&
+			req->state != FUSE_REQ_FINISHED) {
+			req->out.h.error = -ECONNABORTED;
+			request_end(fc, req);
+			spin_lock(&fc->lock);
+			num_reqs++;
+		}
+	}
+	printk(KERN_ERR "%s: Ended: %d reqs for minor: %u\n",
+		__func__, num_reqs, minor); 
+}
+
+static void end_queued_requests_minor(struct fuse_conn *fc, uint32_t minor)
+__releases(fc->lock)
+__acquires(fc->lock)
+{
+	fc->max_background = UINT_MAX;
+	end_requests_minor(fc, &fc->pending, minor);
+	end_requests_minor(fc, &fc->processing, minor);
+}
+
 static void end_polls(struct fuse_conn *fc)
 {
 	struct rb_node *p;
@@ -981,6 +1014,16 @@ void fuse_abort_conn(struct fuse_conn *fc)
 		wake_up_all(&fc->waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	}
+	spin_unlock(&fc->lock);
+}
+
+void fuse_abort_conn_minor(struct fuse_conn *fc, uint32_t minor)
+{
+	spin_lock(&fc->lock);
+	end_queued_requests_minor(fc, minor);
+	end_polls(fc);
+	wake_up_all(&fc->waitq);
+	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	spin_unlock(&fc->lock);
 }
 

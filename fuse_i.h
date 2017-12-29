@@ -738,6 +738,9 @@ void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req);
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);
 
+/* Abort all requests for given minor id */
+void fuse_abort_conn_minor(struct fuse_conn *fc, uint32_t minor);
+
 /**
  * Invalidate inode attributes
  */
