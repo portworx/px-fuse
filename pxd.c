@@ -519,7 +519,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		return -ENOMEM;
 
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
-			PXD_DEV"%llu", pxd_dev->dev_id);
+			PXD_DEV"%d", pxd_dev->minor);
 	disk->major = pxd_dev->major;
 	disk->first_minor = pxd_dev->minor;
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
