@@ -16,7 +16,7 @@
 /// @file px_fuse/pxd.h
 
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
-#define PXD_DEV  	"pxd/pxd-"		/**< block device prefix */
+#define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
 #define PXD_VERSION 6		/**< driver version */
