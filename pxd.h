@@ -5,6 +5,7 @@
 #ifdef __PXKERNEL__
 #include <linux/types.h>
 #else
+#include <stdio.h>
 #include <stdint.h>
 #include <sys/param.h>
 #include <string.h>
@@ -184,6 +185,15 @@ static inline uint64_t pxd_rd_blocks(const struct rdwr_in *rdwr)
 {
 	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
 	return pxd_aligned_len(prw->size, prw->offset) / PXD_LBS;
+}
+
+/**
+ * Construct device name from the given device id and device minor.
+ */
+static inline void pxd_dev_name(char *buf, size_t size, uint64_t id,
+	dev_t minor)
+{
+	snprintf(buf, size, "%s-%lu", PXD_DEV, (unsigned long)minor);
 }
 
 struct pxd_ioctl_version_args {
