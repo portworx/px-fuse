@@ -190,10 +190,18 @@ static inline uint64_t pxd_rd_blocks(const struct rdwr_in *rdwr)
 /**
  * Construct device name from the given device id and device minor.
  */
+static inline void pxd_dev_suffix(char *buf, size_t size, uint64_t id,
+	dev_t minor)
+{
+	snprintf(buf, size, "-%lu", (unsigned long)minor);
+}
+
 static inline void pxd_dev_name(char *buf, size_t size, uint64_t id,
 	dev_t minor)
 {
-	snprintf(buf, size, "%s-%lu", PXD_DEV, (unsigned long)minor);
+	char dev_suffix[32];
+	pxd_dev_suffix(dev_suffix, sizeof(dev_suffix), id, minor);
+	snprintf(buf, size, "%s%s", PXD_DEV, dev_suffix);
 }
 
 struct pxd_ioctl_version_args {
