@@ -1059,9 +1059,17 @@ static void pxd_fuse_conn_release(struct fuse_conn *conn)
 {
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+static void pxd_timeout(struct timer_list *args)
+#else
 static void pxd_timeout(unsigned long args)
+#endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	struct pxd_context *ctx = from_timer(ctx, args, timer);
+#else
 	struct pxd_context *ctx = (struct pxd_context *)args;
+#endif
 	struct fuse_conn *fc = &ctx->fc;
 
 	BUG_ON(fc->connected);
@@ -1098,7 +1106,11 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
 	INIT_LIST_HEAD(&ctx->pending_requests);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	timer_setup(&ctx->timer, pxd_timeout, 0);
+#else
 	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
+#endif
 	return 0;
 }
 
