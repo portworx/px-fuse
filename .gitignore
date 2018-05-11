@@ -28,3 +28,5 @@ px_version.c
 
 autom4te.cache
 config.*
+*.mk
+*.ur-safe
