@@ -597,6 +597,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 		goto out;
 
 	err = -ENOMEM;
+	if (ctx->num_devices >= PXD_MAX_DEVICES) {
+		printk(KERN_ERR "Too many devices attached..\n");
+		goto out_module;
+	}
+
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
 	if (!pxd_dev)
 		goto out_module;
@@ -928,6 +933,7 @@ static void pxd_fill_init(struct fuse_conn *fc, struct fuse_req *req,
 			pxd_fill_init_desc(&req->page_descs[j], i);
 			kunmap_atomic(ids);
 			++j;
+			i = 0;
 		}
 	}
 	in->num_devices = ctx->num_devices;
