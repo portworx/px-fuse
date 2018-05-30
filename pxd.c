@@ -587,7 +587,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	struct pxd_device *pxd_dev;
+	struct pxd_device *pxd_dev = NULL;
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
@@ -654,7 +654,8 @@ out_disk:
 out_id:
 	ida_simple_remove(&pxd_minor_ida, new_minor);
 out_module:
-	kfree(pxd_dev);
+	if (pxd_dev)
+		kfree(pxd_dev);
 	module_put(THIS_MODULE);
 out:
 	return err;
