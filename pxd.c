@@ -972,8 +972,9 @@ static int pxd_send_init(struct fuse_conn *fc)
 	struct pxd_init_in *arg;
 	void *outarg;
 	int i;
+	int num_per_page = PAGE_SIZE / sizeof(struct pxd_dev_id);
 	int num_pages = (sizeof(struct pxd_dev_id) * ctx->num_devices +
-				PAGE_SIZE - 1) / PAGE_SIZE;
+				num_per_page - 1) / num_per_page;
 
 	req = fuse_get_req(fc, num_pages);
 	if (IS_ERR(req)) {
