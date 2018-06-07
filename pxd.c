@@ -26,7 +26,9 @@
 #define pxd_printk(args...)
 //#define pxd_printk(args...) printk(KERN_ERR args)
 
+#ifndef SECTOR_SIZE
 #define SECTOR_SIZE 512
+#endif
 #define SEGMENT_SIZE (1024 * 1024)
 
 #define PXD_TIMER_SECS_MIN 30
@@ -547,7 +549,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
+#else
+	blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
+#endif
 	q->limits.discard_granularity = PXD_LBS;
 	q->limits.discard_alignment = PXD_LBS;
 	q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
@@ -698,7 +704,11 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
 		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
 		queue_flag_set_unlocked(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+#else
+		blk_queue_flag_set(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+#endif
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 	}
 
