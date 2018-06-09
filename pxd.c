@@ -583,9 +583,9 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
+		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
-		del_gendisk(disk);
 	}
 	put_disk(disk);
 }
