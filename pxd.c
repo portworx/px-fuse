@@ -216,7 +216,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_OP_WRITE);
 #else
 	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
@@ -272,7 +272,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->misc.pxd_rdwr_in.minor = minor;
 	req->misc.pxd_rdwr_in.offset = off;
 	req->misc.pxd_rdwr_in.size = size;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	req->misc.pxd_rdwr_in.flags =
 		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
@@ -342,7 +342,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
 			uint64_t reqctr)
@@ -438,7 +438,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc));
 #else
@@ -488,7 +488,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
 			    REQCTR(&pxd_dev->ctx->fc));

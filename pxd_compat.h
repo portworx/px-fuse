@@ -16,7 +16,7 @@
 #define HAVE_BVEC_ITER
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0) || defined(REQ_PREFLUSH)
 #define BLK_QUEUE_FLUSH(q) \
 	blk_queue_write_cache(q, true, true)
 #else
