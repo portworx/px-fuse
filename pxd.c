@@ -556,7 +556,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 #endif
 	q->limits.discard_granularity = PXD_LBS;
 	q->limits.discard_alignment = PXD_LBS;
-	q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
+	if (add->discard_size < SECTOR_SIZE)
+		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
+	else
+		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
 #endif
