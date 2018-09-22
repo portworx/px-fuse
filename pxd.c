@@ -556,7 +556,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 #endif
 	q->limits.discard_granularity = PXD_LBS;
 	q->limits.discard_alignment = PXD_LBS;
-	if (add->discard_size <= 0)
+	if (add->discard_size < SECTOR_SIZE)
 		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
 	else
 		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
