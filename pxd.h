@@ -87,6 +87,7 @@ struct pxd_add_out {
 	uint64_t dev_id;	/**< device global id */
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing. */
+	int32_t discard_size; /**< block device discard size in bytes */
 	int32_t pad;
 };
 
@@ -94,6 +95,7 @@ struct pxd_add_vol_out {
 	uint64_t dev_id;
 	size_t size;
 	int32_t queue_depth;
+	int32_t discard_size; /**< block device discard size in bytes */
 	int32_t extended; /* pad used as extended flag */
 
 	uint32_t pool_id;
