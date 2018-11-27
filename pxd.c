@@ -1332,6 +1332,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	blk_queue_logical_block_size(q, PXD_LBS);
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
+	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
 
 	/* Enable discard support. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
