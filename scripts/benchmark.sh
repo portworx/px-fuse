@@ -7,7 +7,7 @@ TARGET="/test2/file"
 #TARGET="/dev/io/iotest"
 #TARGET="/dev/myloop0"
 
-sudo dd if=/dev/zero of=$TARGET bs=1M count=32000
+sudo dd if=/dev/zero of=$TARGET bs=1M count=32768
 #for i in seq{1..10}; do
 #echo "Random Read - loop $i"
 echo "Random Read"
