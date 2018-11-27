@@ -542,14 +542,27 @@ static ssize_t fuse_dev_splice_read(struct file *in, loff_t *ppos,
 static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
-	struct pxd_add_out add;
+	static char *def_dev_path = "/var/.px";
+	struct pxd_add_out add, *ptradd;
+	struct pxd_add_vol_out newadd;
 	size_t len = sizeof(add);
 
 	if (copy_from_iter(&add, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
-	return pxd_add(conn, &add);
+
+	newadd.dev_id = add.dev_id;
+	newadd.size = add.size;
+	newadd.queue_depth = add.queue_depth;
+
+	newadd.extended = 1; // req is extended
+	newadd.pool_id = 0; // hardcoded pool id
+	sprintf(newadd.device_path, "%s/%u/%llu/pxdev", def_dev_path, newadd.pool_id, newadd.dev_id);
+	newadd.block_device = false; // btrfs backing file path
+
+	ptradd = (struct pxd_add_out*) &newadd;
+	return pxd_add(conn, ptradd);
 }
 
 /* Look up request on processing list by unique ID */

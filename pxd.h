@@ -18,7 +18,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 8				/**< driver version */
+#define PXD_VERSION 7		/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -86,8 +86,20 @@ struct pxd_init_out {
 struct pxd_add_out {
 	uint64_t dev_id;	/**< device global id */
 	size_t size;		/**< block device size in bytes */
-	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
-	int32_t discard_size;	/**< block device discard size in bytes */
+	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing. */
+	int32_t pad;
+};
+
+struct pxd_add_vol_out {
+	uint64_t dev_id;
+	size_t size;
+	int32_t queue_depth;
+	int32_t extended; /* pad used as extended flag */
+
+	uint32_t pool_id;
+	char     device_path[64];
+	bool     block_device; /* is it a block device or a file path */
+	char     pad2[7];
 };
 
 /**
