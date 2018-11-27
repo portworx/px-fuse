@@ -555,6 +555,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 	newadd.dev_id = add.dev_id;
 	newadd.size = add.size;
 	newadd.queue_depth = add.queue_depth;
+	newadd.discard_size = add.discard_size;
 
 	newadd.extended = 1; // req is extended
 	newadd.pool_id = 0; // hardcoded pool id

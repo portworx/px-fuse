@@ -88,7 +88,6 @@ struct pxd_add_out {
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing. */
 	int32_t discard_size; /**< block device discard size in bytes */
-	int32_t pad;
 };
 
 struct pxd_add_vol_out {
@@ -96,8 +95,8 @@ struct pxd_add_vol_out {
 	size_t size;
 	int32_t queue_depth;
 	int32_t discard_size; /**< block device discard size in bytes */
-	int32_t extended; /* pad used as extended flag */
 
+	int32_t extended;
 	uint32_t pool_id;
 	char     device_path[64];
 	bool     block_device; /* is it a block device or a file path */
