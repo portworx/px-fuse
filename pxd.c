@@ -429,8 +429,8 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 	bio_for_each_segment(bvec, bio, i) {
 		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
 		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %lu\n",
-	                pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, len);
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
 			return ret;
 		}
 
@@ -442,8 +442,8 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 	bio_for_each_segment(bvec, bio, i) {
 		ret = _pxd_write(pxd_dev->file, bvec, &pos);
 		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %lu\n",
-	                pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, len);
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
 			return ret;
 		}
 
@@ -470,8 +470,8 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
 		*/
 		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
 		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %lu\n",
-                pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, len);
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
 			return ret;
 		}
 
@@ -489,8 +489,8 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
 		*/
 		ret = _pxd_write(pxd_dev->file, bvec, &pos);
 		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %lu\n",
-                pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, len);
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
 			return ret;
 		}
 
@@ -695,6 +695,20 @@ static int initBIO(struct pxd_device *pxd_dev) {
 }
 #endif
 
+static inline unsigned int get_op_flags(struct bio *bio)
+{
+	unsigned int op_flags;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
+	op_flags = 0; // Not present in older kernels
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
+	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
+	op_flags = bio_flags(bio);
+#else
+	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
+#endif
+	return op_flags;
+}
 
 #ifndef USE_REQUEST_QUEUE
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
@@ -755,7 +769,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	if (rw == READA) rw = READ;
 
 	if (!pxd_dev || (rw!=READ && rw != WRITE)) {
-		pxd_printk("pxd basic sanity fail, pxd_device %p (%llu), rw %d\n",
+		printk(KERN_ERR"pxd basic sanity fail, pxd_device %p (%llu), rw %d\n",
 				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
@@ -763,7 +777,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 	if (!pxd_dev->file) {
 		if (refreshFsPath(pxd_dev)) {
-			pxd_printk("pxd (%llu) does not have backing file failing hard\n", pxd_dev->dev_id);
+			printk(KERN_ERR"pxd (%llu) does not have backing file failing hard\n", pxd_dev->dev_id);
 			//bio_io_error(bio);
 			pxd_make_request_orig(q, bio);
 			return BLK_QC_RETVAL;
@@ -854,6 +868,8 @@ static int refreshFsPath(struct pxd_device *pxd_dev) {
 	struct file *f;
 
 	if (pxd_dev->file) {
+		printk(KERN_INFO"Success device %llu backing file %s\n",
+					pxd_dev->dev_id, pxd_dev->device_path);
 		return 0;
 	}
 
@@ -877,8 +893,7 @@ static int refreshFsPath(struct pxd_device *pxd_dev) {
 		return 0;
 	}
 
-	pxd_printk("Failed for device %llu no backing file found\n",
-			pxd_dev->dev_id);
+	printk(KERN_ERR"Failed for device %llu no backing file found\n", pxd_dev->dev_id);
 	return -ENODEV;
 }
 
