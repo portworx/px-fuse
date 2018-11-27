@@ -98,15 +98,13 @@ struct pxd_device {
 
 // Forward decl
 static int refreshFsPath(struct pxd_device *pxd_dev);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-#define BLK_QC_RETVAL BLK_QC_T_NONE
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
 			uint64_t reqctr);
 #else
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr);
-#define BLK_QC_RETVAL
 #endif
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages);
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
@@ -241,13 +239,28 @@ do_pxd_receive(struct pxd_device *pxd_dev,
 static int
 pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, int bsize, loff_t pos)
 {
-	struct bio_vec *bvec;
 	ssize_t s;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
 	int i;
+#endif
 
 	pxd_printk("pxd_receive[%llu] with bio=%p, bsize=%d, pos=%llu\n",
 				pxd_dev->dev_id, bio, bsize, pos);
 	bio_for_each_segment(bvec, bio, i) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+		s = do_pxd_receive(pxd_dev, &bvec, bsize, pos);
+		if (s < 0) return s;
+
+		if (s != bvec.bv_len) {
+			zero_fill_bio(bio);
+			break;
+		}
+		pos += bvec.bv_len;
+#else
 		s = do_pxd_receive(pxd_dev, bvec, bsize, pos);
 		if (s < 0) return s;
 
@@ -256,6 +269,7 @@ pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, int bsize, loff_t pos)
 			break;
 		}
 		pos += bvec->bv_len;
+#endif
 	}
 	return 0;
 }
@@ -316,12 +330,39 @@ int _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
 
 static
 int do_pxd_read(struct pxd_device *pxd_dev, struct request *rq) {
-	struct bio_vec *bvec;
 	struct req_iterator iter;
 	ssize_t len = 0;
 	loff_t pos = blk_rq_pos(rq) << SECTOR_SHIFT;
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
 	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+
+	rq_for_each_segment(bvec, rq, iter) {
+		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
+		len = vfs_iter_read(pxd->file, &i, &pos, 0);
+		if (len < 0)
+			return len;
+
+		*/
+		len = _pxd_read(pxd_dev, &bvec, &pos);
+
+		flush_dcache_page(bvec.bv_page);
+		if (len != bvec.bv_len) {
+			struct bio *bio;
+
+			__rq_for_each_bio(bio, rq)
+				zero_fill_bio(bio);
+
+			break;
+		}
+
+		cond_resched();
+	}
+#else
+	struct bio_vec *bvec;
+	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+
+
 	rq_for_each_segment(bvec, rq, iter) {
 		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
 		len = vfs_iter_read(pxd->file, &i, &pos, 0);
@@ -331,7 +372,7 @@ int do_pxd_read(struct pxd_device *pxd_dev, struct request *rq) {
 		*/
 		len = _pxd_read(pxd_dev, bvec, &pos);
 
-		flush_dcache_page(bvec.bv_page);
+		flush_dcache_page(bvec->bv_page);
 		if (len != bvec->bv_len) {
 			struct bio *bio;
 
@@ -343,6 +384,7 @@ int do_pxd_read(struct pxd_device *pxd_dev, struct request *rq) {
 
 		cond_resched();
 	}
+#endif
 
 	pxd_printk("do_pxd_read pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
 	if (len < 0) return len;
@@ -380,9 +422,23 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 
 
 static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
-	struct bio_vec *bvec;
-	int i, ret = 0;
+	int ret = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+	bio_for_each_segment(bvec, bio, i) {
+		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %lu\n",
+	                pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, len);
+			return ret;
+		}
 
+		cond_resched();
+	}
+#else
+	struct bio_vec *bvec;
+	int i;
 	bio_for_each_segment(bvec, bio, i) {
 		ret = _pxd_write(pxd_dev->file, bvec, &pos);
 		if (ret < 0) {
@@ -393,15 +449,36 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 
 		cond_resched();
 	}
+#endif
 	return 0;
 }
 
 
 static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
-	struct bio_vec *bvec;
 	struct req_iterator iter;
 	loff_t pos = blk_rq_pos(rq) << SECTOR_SHIFT;
 	int ret = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+
+	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+	rq_for_each_segment(bvec, rq, iter) {
+		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
+		len = vfs_iter_read(pxd->lo_backing_file, &i, &pos, 0);
+		if (len < 0)
+			return len;
+		*/
+		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %lu\n",
+                pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, len);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#else
+	struct bio_vec *bvec;
 
 	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
 	rq_for_each_segment(bvec, rq, iter) {
@@ -419,6 +496,7 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
 
 		cond_resched();
 	}
+#endif
 	pxd_printk("do_pxd_write pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
 	return 0;
 }
@@ -430,7 +508,11 @@ static int do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio)
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				pxd_dev->bio_count);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
+#else
 	pos = ((loff_t) bio->bi_sector << 9);
+#endif
 
 	if (bio_rw(bio) == WRITE) {
 		struct file *file = pxd_dev->file;
@@ -461,7 +543,11 @@ static int do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio)
 				ret = -EOPNOTSUPP;
 				goto out;
 			}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+			ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
+#else
 			ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
+#endif
 			pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
 			if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
 				ret = -EIO;
@@ -485,7 +571,15 @@ out:
 static inline void pxd_handle_bio(struct pxd_device *pxd_dev, struct bio *bio)
 {
 	int ret = do_bio_filebacked(pxd_dev, bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	if (ret < 0) {
+		bio_io_error(bio);
+		return;
+	}
+	bio_endio(bio);
+#else
 	bio_endio(bio, ret);
+#endif
 }
 
 static inline void pxd_handle_req(struct pxd_device *pxd_dev, struct request *req)
