@@ -8,6 +8,12 @@
 #include "fuse_i.h"
 #include "pxd.h"
 
+// Configuration parameters
+#define MAX_THREADS (8)
+#define SYNCWRITES
+#define WRITEMULTITHREAD  (false)
+
+
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
@@ -100,7 +106,6 @@ struct pxd_device {
 	char     device_path[64];
 	bool     block_device;
 	struct file * file;
-#define MAX_THREADS (8)
 	struct thread_context tc[MAX_THREADS];
 	atomic_t index;
 	struct pxd_context *ctx;
@@ -150,7 +155,11 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 
 	set_fs(get_ds());
 	file_start_write(file);
+#ifdef SYNCWRITES
+	bw = do_sync_write(file, kaddr, bvec->bv_len, pos);
+#else
 	bw = file->f_op->write(file, kaddr, bvec->bv_len, pos);
+#endif
 	file_end_write(file);
 	set_fs(old_fs);
 	kunmap(bvec->bv_page);
@@ -823,7 +832,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	struct thread_context *tc;
 
 	/* single threaded write performance is better */
-	if (bio_rw(bio) == WRITE) {
+	if (!WRITEMULTITHREAD && bio_rw(bio) == WRITE) {
 		thread = 0;
 	} else {
 		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
@@ -869,7 +878,7 @@ void pxd_rq_fn_kernel(struct pxd_device *pxd_dev, struct request_queue *q, struc
 	struct thread_context *tc;
 
 	/* single threaded write performance is better */
-	if (rq_data_dir(req) == WRITE) {
+	if (!WRITEMULTITHREAD && rq_data_dir(req) == WRITE) {
 		thread = 0;
 	} else {
 		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
