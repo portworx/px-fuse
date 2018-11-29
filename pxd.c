@@ -819,8 +819,16 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	int rw = bio_rw(bio);
-	int thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
-	struct thread_context *tc = &pxd_dev->tc[thread];
+	int thread;
+	struct thread_context *tc;
+
+	/* single threaded write performance is better */
+	if (bio_rw(bio) == WRITE) {
+		thread = 0;
+	} else {
+		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
+	}
+	tc = &pxd_dev->tc[thread];
 
 	if (rw == READA) rw = READ;
 
@@ -856,9 +864,18 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 // called wth qlock released
 static
 void pxd_rq_fn_kernel(struct pxd_device *pxd_dev, struct request_queue *q, struct request *rq) {
-	int thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
-	struct thread_context *tc = &pxd_dev->tc[thread];
 	u64 sect_num, sect_cnt;
+	int thread;
+	struct thread_context *tc;
+
+	/* single threaded write performance is better */
+	if (rq_data_dir(req) == WRITE) {
+		thread = 0;
+	} else {
+		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
+	}
+	tc = &pxd_dev->tc[thread];
+
 
 	sect_num = blk_rq_pos(rq);
 	/* deal whole segments */
