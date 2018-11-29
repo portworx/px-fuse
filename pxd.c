@@ -101,20 +101,8 @@ struct pxd_device {
 	bool     block_device;
 	struct file * file;
 #define MAX_THREADS (8)
-#if 0
-	struct task_struct *pxd_thread[MAX_THREADS];
-	wait_queue_head_t   pxd_event;
-#ifdef USE_REQUEST_QUEUE
-	unsigned int     rq_count;
-	struct list_head waiting_queue;
-#else
-	unsigned int     bio_count;
-	struct bio_list  bio_list;
-#endif
-#else
 	struct thread_context tc[MAX_THREADS];
 	atomic_t index;
-#endif
 	struct pxd_context *ctx;
 };
 
@@ -149,44 +137,62 @@ struct pxd_read_data {
         int bsize;
 };
 
-#ifndef USE_REQUEST_QUEUE
-#if 0
-static void pxd_add_bio(struct pxd_device *pxd_dev, struct bio *bio) {
-	pxd_dev->bio_count++;
-	bio_list_add(&pxd_dev->bio_list, bio);
-}
-#endif
-static void pxd_add_bio(struct thread_context *tc, struct bio *bio) {
-	tc->bio_count++;
-	bio_list_add(&tc->bio_list, bio);
+/* Common functions */
+static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
+{
+	ssize_t bw;
+	mm_segment_t old_fs = get_fs();
+	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
+
+	pxd_printk("_pxd_write entry buf %p offset %lld, length %d entered\n",
+                kaddr, *pos, bvec->bv_len);
+
+
+	set_fs(get_ds());
+	file_start_write(file);
+	bw = file->f_op->write(file, kaddr, bvec->bv_len, pos);
+	file_end_write(file);
+	set_fs(old_fs);
+	kunmap(bvec->bv_page);
+
+	if (likely(bw == bvec->bv_len)) {
+		pxd_printk("myloop: Write successful at byte offset %llu, length %i.\n",
+                        (unsigned long long)*pos, bvec->bv_len);
+		return 0;
+	}
+	printk(KERN_ERR "myloop: Write error at byte offset %llu, length %i.\n",
+                        (unsigned long long)*pos, bvec->bv_len);
+	if (bw >= 0) bw = -EIO;
+	return bw;
 }
 
 #if 0
-static struct bio* pxd_get_bio(struct pxd_device *pxd_dev) {
-	pxd_dev->bio_count--;
-	return bio_list_pop(&pxd_dev->bio_list);
-}
-#endif
-
-static struct bio* pxd_get_bio(struct thread_context *tc) {
-	tc->bio_count--;
-	return bio_list_pop(&tc->bio_list);
-}
+static bool bio_request_contiguous(struct bio *bio) {
+	int totalSize = 0;
+	char *base = bio_data(bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+	bio_for_each_segment(bvec, bio, i) {
+		if (bio_data(bio) != (base+totalSize)) return false;
+		totalSize += bvec.bv_len;
+	}
 #else
-static void pxd_add_rq(struct pxd_device *pxd_dev, struct request *rq) {
-	pxd_dev->rq_count++;
-	list_add_tail(&rq->queuelist, &pxd_dev->waiting_queue);
-}
-
-static struct request* pxd_get_rq(struct pxd_device *pxd_dev) {
-	struct request* req;
-	pxd_dev->rq_count--;
-        req = list_entry(pxd_dev->waiting_queue.next, struct request, queuelist);
-        list_del_init(&req->queuelist);
-	return req;
+	struct bio_vec *bvec;
+	int i;
+	bio_for_each_segment(bvec, bio, i) {
+		if (bio_data(bio) != (base+totalSize)) return false;
+		totalSize += bvec->bv_len;
+	}
+#endif
+	printk(KERN_ERR"Found contiguous bio buffers for length %d\n", totalSize);
+	return true;
 }
 #endif
 
+
+
+#ifndef USE_REQUEST_QUEUE
 static int pxd_do_transfer(struct pxd_device *pxd_dev, int cmd,
                          struct page *raw_page, unsigned raw_off,
                          struct page *pxd_page, unsigned pxd_off,
@@ -309,6 +315,181 @@ pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, int bsize, loff_t pos)
 	return 0;
 }
 
+static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
+	int ret = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+
+	//bio_request_contiguous(bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bio_for_each_segment(bvec, bio, i) {
+		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#else
+	bio_for_each_segment(bvec, bio, i) {
+		ret = _pxd_write(pxd_dev->file, bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#endif
+	return 0;
+}
+
+static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
+{
+	struct pxd_device *pxd_dev = tc->pxd_dev;
+	loff_t pos;
+	int ret;
+
+	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
+				tc->bio_count);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
+#else
+	pos = ((loff_t) bio->bi_sector << 9);
+#endif
+
+	if (bio_rw(bio) == WRITE) {
+		struct file *file = pxd_dev->file;
+
+		if (bio->bi_rw & REQ_FLUSH) {
+			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
+			ret = vfs_fsync(file, 0);
+			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
+			if (unlikely(ret && ret != -EINVAL)) {
+				ret = -EIO;
+				goto out;
+			}
+			ret = 0;
+		}
+
+		/*
+		 * We use punch hole to reclaim the free space used by the
+		 * image a.k.a. discard. However we do not support discard if
+		 * encryption is enabled, because it may give an attacker
+		 * useful information.
+		 */
+		if (bio->bi_rw & REQ_DISCARD) {
+			struct file *file = pxd_dev->file;
+			int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+
+			pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->device_path);
+			if ((!file->f_op->fallocate)) {
+				ret = -EOPNOTSUPP;
+				goto out;
+			}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+			ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
+#else
+			ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
+#endif
+			pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
+			if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+				ret = -EIO;
+			goto out;
+		}
+		ret = do_pxd_send(pxd_dev, bio, pos);
+
+		if ((bio->bi_rw & REQ_FUA) && !ret) {
+			ret = vfs_fsync(file, 0);
+			if (unlikely(ret && ret != -EINVAL)) ret = -EIO;
+		}
+	} else {
+		ret = pxd_receive(pxd_dev, bio, PXD_LBS, pos);
+	}
+
+out:
+        return ret;
+}
+
+static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio)
+{
+	int ret = do_bio_filebacked(tc, bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	if (ret < 0) {
+		bio_io_error(bio);
+		return;
+	}
+	bio_endio(bio);
+#else
+	bio_endio(bio, ret);
+#endif
+}
+
+static void pxd_add_bio(struct thread_context *tc, struct bio *bio) {
+	tc->bio_count++;
+	bio_list_add(&tc->bio_list, bio);
+}
+
+static struct bio* pxd_get_bio(struct thread_context *tc) {
+	tc->bio_count--;
+	return bio_list_pop(&tc->bio_list);
+}
+
+static int pxd_io_thread(void *data) {
+	struct thread_context *tc = data;
+	struct bio *bio;
+	while (!kthread_should_stop() || !bio_list_empty(&tc->bio_list)) {
+		wait_event_interruptible(tc->pxd_event,
+                             !bio_list_empty(&tc->bio_list) ||
+                             kthread_should_stop());
+
+		if (bio_list_empty(&tc->bio_list))
+			continue;
+
+		pxd_printk("pxd_io_thread new bio for device %llu, pending %u\n",
+				tc->pxd_dev->dev_id, tc->bio_count);
+		spin_lock_irq(&tc->lock);
+		bio = pxd_get_bio(tc);
+		spin_unlock_irq(&tc->lock);
+
+		BUG_ON(!bio);
+		pxd_handle_bio(tc, bio);
+
+	}
+	return 0;
+}
+
+static int initBIO(struct pxd_device *pxd_dev) {
+	int i;
+	for (i=0; i<MAX_THREADS; i++) {
+		struct thread_context *tc = &pxd_dev->tc[i];
+		tc->pxd_dev = pxd_dev;
+		spin_lock_init(&tc->lock);
+		init_waitqueue_head(&tc->pxd_event);
+		tc->pxd_thread = kthread_create(pxd_io_thread, tc, "pxd%d:%llu",
+			i, pxd_dev->dev_id);
+		if (IS_ERR(tc->pxd_thread)) {
+			pxd_printk("Init kthread for device %llu failed %lu\n",
+				pxd_dev->dev_id, PTR_ERR(tc->pxd_thread));
+			return -EINVAL;
+		}
+
+		wake_up_process(tc->pxd_thread);
+	}
+	return 0;
+}
+
+
+#else /* USE_REQUEST_QUEUE */
+
 static
 int do_pxd_flush(struct pxd_device *pxd_dev, struct request *rq) {
 	struct file *file = pxd_dev->file;
@@ -427,97 +608,6 @@ int do_pxd_read(struct pxd_device *pxd_dev, struct request *rq) {
 
 }
 
-#if 0
-static bool bio_request_contiguous(struct bio *bio) {
-	int totalSize = 0;
-	char *base = bio_data(bio);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-	bio_for_each_segment(bvec, bio, i) {
-		if (bio_data(bio) != (base+totalSize)) return false;
-		totalSize += bvec.bv_len;
-	}
-#else
-	struct bio_vec *bvec;
-	int i;
-	bio_for_each_segment(bvec, bio, i) {
-		if (bio_data(bio) != (base+totalSize)) return false;
-		totalSize += bvec->bv_len;
-	}
-#endif
-	printk(KERN_ERR"Found contiguous bio buffers for length %d\n", totalSize);
-	return true;
-}
-#endif
-
-static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
-{
-	ssize_t bw;
-	mm_segment_t old_fs = get_fs();
-	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
-
-	pxd_printk("_pxd_write entry buf %p offset %lld, length %d entered\n",
-                kaddr, *pos, bvec->bv_len);
-
-
-	set_fs(get_ds());
-	file_start_write(file);
-	bw = file->f_op->write(file, kaddr, bvec->bv_len, pos);
-	file_end_write(file);
-	set_fs(old_fs);
-	kunmap(bvec->bv_page);
-
-	if (likely(bw == bvec->bv_len)) {
-		pxd_printk("myloop: Write successful at byte offset %llu, length %i.\n",
-                        (unsigned long long)*pos, bvec->bv_len);
-		return 0;
-	}
-	printk(KERN_ERR "myloop: Write error at byte offset %llu, length %i.\n",
-                        (unsigned long long)*pos, bvec->bv_len);
-	if (bw >= 0) bw = -EIO;
-	return bw;
-}
-
-
-static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
-	int ret = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-#else
-	struct bio_vec *bvec;
-	int i;
-#endif
-
-	//bio_request_contiguous(bio);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	bio_for_each_segment(bvec, bio, i) {
-		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#else
-	bio_for_each_segment(bvec, bio, i) {
-		ret = _pxd_write(pxd_dev->file, bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#endif
-	return 0;
-}
-
-
 static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
 	struct req_iterator iter;
 	loff_t pos = blk_rq_pos(rq) << SECTOR_SHIFT;
@@ -565,88 +655,7 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
 	return 0;
 }
 
-static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
-{
-	struct pxd_device *pxd_dev = tc->pxd_dev;
-	loff_t pos;
-	int ret;
-
-	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
-				tc->bio_count);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
-#else
-	pos = ((loff_t) bio->bi_sector << 9);
-#endif
-
-	if (bio_rw(bio) == WRITE) {
-		struct file *file = pxd_dev->file;
-
-		if (bio->bi_rw & REQ_FLUSH) {
-			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
-			ret = vfs_fsync(file, 0);
-			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
-			if (unlikely(ret && ret != -EINVAL)) {
-				ret = -EIO;
-				goto out;
-			}
-			ret = 0;
-		}
-
-		/*
-		 * We use punch hole to reclaim the free space used by the
-		 * image a.k.a. discard. However we do not support discard if
-		 * encryption is enabled, because it may give an attacker
-		 * useful information.
-		 */
-		if (bio->bi_rw & REQ_DISCARD) {
-			struct file *file = pxd_dev->file;
-			int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-
-			pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->device_path);
-			if ((!file->f_op->fallocate)) {
-				ret = -EOPNOTSUPP;
-				goto out;
-			}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-			ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
-#else
-			ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
-#endif
-			pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
-			if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-				ret = -EIO;
-			goto out;
-		}
-		ret = do_pxd_send(pxd_dev, bio, pos);
-
-		if ((bio->bi_rw & REQ_FUA) && !ret) {
-			ret = vfs_fsync(file, 0);
-			if (unlikely(ret && ret != -EINVAL)) ret = -EIO;
-		}
-	} else {
-		ret = pxd_receive(pxd_dev, bio, PXD_LBS, pos);
-	}
-
-out:
-        return ret;
-}
-
-static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio)
-{
-	int ret = do_bio_filebacked(tc, bio);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-	if (ret < 0) {
-		bio_io_error(bio);
-		return;
-	}
-	bio_endio(bio);
-#else
-	bio_endio(bio, ret);
-#endif
-}
-
-static inline void pxd_handle_req(struct pxd_device *pxd_dev, struct request *req)
+static inline void pxd_handle_req(struct thread_context *tc, struct request *req)
 {
         int ret = 0;
         if (req->cmd_type != REQ_TYPE_FS)
@@ -655,21 +664,21 @@ static inline void pxd_handle_req(struct pxd_device *pxd_dev, struct request *re
         if (req->cmd_flags & REQ_FLUSH) {
                 /* do flush */
                 pxd_printk("do flush... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                ret = do_pxd_flush(pxd_dev, req);
+                ret = do_pxd_flush(tc->pxd_dev, req);
         } else if (rq_data_dir(req) == WRITE) {
                 if ((req->cmd_flags & REQ_DISCARD)) {
                         /* handle discard */
                         pxd_printk("do discard... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                        ret=do_pxd_discard(pxd_dev,req);
+                        ret=do_pxd_discard(tc->pxd_dev,req);
                 } else {
                         /* handle write */
                         pxd_printk("do write... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                        ret=do_pxd_write(pxd_dev,req);
+                        ret=do_pxd_write(tc->pxd_dev,req);
                 }
         } else {
                 /* handle read */
                 pxd_printk("do read... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                ret=do_pxd_read(pxd_dev, req);
+                ret=do_pxd_read(tc->pxd_dev, req);
         }
 
         pxd_end_request(req, ret);
@@ -678,74 +687,47 @@ error_out:
         pxd_end_request(req, -EIO);
 }
 
+static void pxd_add_rq(struct thread_context *tc, struct request *rq) {
+	tc->rq_count++;
+	list_add_tail(&rq->queuelist, &tc->waiting_queue);
+}
+
+static struct request* pxd_get_rq(struct thread_context *tc) {
+	struct request* req;
+	tc->rq_count--;
+	req = list_entry(tc->waiting_queue.next, struct request, queuelist);
+	list_del_init(&req->queuelist);
+	return req;
+}
+
 static int pxd_io_thread(void *data) {
 	struct thread_context *tc = data;
+	struct request *req;
 
-#ifndef USE_REQUEST_QUEUE
-	struct bio *bio;
-	while (!kthread_should_stop() || !bio_list_empty(&tc->bio_list)) {
+	//set_user_nice(current, -20);
+	while (!kthread_should_stop() || !list_empty(&tc->waiting_queue)) {
 		wait_event_interruptible(tc->pxd_event,
-                             !bio_list_empty(&tc->bio_list) ||
-                             kthread_should_stop());
-
-		if (bio_list_empty(&tc->bio_list))
-			continue;
-
-		pxd_printk("pxd_io_thread new bio for device %llu, pending %u\n",
-				tc->pxd_dev->dev_id, tc->bio_count);
-		spin_lock_irq(&tc->lock);
-		bio = pxd_get_bio(tc);
-		spin_unlock_irq(&tc->lock);
-
-		BUG_ON(!bio);
-		pxd_handle_bio(tc, bio);
-
-	}
-#else
-        struct request *req;
-
-        //set_user_nice(current, -20);
-        while (!kthread_should_stop() || !list_empty(&pxd_dev->waiting_queue)) {
-                wait_event_interruptible(pxd_dev->pxd_event,
-                                !list_empty(&pxd_dev->waiting_queue) ||
+								!list_empty(&tc->waiting_queue) ||
                                 kthread_should_stop());
 
-			if (list_empty(&pxd_dev->waiting_queue))
-				continue;
+		if (list_empty(&tc->waiting_queue))
+			continue;
 
-			pxd_printk("pxd_io_thread new req for device %llu, pending %u\n",
-				pxd_dev->dev_id, pxd_dev->rq_count);
+		pxd_printk("pxd_io_thread new req for device %llu, pending %u\n",
+			tc->pxd_dev->dev_id, tc->rq_count);
 
-			spin_lock_irq(&pxd_dev->dlock);
-			req = pxd_get_rq(pxd_dev);
-			spin_unlock_irq(&pxd_dev->dlock);
+		spin_lock_irq(&tc->lock);
+		req = pxd_get_rq(tc);
+		spin_unlock_irq(&tc->lock);
 
-			BUG_ON(!req);
-			pxd_handle_req(pxd_dev, req);
-        }
-#endif
-
+		BUG_ON(!req);
+		pxd_handle_req(tc, req);
+	}
 	return 0;
 }
 
-#ifdef USE_REQUEST_QUEUE
 static int initReqQ(struct pxd_device *pxd_dev) {
 	int i;
-#if 0
-	init_waitqueue_head(&pxd_dev->pxd_event);
-	INIT_LIST_HEAD(&pxd_dev->waiting_queue);
-	for (i=0; i<MAX_THREADS; i++) {
-		pxd_dev->pxd_thread[i] = kthread_create(pxd_io_thread, pxd_dev, "pxd%d:%llu",
-			i, pxd_dev->dev_id);
-		if (IS_ERR(pxd_dev->pxd_thread[i])) {
-			pxd_printk("Init kthread for device %llu failed %lu\n",
-				pxd_dev->dev_id, PTR_ERR(pxd_dev->pxd_thread[i]));
-			return -EINVAL;
-		}
-
-		wake_up_process(pxd_dev->pxd_thread[i]);
-	}
-#else
 	struct thread_context *tc;
 	for (i=0; i<MAX_THREADS; i++) {
 		tc = &pxd_dev->tc[i];
@@ -763,43 +745,6 @@ static int initReqQ(struct pxd_device *pxd_dev) {
 
 		wake_up_process(tc->pxd_thread);
 	}
-#endif
-	return 0;
-}
-#else
-static int initBIO(struct pxd_device *pxd_dev) {
-	int i;
-#if 0
-	init_waitqueue_head(&pxd_dev->pxd_event);
-	bio_list_init(&pxd_dev->bio_list);
-	for (i=0; i<MAX_THREADS; i++) {
-		pxd_dev->pxd_thread[i] = kthread_create(pxd_io_thread, pxd_dev, "pxd%d:%llu",
-			i, pxd_dev->dev_id);
-		if (IS_ERR(pxd_dev->pxd_thread[i])) {
-			pxd_printk("Init kthread for device %llu failed %lu\n",
-				pxd_dev->dev_id, PTR_ERR(pxd_dev->pxd_thread[i]));
-			return -EINVAL;
-		}
-		wake_up_process(pxd_dev->pxd_thread[i]);
-	}
-
-#else
-	for (i=0; i<MAX_THREADS; i++) {
-		struct thread_context *tc = &pxd_dev->tc[i];
-		tc->pxd_dev = pxd_dev;
-		spin_lock_init(&tc->lock);
-		init_waitqueue_head(&tc->pxd_event);
-		tc->pxd_thread = kthread_create(pxd_io_thread, tc, "pxd%d:%llu",
-			i, pxd_dev->dev_id);
-		if (IS_ERR(tc->pxd_thread)) {
-			pxd_printk("Init kthread for device %llu failed %lu\n",
-				pxd_dev->dev_id, PTR_ERR(tc->pxd_thread));
-			return -EINVAL;
-		}
-
-		wake_up_process(tc->pxd_thread);
-	}
-#endif
 	return 0;
 }
 #endif
@@ -911,31 +856,34 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 // called wth qlock released
 static
 void pxd_rq_fn_kernel(struct pxd_device *pxd_dev, struct request_queue *q, struct request *rq) {
+	int thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
+	struct thread_context *tc = &pxd_dev->tc[thread];
 	u64 sect_num, sect_cnt;
 
 	sect_num = blk_rq_pos(rq);
 	/* deal whole segments */
 	sect_cnt = blk_rq_sectors(rq);
 
-	pxd_printk("pxd_rq_fn_kernel device %llu, sector %llu, count %llu, cmd_type %d, dir %llu\n",
+	pxd_printk("pxd_rq_fn_kernel device %llu, sector %llu, count %llu, cmd_type %d, dir %d\n",
 			pxd_dev->dev_id, sect_num, sect_cnt, rq->cmd_type, rq_data_dir(rq));
 
 	if (unlikely(rq->cmd_type != REQ_TYPE_FS)) {
-		pxd_printk("%s: bad access: cmd_type %x not fs\n",
+		printk(KERN_ERR"%s: bad access: cmd_type %x not fs\n",
 			rq->rq_disk->disk_name, rq->cmd_type);
 		__blk_end_request_all(rq, -EIO);
 		return;
 	}
 
-	spin_lock_irq(&pxd_dev->dlock);
-	pxd_add_rq(pxd_dev, rq);
-	spin_unlock_irq(&pxd_dev->dlock);
+	spin_lock_irq(&tc->lock);
+	pxd_add_rq(tc, rq);
+	spin_unlock_irq(&tc->lock);
 
-	wake_up(&pxd_dev->pxd_event);
+	wake_up(&tc->pxd_event);
 }
 
 // calls with qlock released
-static void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, struct request *rq) {
+static
+void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, struct request *rq) {
 	struct fuse_req *req;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
@@ -1377,9 +1325,9 @@ static void pxd_rq_fn(struct request_queue *q)
 		if (!pxd_dev->file) {
 			/* see whether it can be initialized now */
 			if (refreshFsPath(pxd_dev)) {
-				printk(KERN_ERR "pxd (%llu) does not have backing file fuse path\n", pxd_dev->dev_id);
-				blk_end_request_all(rq, -EIO);
-				//pxd_rq_fn_process(pxd_dev, q, rq);
+				printk(KERN_ERR "pxd (%llu) does not have backing file taking fuse path\n", pxd_dev->dev_id);
+				//blk_end_request_all(rq, -EIO);
+				pxd_rq_fn_process(pxd_dev, q, rq);
 
 				// take the queue lock and fetch the next request
 				spin_lock_irq(&pxd_dev->qlock);
@@ -1392,8 +1340,8 @@ static void pxd_rq_fn(struct request_queue *q)
 					pxd_dev->dev_id, pxd_dev->device_path);
 			pxd_rq_fn_kernel(pxd_dev, q, rq);
 		} else {
-			blk_end_request_all(rq, -EIO);
-			//pxd_rq_fn_process(pxd_dev, q, rq);
+			//blk_end_request_all(rq, -EIO);
+			pxd_rq_fn_process(pxd_dev, q, rq);
 		}
 		// take the queue lock and fetch the next request
 		spin_lock_irq(&pxd_dev->qlock);
