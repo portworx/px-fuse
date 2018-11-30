@@ -9,7 +9,21 @@
 #include "pxd.h"
 
 // Configuration parameters
-#define MAX_THREADS (8)
+// Summary of test results:
+// Multiple threads are needed to saturate random reads
+// Single threaded write path with sync writes offer better performance, or have
+// negligible loss when compared to async writes. Sync writes are good for data
+// integrity as well. If available exported sync interface, use it.
+// So the above will be the default configuration.
+//
+// Also generally block request handling has two interfaces, one fetching
+// directly each BIO, the other does collect requests in a queue and does 
+// batch push them through elevator merging... we are directly using the
+// original block io interface, did not find much performance help using
+// the request Queue interface... So USE_REQUEST_QUEUE shall remain disabled
+// as default.
+//
+#define MAX_THREADS (32)
 #define SYNCWRITES
 #define WRITEMULTITHREAD  (false)
 
@@ -152,11 +166,18 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	pxd_printk("_pxd_write entry buf %p offset %lld, length %d entered\n",
                 kaddr, *pos, bvec->bv_len);
 
+	if (bvec->bv_len != PXD_LBS) {
+		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
+	}
 
 	set_fs(get_ds());
 	file_start_write(file);
 #ifdef SYNCWRITES
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
+#else
 	bw = do_sync_write(file, kaddr, bvec->bv_len, pos);
+#endif
 #else
 	bw = file->f_op->write(file, kaddr, bvec->bv_len, pos);
 #endif
@@ -174,32 +195,6 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	if (bw >= 0) bw = -EIO;
 	return bw;
 }
-
-#if 0
-static bool bio_request_contiguous(struct bio *bio) {
-	int totalSize = 0;
-	char *base = bio_data(bio);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-	bio_for_each_segment(bvec, bio, i) {
-		if (bio_data(bio) != (base+totalSize)) return false;
-		totalSize += bvec.bv_len;
-	}
-#else
-	struct bio_vec *bvec;
-	int i;
-	bio_for_each_segment(bvec, bio, i) {
-		if (bio_data(bio) != (base+totalSize)) return false;
-		totalSize += bvec->bv_len;
-	}
-#endif
-	printk(KERN_ERR"Found contiguous bio buffers for length %d\n", totalSize);
-	return true;
-}
-#endif
-
-
 
 #ifndef USE_REQUEST_QUEUE
 static int pxd_do_transfer(struct pxd_device *pxd_dev, int cmd,
@@ -258,20 +253,23 @@ pxd_direct_splice_actor(struct pipe_inode_info *pipe, struct splice_desc *sd)
 }
 
 static ssize_t
-do_pxd_receive(struct pxd_device *pxd_dev,
-              struct bio_vec *bvec, int bsize, loff_t pos)
+do_pxd_receive(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t pos)
 {
 	struct pxd_read_data cookie;
 	struct splice_desc sd;
 	struct file *file;
 	ssize_t retval;
 
-	pxd_printk("do_pxd_receive[%llu] with bio_vec=%p, bsize=%d, pos=%llu\n",
-				pxd_dev->dev_id, bvec, bsize, pos);
+	pxd_printk("do_pxd_receive[%llu] with bio_vec=%p, pos=%llu\n",
+				pxd_dev->dev_id, bvec, pos);
+	if (bvec->bv_len != PXD_LBS) {
+		printk(KERN_ERR"Device %lld unaligned block read %d bytes\n",
+				pxd_dev->dev_id, bvec->bv_len);
+	}
 	cookie.pxd_dev = pxd_dev;
 	cookie.page = bvec->bv_page;
 	cookie.offset = bvec->bv_offset;
-	cookie.bsize = bsize;
+	cookie.bsize = bvec->bv_len;
 
 	sd.len = 0;
 	sd.total_len = bvec->bv_len;
@@ -287,7 +285,7 @@ do_pxd_receive(struct pxd_device *pxd_dev,
 
 
 static int
-pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, int bsize, loff_t pos)
+pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos)
 {
 	ssize_t s;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -298,11 +296,11 @@ pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, int bsize, loff_t pos)
 	int i;
 #endif
 
-	pxd_printk("pxd_receive[%llu] with bio=%p, bsize=%d, pos=%llu\n",
-				pxd_dev->dev_id, bio, bsize, pos);
+	pxd_printk("pxd_receive[%llu] with bio=%p, pos=%llu\n",
+				pxd_dev->dev_id, bio, pos);
 	bio_for_each_segment(bvec, bio, i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-		s = do_pxd_receive(pxd_dev, &bvec, bsize, pos);
+		s = do_pxd_receive(pxd_dev, &bvec, pos);
 		if (s < 0) return s;
 
 		if (s != bvec.bv_len) {
@@ -311,7 +309,7 @@ pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, int bsize, loff_t pos)
 		}
 		pos += bvec.bv_len;
 #else
-		s = do_pxd_receive(pxd_dev, bvec, bsize, pos);
+		s = do_pxd_receive(pxd_dev, bvec, pos);
 		if (s < 0) return s;
 
 		if (s != bvec->bv_len) {
@@ -421,7 +419,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 			if (unlikely(ret && ret != -EINVAL)) ret = -EIO;
 		}
 	} else {
-		ret = pxd_receive(pxd_dev, bio, PXD_LBS, pos);
+		ret = pxd_receive(pxd_dev, bio, pos);
 	}
 
 out:
@@ -494,6 +492,14 @@ static int initBIO(struct pxd_device *pxd_dev) {
 		wake_up_process(tc->pxd_thread);
 	}
 	return 0;
+}
+
+static void cleanupBIO(struct pxd_device *pxd_dev) {
+	int i;
+	for (i=0; i<MAX_THREADS; i++) {
+		struct thread_context *tc = &pxd_dev->tc[i];
+		kthread_stop(tc->pxd_thread);
+	}
 }
 
 
@@ -756,6 +762,15 @@ static int initReqQ(struct pxd_device *pxd_dev) {
 	}
 	return 0;
 }
+
+static void cleanupReqQ(struct pxd_device *pxd_dev) {
+	int i;
+	for (i=0; i<MAX_THREADS; i++) {
+		struct thread_context *tc = &pxd_dev->tc[i];
+		kthread_stop(tc->pxd_thread);
+	}
+}
+
 #endif
 
 static inline unsigned int get_op_flags(struct bio *bio)
@@ -948,6 +963,11 @@ void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, stru
 #define BASEDIR "/var/.px"
 #define BTRFSVOLFMT  "%s/%d/%llu/pxdev"
 #define MAXPOOL (5)
+/* 
+ * NOTE
+ * Below is a hack to find the backing file/device.. proper ioctl interface
+ * extension and argument submission should happen from px-storage!!
+ */
 static int refreshFsPath(struct pxd_device *pxd_dev) {
 	int pool;
 	char newPath[64];
@@ -961,6 +981,7 @@ static int refreshFsPath(struct pxd_device *pxd_dev) {
 
 	for (pool=0; pool<MAXPOOL; pool++) {
 		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
+		// sprintf(newPath, "/dev/nvme0n1");
 
 		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
 		if (IS_ERR_OR_NULL(f)) {
@@ -1002,6 +1023,19 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 #endif
 
 	return refreshFsPath(pxd_dev);
+}
+
+static void cleanupBackingFsPath(struct pxd_device *pxd_dev) {
+#ifndef USE_REQUEST_QUEUE
+	cleanupBIO(pxd_dev);
+#else
+	cleanupReqQ(pxd_dev);
+#endif
+
+	if (pxd_dev->file) {
+		filp_close(pxd_dev->file, NULL);
+	}
+	pxd_dev->file = NULL;
 }
 
 
@@ -1599,12 +1633,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
-	if (pxd_dev->file) {
-		printk(KERN_INFO "Closing backing file on device %llu\n", pxd_dev->dev_id);
-		filp_close(pxd_dev->file, NULL);
-		pxd_dev->file = NULL;
-	}
-
+	cleanupBackingFsPath(pxd_dev);
 	pxd_dev->removing = true;
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
