@@ -110,7 +110,7 @@ static struct fuse_req *__fuse_request_alloc(unsigned npages, gfp_t flags)
 
 struct fuse_req *fuse_request_alloc(unsigned npages)
 {
-	return __fuse_request_alloc(npages, GFP_ATOMIC);
+	return __fuse_request_alloc(npages, GFP_NOIO);
 }
 
 struct fuse_req *fuse_request_alloc_nofs(unsigned npages)
