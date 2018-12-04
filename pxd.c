@@ -52,6 +52,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	struct timer_list timer;
+	struct timer_list fc_timer;
 	bool init_sent;
 	uint64_t unique;
 };
@@ -60,6 +61,7 @@ struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+uint32_t pxd_fc_timeout_secs = 1;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
@@ -1140,6 +1142,23 @@ static void pxd_timeout(unsigned long args)
 		ctx->name, ctx->unique);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+static void pxd_fc_timeout(struct timer_list *args)
+#else
+static void pxd_fc_timeout(unsigned long args)
+#endif
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	struct pxd_context *ctx = from_timer(ctx, args, fc_timer);
+#else
+	struct pxd_context *ctx = (struct pxd_context *)args;
+#endif
+	struct fuse_conn *fc = &ctx->fc;
+	BUG_ON(!ctx);
+	fuse_wakeup(fc);
+	mod_timer(&ctx->fc_timer, jiffies + (pxd_fc_timeout_secs * HZ));
+}
+
 int pxd_context_init(struct pxd_context *ctx, int i)
 {
 	int err;
@@ -1167,9 +1186,12 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	INIT_LIST_HEAD(&ctx->pending_requests);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	timer_setup(&ctx->timer, pxd_timeout, 0);
+	timer_setup(&ctx->fc_timer, pxd_fc_timeout, 0);
 #else
 	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
+	setup_timer(&ctx->fc_timer, pxd_fc_timeout, (unsigned long) ctx);
 #endif
+	mod_timer(&ctx->fc_timer, jiffies + (pxd_fc_timeout_secs * HZ));
 	return 0;
 }
 
@@ -1177,6 +1199,7 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
 	del_timer_sync(&ctx->timer);
+	del_timer_sync(&ctx->fc_timer);
 	if (ctx->id < pxd_num_contexts_exported) {
 		fuse_abort_conn(&ctx->fc);
 		fuse_conn_put(&ctx->fc);

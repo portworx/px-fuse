@@ -735,6 +735,9 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
  */
 void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req);
 
+
+void fuse_wakeup(struct fuse_conn *fc);
+
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);
 
