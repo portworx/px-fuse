@@ -27,7 +27,7 @@
 #define MAX_THREADS (32)
 #define SYNCWRITES
 #define WRITEMULTITHREAD  (false)
-#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
+//#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
