@@ -2078,7 +2078,7 @@ int pxd_init(void)
 {
 	int err, i, j;
 
-	printk(KERN_WARN "pxd: development driver installed\n");
+	printk(KERN_WARNING "pxd: development driver installed\n");
 	err = fuse_dev_init();
 	if (err) {
 		printk(KERN_ERR "pxd: failed to initialize fuse: %d\n", err);
@@ -2166,7 +2166,7 @@ void pxd_exit(void)
 
 	kfree(pxd_contexts);
 
-	printk(KERN_WARN "pxd: development driver unloaded\n");
+	printk(KERN_WARNING "pxd: development driver unloaded\n");
 }
 
 module_init(pxd_init);
