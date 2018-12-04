@@ -915,7 +915,6 @@ void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, stru
 #define BTRFSVOLFMT  "%s/%d/%llu/pxdev"
 #define DMTHINVOLFMT "/dev/mapper/pxvg%d-%llu"
 #define MAXPOOL (5)
-#define DMTHINPOOL
 /* 
  * NOTE
  * Below is a hack to find the backing file/device.. proper ioctl interface
@@ -2079,6 +2078,7 @@ int pxd_init(void)
 {
 	int err, i, j;
 
+	printk(KERN_WARN "pxd: development driver installed\n");
 	err = fuse_dev_init();
 	if (err) {
 		printk(KERN_ERR "pxd: failed to initialize fuse: %d\n", err);
@@ -2166,7 +2166,7 @@ void pxd_exit(void)
 
 	kfree(pxd_contexts);
 
-	printk(KERN_INFO "pxd: driver unloaded\n");
+	printk(KERN_WARN "pxd: development driver unloaded\n");
 }
 
 module_init(pxd_init);
