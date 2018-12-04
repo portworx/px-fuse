@@ -17,16 +17,17 @@
 // So the above will be the default configuration.
 //
 // Also generally block request handling has two interfaces, one fetching
-// directly each BIO, the other does collect requests in a queue and does 
+// directly each BIO, the other does collect requests in a queue and does
 // batch push them through elevator merging... we are directly using the
 // original block io interface, did not find much performance help using
 // the request Queue interface... So USE_REQUEST_QUEUE shall remain disabled
 // as default.
 //
+
 #define MAX_THREADS (32)
 #define SYNCWRITES
 #define WRITEMULTITHREAD  (false)
-
+#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -196,93 +197,28 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	return bw;
 }
 
+static
+ssize_t _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
+	int result;
+	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
+	mm_segment_t old_fs = get_fs();
+
+        /* read from file at offset pos into the buffer */
+	set_fs(get_ds());
+	result = vfs_read(pxd_dev->file, kaddr, bvec->bv_len, pos);
+	set_fs(old_fs);
+
+	kunmap(bvec->bv_page);
+	return result;
+}
+
+
 #ifndef USE_REQUEST_QUEUE
-static int pxd_do_transfer(struct pxd_device *pxd_dev, int cmd,
-                         struct page *raw_page, unsigned raw_off,
-                         struct page *pxd_page, unsigned pxd_off,
-                         int size, sector_t real_block)
-{
-	char *raw_buf = kmap_atomic(raw_page) + raw_off;
-	char *pxd_buf = kmap_atomic(pxd_page) + pxd_off;
-
-	pxd_printk("pxd_do_transfer[%llu] with cmd=%s\n",
-			pxd_dev->dev_id, (cmd == READ) ? "READ": "!READ, treating WRITE");
-	if (cmd == READ) {
-		memcpy(pxd_buf, raw_buf, size);
-	} else {
-		memcpy(raw_buf, pxd_buf, size);
-	}
-
-	kunmap_atomic(pxd_buf);
-	kunmap_atomic(raw_buf);
-	cond_resched();
-	return 0;
-}
-
-static int
-pxd_splice_actor(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
-                struct splice_desc *sd)
-{
-	struct pxd_read_data *p = sd->u.data;
-	struct pxd_device *pxd_dev= p->pxd_dev;
-	struct page *page = buf->page;
-	sector_t IV;
-	int size;
-
-	IV = ((sector_t) page->index << (PAGE_CACHE_SHIFT - 9)) +
-                                                        (buf->offset >> 9);
-	size = sd->len;
-	if (size > p->bsize) size = p->bsize;
-
-	if (pxd_do_transfer(pxd_dev, READ, page, buf->offset, p->page, p->offset, size, IV)) {
-		pxd_printk("pxd: transfer error block %ld\n", page->index);
-		size = -EINVAL;
-	}
-
-	flush_dcache_page(p->page);
-
-	if (size > 0) p->offset += size;
-
-	return size;
-}
-
-static int
-pxd_direct_splice_actor(struct pipe_inode_info *pipe, struct splice_desc *sd)
-{
-	return __splice_from_pipe(pipe, sd, pxd_splice_actor);
-}
-
 static ssize_t
 do_pxd_receive(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t pos)
 {
-	struct pxd_read_data cookie;
-	struct splice_desc sd;
-	struct file *file;
-	ssize_t retval;
-
-	pxd_printk("do_pxd_receive[%llu] with bio_vec=%p, pos=%llu\n",
-				pxd_dev->dev_id, bvec, pos);
-	if (bvec->bv_len != PXD_LBS) {
-		printk(KERN_ERR"Device %lld unaligned block read %d bytes\n",
-				pxd_dev->dev_id, bvec->bv_len);
-	}
-	cookie.pxd_dev = pxd_dev;
-	cookie.page = bvec->bv_page;
-	cookie.offset = bvec->bv_offset;
-	cookie.bsize = bvec->bv_len;
-
-	sd.len = 0;
-	sd.total_len = bvec->bv_len;
-	sd.flags = 0;
-	sd.pos = pos;
-	sd.u.data = &cookie;
-
-	file = pxd_dev->file;
-	retval = splice_direct_to_actor(file, &sd, pxd_direct_splice_actor);
-
-	return retval;
+        return _pxd_read(pxd_dev, bvec, &pos);
 }
-
 
 static int
 pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos)
@@ -364,6 +300,9 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	struct pxd_device *pxd_dev = tc->pxd_dev;
 	loff_t pos;
 	int ret;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	unsigned int op = bio_op(bio);
+#endif
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				tc->bio_count);
@@ -373,10 +312,18 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	pos = ((loff_t) bio->bi_sector << 9);
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	if (op_is_write(op)) {
+#else
 	if (bio_rw(bio) == WRITE) {
+#endif
 		struct file *file = pxd_dev->file;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+		if (op_is_flush(op)) {
+#else
 		if (bio->bi_rw & REQ_FLUSH) {
+#endif
 			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
 			ret = vfs_fsync(file, 0);
 			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
@@ -393,7 +340,11 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 		 * encryption is enabled, because it may give an attacker
 		 * useful information.
 		 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+		if (op & REQ_OP_DISCARD) {
+#else
 		if (bio->bi_rw & REQ_DISCARD) {
+#endif
 			struct file *file = pxd_dev->file;
 			int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 
@@ -414,7 +365,11 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 		}
 		ret = do_pxd_send(pxd_dev, bio, pos);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+		if ((op & REQ_FUA) && !ret) {
+#else
 		if ((bio->bi_rw & REQ_FUA) && !ret) {
+#endif
 			ret = vfs_fsync(file, 0);
 			if (unlikely(ret && ret != -EINVAL)) ret = -EIO;
 		}
@@ -542,21 +497,6 @@ int do_pxd_discard(struct pxd_device *pxd_dev, struct request *rq) {
 static void pxd_end_request(struct request *rq, int err)
 {
 	blk_end_request_all(rq, err);
-}
-
-static
-int _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
-	int result;
-	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
-    mm_segment_t old_fs = get_fs();
-
-	/* read from file at offset pos into the buffer */
-    set_fs(get_ds());
-	result = vfs_read(pxd_dev->file, kaddr, bvec->bv_len, pos);
-    set_fs(old_fs);
-
-	kunmap(bvec->bv_page);
-	return result;
 }
 
 static
@@ -842,22 +782,33 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
-	int rw = bio_rw(bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	unsigned int rw = bio_op(bio);
+#else
+	unsigned int rw = bio_rw(bio);
+#endif
 	int thread;
 	struct thread_context *tc;
 
 	/* single threaded write performance is better */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	if (!WRITEMULTITHREAD && op_is_write(rw)) {
+#else
 	if (!WRITEMULTITHREAD && bio_rw(bio) == WRITE) {
+#endif
 		thread = 0;
 	} else {
 		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
 	}
 	tc = &pxd_dev->tc[thread];
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	if (!pxd_dev) {
+#else
 	if (rw == READA) rw = READ;
-
 	if (!pxd_dev || (rw!=READ && rw != WRITE)) {
-		printk(KERN_ERR"pxd basic sanity fail, pxd_device %p (%llu), rw %d\n",
+#endif
+		printk(KERN_ERR"pxd basic sanity fail, pxd_device %p (%llu), rw %#x\n",
 				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
@@ -962,7 +913,9 @@ void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, stru
 
 #define BASEDIR "/var/.px"
 #define BTRFSVOLFMT  "%s/%d/%llu/pxdev"
+#define DMTHINVOLFMT "/dev/mapper/pxvg%d-%llu"
 #define MAXPOOL (5)
+#define DMTHINPOOL
 /* 
  * NOTE
  * Below is a hack to find the backing file/device.. proper ioctl interface
@@ -980,8 +933,11 @@ static int refreshFsPath(struct pxd_device *pxd_dev) {
 	}
 
 	for (pool=0; pool<MAXPOOL; pool++) {
+#ifdef DMTHINPOOL
+		sprintf(newPath, DMTHINVOLFMT, pool, pxd_dev->dev_id);
+#else
 		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
-		// sprintf(newPath, "/dev/nvme0n1");
+#endif
 
 		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
 		if (IS_ERR_OR_NULL(f)) {
