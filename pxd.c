@@ -295,6 +295,71 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 	return 0;
 }
 
+static int _pxd_flush(struct pxd_device *pxd_dev) {
+	int ret;
+	struct file *file = pxd_dev->file;
+	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
+	ret = vfs_fsync(file, 0);
+	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
+	if (unlikely(ret && ret != -EINVAL)) {
+		ret = -EIO;
+	}
+	return ret;
+}
+
+static int _pxd_discard(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
+	struct file *file = pxd_dev->file;
+	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+	int ret;
+
+	pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->device_path);
+	if ((!file->f_op->fallocate)) {
+		return -EOPNOTSUPP;
+	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
+#else
+	ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
+#endif
+	pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
+	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+		ret = -EIO;
+
+	return ret;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
+{
+	struct pxd_device *pxd_dev = tc->pxd_dev;
+	loff_t pos;
+	unsigned int op = bio_op(bio);
+
+	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
+				tc->bio_count);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
+#else
+	pos = ((loff_t) bio->bi_sector << 9);
+#endif
+
+	switch (op) {
+	case REQ_OP_FLUSH:
+		return _pxd_flush(pxd_dev);
+	case REQ_OP_DISCARD:
+	case REQ_OP_WRITE_ZEROES:
+		return _pxd_discard(pxd_dev, bio, pos);
+	case REQ_OP_WRITE:
+		return do_pxd_send(pxd_dev, bio, pos);
+	case REQ_OP_READ:
+		return pxd_receive(pxd_dev, bio, pos);
+	default:
+		WARN_ON_ONCE(1);
+		return -EIO;
+	}
+}
+
+#else
 static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
@@ -317,21 +382,13 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 #else
 	if (bio_rw(bio) == WRITE) {
 #endif
-		struct file *file = pxd_dev->file;
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 		if (op_is_flush(op)) {
 #else
 		if (bio->bi_rw & REQ_FLUSH) {
 #endif
-			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
-			ret = vfs_fsync(file, 0);
-			pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
-			if (unlikely(ret && ret != -EINVAL)) {
-				ret = -EIO;
-				goto out;
-			}
-			ret = 0;
+			ret = _pxd_flush(pxd_dev);
+			if (ret < 0) goto out;
 		}
 
 		/*
@@ -341,26 +398,11 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 		 * useful information.
 		 */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-		if (op & REQ_OP_DISCARD) {
+		if (op & (REQ_OP_DISCARD|REQ_OP_WRITE_ZEROES)) {
 #else
 		if (bio->bi_rw & REQ_DISCARD) {
 #endif
-			struct file *file = pxd_dev->file;
-			int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-
-			pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->device_path);
-			if ((!file->f_op->fallocate)) {
-				ret = -EOPNOTSUPP;
-				goto out;
-			}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-			ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
-#else
-			ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
-#endif
-			pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
-			if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-				ret = -EIO;
+			ret = _pxd_discard(pxd_dev, bio, pos);
 			goto out;
 		}
 		ret = do_pxd_send(pxd_dev, bio, pos);
@@ -370,8 +412,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 #else
 		if ((bio->bi_rw & REQ_FUA) && !ret) {
 #endif
-			ret = vfs_fsync(file, 0);
-			if (unlikely(ret && ret != -EINVAL)) ret = -EIO;
+			ret = _pxd_flush(pxd_dev);
 		}
 	} else {
 		ret = pxd_receive(pxd_dev, bio, pos);
@@ -380,6 +421,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 out:
         return ret;
 }
+#endif
 
 static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio)
 {
@@ -940,12 +982,12 @@ static int refreshFsPath(struct pxd_device *pxd_dev) {
 
 		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
 		if (IS_ERR_OR_NULL(f)) {
-			pxd_printk("Failed device %llu at path %s err %ld\n",
+			printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
 				pxd_dev->dev_id, newPath, PTR_ERR(f));
 			continue;
 		}
 
-		pxd_printk("Success device %llu backing file %s\n",
+		printk(KERN_INFO"Success device %llu backing file %s\n",
 					pxd_dev->dev_id, newPath);
 		pxd_dev->block_device = false;
 		pxd_dev->pool_id = (uint32_t) pool;
