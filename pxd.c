@@ -123,11 +123,12 @@ struct pxd_device {
 	struct file * file;
 	struct thread_context tc[MAX_THREADS];
 	atomic_t index;
+	atomic_t connected;
 	struct pxd_context *ctx;
 };
 
 // Forward decl
-static int refreshFsPath(struct pxd_device *pxd_dev);
+static int refreshFsPath(struct pxd_device *pxd_dev, bool);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
@@ -149,13 +150,6 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 #include <linux/bio.h>
 
 #define SECTOR_SHIFT (9)
-
-struct pxd_read_data {
-        struct pxd_device *pxd_dev;
-        struct page *page;
-        unsigned offset;
-        int bsize;
-};
 
 /* Common functions */
 static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
@@ -210,6 +204,48 @@ ssize_t _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos)
 
 	kunmap(bvec->bv_page);
 	return result;
+}
+
+static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
+	if (!enable) {
+		printk(KERN_ERR "_pxd_setup called to disable IO\n");
+		atomic_set(&pxd_dev->connected, false /* false==>io-disabled */);
+	} else {
+		printk(KERN_ERR "_pxd_setup called to enable IO\n");
+	}
+
+#ifndef USE_REQUEST_QUEUE
+	spin_lock_irq(&pxd_dev->dlock);
+	if (enable) {
+		refreshFsPath(pxd_dev, true);
+	} else {
+		if (pxd_dev->file) filp_close(pxd_dev->file, NULL);
+		pxd_dev->file = NULL;
+	}
+	spin_unlock_irq(&pxd_dev->dlock);
+#else
+	spin_lock_irq(&pxd_dev->qlock);
+	if (enable) {
+		refreshFsPath(pxd_dev, true);
+	} else {
+		if (pxd_dev->file) filp_close(pxd_dev->file, NULL);
+		pxd_dev->file = NULL;
+	}
+	spin_unlock_irq(&pxd_dev->qlock);
+#endif
+
+	if (enable) atomic_set(&pxd_dev->connected, true /* false==>io-disabled */);
+}
+
+static void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {
+	struct list_head *cur;
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+
+		_pxd_setup(pxd_dev, enable);
+	}
+	spin_unlock(&ctx->lock);
 }
 
 
@@ -423,9 +459,21 @@ out:
 }
 #endif
 
-static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio)
+static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio, bool shouldClose)
 {
-	int ret = do_bio_filebacked(tc, bio);
+	int ret;
+
+	if (shouldClose) {
+		printk(KERN_ERR"px is disconnected, failing IO.\n");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+		bio_io_error(bio);
+#else
+		bio_endio(bio, -ENXIO);
+#endif
+		return;
+	}
+
+	ret = do_bio_filebacked(tc, bio);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 	if (ret < 0) {
 		bio_io_error(bio);
@@ -442,14 +490,16 @@ static void pxd_add_bio(struct thread_context *tc, struct bio *bio) {
 	bio_list_add(&tc->bio_list, bio);
 }
 
-static struct bio* pxd_get_bio(struct thread_context *tc) {
+static struct bio* pxd_get_bio(struct thread_context *tc, bool *shouldClose) {
 	tc->bio_count--;
+	*shouldClose = (atomic_read(&tc->pxd_dev->connected) == 0);
 	return bio_list_pop(&tc->bio_list);
 }
 
 static int pxd_io_thread(void *data) {
 	struct thread_context *tc = data;
 	struct bio *bio;
+	bool shouldClose;
 	while (!kthread_should_stop() || !bio_list_empty(&tc->bio_list)) {
 		wait_event_interruptible(tc->pxd_event,
                              !bio_list_empty(&tc->bio_list) ||
@@ -461,12 +511,11 @@ static int pxd_io_thread(void *data) {
 		pxd_printk("pxd_io_thread new bio for device %llu, pending %u\n",
 				tc->pxd_dev->dev_id, tc->bio_count);
 		spin_lock_irq(&tc->lock);
-		bio = pxd_get_bio(tc);
+		bio = pxd_get_bio(tc, &shouldClose);
 		spin_unlock_irq(&tc->lock);
 
 		BUG_ON(!bio);
-		pxd_handle_bio(tc, bio);
-
+		pxd_handle_bio(tc, bio, shouldClose);
 	}
 	return 0;
 }
@@ -652,9 +701,14 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
 	return 0;
 }
 
-static inline void pxd_handle_req(struct thread_context *tc, struct request *req)
+static inline void pxd_handle_req(struct thread_context *tc, struct request *req, bool shouldClose)
 {
         int ret = 0;
+	if (shouldClose) {
+		printk(KERN_ERR"px is disconnected, failing IO.\n");
+		goto error_out;
+	}
+
         if (req->cmd_type != REQ_TYPE_FS)
                 goto error_out;
 
@@ -689,9 +743,10 @@ static void pxd_add_rq(struct thread_context *tc, struct request *rq) {
 	list_add_tail(&rq->queuelist, &tc->waiting_queue);
 }
 
-static struct request* pxd_get_rq(struct thread_context *tc) {
+static struct request* pxd_get_rq(struct thread_context *tc, bool *shouldClose) {
 	struct request* req;
 	tc->rq_count--;
+	*shouldClose = (atomic_read(&tc->pxd_dev->connected) == 0);
 	req = list_entry(tc->waiting_queue.next, struct request, queuelist);
 	list_del_init(&req->queuelist);
 	return req;
@@ -700,6 +755,7 @@ static struct request* pxd_get_rq(struct thread_context *tc) {
 static int pxd_io_thread(void *data) {
 	struct thread_context *tc = data;
 	struct request *req;
+	bool shouldClose;
 
 	//set_user_nice(current, -20);
 	while (!kthread_should_stop() || !list_empty(&tc->waiting_queue)) {
@@ -714,11 +770,11 @@ static int pxd_io_thread(void *data) {
 			tc->pxd_dev->dev_id, tc->rq_count);
 
 		spin_lock_irq(&tc->lock);
-		req = pxd_get_rq(tc);
+		req = pxd_get_rq(tc, &shouldClose);
 		spin_unlock_irq(&tc->lock);
 
 		BUG_ON(!req);
-		pxd_handle_req(tc, req);
+		pxd_handle_req(tc, req, shouldClose);
 	}
 	return 0;
 }
@@ -856,8 +912,14 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
+	if (!atomic_read(&pxd_dev->connected)) {
+		printk(KERN_ERR"px is disconnected, failing IO.\n");
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
 	if (!pxd_dev->file) {
-		if (refreshFsPath(pxd_dev)) {
+		if (refreshFsPath(pxd_dev, false)) {
 			printk(KERN_ERR"pxd (%llu) does not have backing file failing hard\n", pxd_dev->dev_id);
 			//bio_io_error(bio);
 			pxd_make_request_orig(q, bio);
@@ -962,15 +1024,20 @@ void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, stru
  * Below is a hack to find the backing file/device.. proper ioctl interface
  * extension and argument submission should happen from px-storage!!
  */
-static int refreshFsPath(struct pxd_device *pxd_dev) {
+static int refreshFsPath(struct pxd_device *pxd_dev, bool force) {
 	int pool;
 	char newPath[64];
 	struct file *f;
 
 	if (pxd_dev->file) {
-		printk(KERN_INFO"Success device %llu backing file %s\n",
+		if (!force) {
+			printk(KERN_INFO"Success device %llu backing file %s\n",
 					pxd_dev->dev_id, pxd_dev->device_path);
-		return 0;
+			return 0;
+		}
+
+		filp_close(pxd_dev->file, NULL);
+		pxd_dev->file = NULL;
 	}
 
 	for (pool=0; pool<MAXPOOL; pool++) {
@@ -1005,6 +1072,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	int err;
 
 	atomic_set(&pxd_dev->index, 0);
+	atomic_set(&pxd_dev->connected, 1);
 
 #ifndef USE_REQUEST_QUEUE
 	err = initBIO(pxd_dev);
@@ -1019,7 +1087,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	}
 #endif
 
-	return refreshFsPath(pxd_dev);
+	return refreshFsPath(pxd_dev, true);
 }
 
 static void cleanupBackingFsPath(struct pxd_device *pxd_dev) {
@@ -1371,6 +1439,13 @@ static void pxd_rq_fn(struct request_queue *q)
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
+
+		if (!atomic_read(&pxd_dev->connected)) {
+			printk(KERN_ERR"px is disconnected, failing IO.\n");
+			__blk_end_request_all(rq, -ENXIO);
+			return BLK_QC_RETVAL;
+		}
+
 		spin_unlock_irq(&pxd_dev->qlock);
 		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags  %llx\n", __func__,
@@ -1381,7 +1456,7 @@ static void pxd_rq_fn(struct request_queue *q)
 
 		if (!pxd_dev->file) {
 			/* see whether it can be initialized now */
-			if (refreshFsPath(pxd_dev)) {
+			if (refreshFsPath(pxd_dev, false)) {
 				printk(KERN_ERR "pxd (%llu) does not have backing file taking fuse path\n", pxd_dev->dev_id);
 				//blk_end_request_all(rq, -EIO);
 				pxd_rq_fn_process(pxd_dev, q, rq);
@@ -1555,6 +1630,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *arg)
 	// Ignore these settings as they are hardcoded.
 	pxd_dev->block_device = add->block_device;
 	pxd_dev->pool_id = add->pool_id;
+	pxd_dev->size = add->size;
 	memcpy(pxd_dev->device_path, add->device_path, strlen(add->device_path)+1);
 
 	initBackingFsPath(pxd_dev);
@@ -1991,6 +2067,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		printk(KERN_ERR "%s: too many outstanding opened\n", __func__);
 		return -EINVAL;
 	}
+
 	if (fc->connected == 1) {
 		printk(KERN_ERR "%s: pxd-control-%d already open\n", __func__, ctx->id);
 		return -EINVAL;
@@ -2007,6 +2084,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	fc->allow_disconnected = 1;
 	file->private_data = fc;
 
+	pxdctx_set_connected(ctx, true);
 	fuse_restart_requests(fc);
 
 	rc = pxd_send_init(fc);
@@ -2066,8 +2144,9 @@ static void pxd_timeout(unsigned long args)
 
 	BUG_ON(fc->connected);
 
-	fc->connected = true;
+	fc->connected = true; /* XXX: should this be false */
 	fc->allow_disconnected = 0;
+	pxdctx_set_connected(ctx, false);
 	fuse_abort_conn(fc);
 	printk(KERN_INFO "PXD_TIMEOUT (%s:%llu): Aborting all requests...",
 		ctx->name, ctx->unique);
