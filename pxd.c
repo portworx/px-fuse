@@ -5,6 +5,15 @@
 #include <linux/miscdevice.h>
 #include <linux/atomic.h>
 
+#define NEWDRIVER (1)
+#define STATIC
+#define USE_REQUEST_QUEUE (0)
+#ifdef NEWDRIVER
+#include <linux/blk-mq.h>
+#include <uapi/linux/falloc.h>
+#include <linux/uio.h>
+#endif
+
 #include "fuse_i.h"
 #include "pxd.h"
 
@@ -22,6 +31,7 @@
 // original block io interface, did not find much performance help using
 // the request Queue interface... So USE_REQUEST_QUEUE shall remain disabled
 // as default.
+//
 //
 
 #define MAX_THREADS (32)
@@ -91,13 +101,17 @@ struct pxd_device;
 struct thread_context {
 	struct pxd_device  *pxd_dev;
 	struct task_struct *pxd_thread;
+//#define USE_REQUEST_QUEUE
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	struct kthread_worker   worker;
+#elif !USE_REQUEST_QUEUE
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
-//#define USE_REQUEST_QUEUE
-#ifdef USE_REQUEST_QUEUE
 	unsigned int     rq_count;
 	struct list_head waiting_queue;
 #else
+	wait_queue_head_t   pxd_event;
+	spinlock_t  		lock;
 	unsigned int     bio_count;
 	struct bio_list  bio_list;
 #endif
@@ -125,10 +139,317 @@ struct pxd_device {
 	atomic_t index;
 	atomic_t connected;
 	struct pxd_context *ctx;
+	size_t offset;
+#ifdef NEWDRIVER
+	struct blk_mq_tag_set   tag_set;
+#endif
 };
+
+#ifdef NEWDRIVER
+struct loop_cmd {
+    struct kthread_work work;
+    struct request *rq;
+    bool use_aio; /* use AIO interface to handle I/O */
+    atomic_t ref; /* only for aio */
+    long ret;
+    struct kiocb iocb;
+    struct bio_vec *bvec;
+    struct cgroup_subsys_state *css;
+};
+
+static int pxd_req_flush(struct pxd_device *pxd_dev, struct request *rq)
+{
+    struct file *file = pxd_dev->file;
+    int ret = vfs_fsync(file, 0);
+    if (unlikely(ret && ret != -EINVAL))
+        ret = -EIO;
+
+    return ret;
+}
+
+static int pxd_discard(struct pxd_device *pxd_dev, struct request *rq, loff_t pos)
+{
+    /*
+     * We use punch hole to reclaim the free space used by the
+     * image a.k.a. discard. However we do not support discard if
+     * encryption is enabled, because it may give an attacker
+     * useful information.
+     */
+    struct file *file = pxd_dev->file;
+    int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+    int ret;
+
+    if (!file->f_op->fallocate) {
+        ret = -EOPNOTSUPP;
+        goto out;
+    }
+
+    ret = file->f_op->fallocate(file, mode, pos, blk_rq_bytes(rq));
+    if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+        ret = -EIO;
+ out:
+    return ret;
+}
+
+
+static int _pxd_write_bvec(struct file *file, struct bio_vec *bvec, loff_t *ppos)
+{
+    struct iov_iter i;
+    ssize_t bw;
+
+    iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
+
+    file_start_write(file);
+    bw = vfs_iter_write(file, &i, ppos, 0);
+    file_end_write(file);
+
+    if (likely(bw ==  bvec->bv_len))
+        return 0;
+
+    printk_ratelimited(KERN_ERR
+        "myloop: Write error at byte offset %llu, length %i.\n",
+        (unsigned long long)*ppos, bvec->bv_len);
+    if (bw >= 0)
+        bw = -EIO;
+    return bw;
+}
+
+static int pxd_write_simple(struct pxd_device *pxd_dev, struct request *rq,
+        loff_t pos)
+{
+    struct bio_vec bvec;
+    struct req_iterator iter;
+    int ret = 0;
+
+    rq_for_each_segment(bvec, rq, iter) {
+        ret = _pxd_write_bvec(pxd_dev->file, &bvec, &pos);
+        if (ret < 0)
+            break;
+        cond_resched();
+    }
+
+    return ret;
+}
+
+static int pxd_read_simple(struct pxd_device *pxd_dev, struct request *rq,
+        loff_t pos)
+{
+    struct bio_vec bvec;
+    struct req_iterator iter;
+    struct iov_iter i;
+    ssize_t len;
+
+    rq_for_each_segment(bvec, rq, iter) {
+        iov_iter_bvec(&i, ITER_BVEC, &bvec, 1, bvec.bv_len);
+        len = vfs_iter_read(pxd_dev->file, &i, &pos, 0);
+        if (len < 0)
+            return len;
+
+        flush_dcache_page(bvec.bv_page);
+
+        if (len != bvec.bv_len) {
+            struct bio *bio;
+
+            __rq_for_each_bio(bio, rq)
+                zero_fill_bio(bio);
+            break;
+        }
+        cond_resched();
+    }
+
+    return 0;
+}
+
+static int do_req_filebacked(struct pxd_device *pxd_dev, struct request *rq)
+{
+    //struct loop_cmd *cmd = blk_mq_rq_to_pdu(rq);
+    loff_t pos = ((loff_t) blk_rq_pos(rq) << 9) + pxd_dev->offset;
+
+    /*
+     * lo_write_simple and lo_read_simple should have been covered
+     * by io submit style function like lo_rw_aio(), one blocker
+     * is that lo_read_simple() need to call flush_dcache_page after
+     * the page is written from kernel, and it isn't easy to handle
+     * this in io submit style function which submits all segments
+     * of the req at one time. And direct read IO doesn't need to
+     * run flush_dcache_page().
+     */
+    switch (req_op(rq)) {
+    case REQ_OP_FLUSH:
+        return pxd_req_flush(pxd_dev, rq);
+    case REQ_OP_DISCARD:
+    case REQ_OP_WRITE_ZEROES:
+        return pxd_discard(pxd_dev, rq, pos);
+    case REQ_OP_WRITE:
+#if 0
+        if (lo->transfer)
+            return lo_write_transfer(lo, rq, pos);
+        else if (cmd->use_aio)
+            return lo_rw_aio(lo, cmd, pos, WRITE);
+        else
+#endif
+            return pxd_write_simple(pxd_dev, rq, pos);
+    case REQ_OP_READ:
+#if 0
+        if (lo->transfer)
+            return lo_read_transfer(lo, rq, pos);
+        else if (cmd->use_aio)
+            return lo_rw_aio(lo, cmd, pos, READ);
+        else
+#endif
+            return pxd_read_simple(pxd_dev, rq, pos);
+    default:
+        WARN_ON_ONCE(1);
+        return -EIO;
+        break;
+    }
+}
+
+
+static int loop_kthread_worker_fn(void *worker_ptr)
+{
+	struct thread_context *tc  = worker_ptr;
+    current->flags |= PF_LESS_THROTTLE;
+    return kthread_worker_fn(&tc->worker);
+}
+
+static blk_status_t loop_queue_rq(struct blk_mq_hw_ctx *hctx,
+        const struct blk_mq_queue_data *bd)
+{
+    struct loop_cmd *cmd = blk_mq_rq_to_pdu(bd->rq);
+    struct pxd_device *pxd_dev = cmd->rq->q->queuedata;
+	int thread;
+	bool iswrite = false;
+	struct thread_context *tc;
+
+    blk_mq_start_request(bd->rq);
+
+    if (!atomic_read(&pxd_dev->connected))
+        return BLK_STS_IOERR;
+
+    switch (req_op(cmd->rq)) {
+    case REQ_OP_FLUSH:
+    case REQ_OP_DISCARD:
+    case REQ_OP_WRITE_ZEROES:
+		iswrite = true;
+        cmd->use_aio = false;
+        break;
+    default:
+        //cmd->use_aio = lo->use_dio;
+		cmd->use_aio = false;
+        break;
+    }
+
+    /* always use the first bio's css */
+        cmd->css = NULL;
+#ifdef CONFIG_BLK_CGROUP
+    if (cmd->use_aio && cmd->rq->bio && cmd->rq->bio->bi_css) {
+        cmd->css = cmd->rq->bio->bi_css;
+        css_get(cmd->css);
+    }
+#endif
+
+	if (!WRITEMULTITHREAD && iswrite) {
+		thread = 0;
+	} else {
+		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
+	}
+	tc = &pxd_dev->tc[thread];
+
+    kthread_queue_work(&tc->worker, &cmd->work);
+
+    return BLK_STS_OK;
+}
+
+static void loop_queue_work(struct kthread_work *work)
+{
+    struct loop_cmd *cmd =
+        container_of(work, struct loop_cmd, work);
+
+    //loop_handle_cmd(cmd);
+    struct pxd_device *pxd_dev = cmd->rq->q->queuedata;
+    int ret = 0;
+
+	/*
+    const bool write = op_is_write(req_op(cmd->rq));
+    if (write && (lo->lo_flags & LO_FLAGS_READ_ONLY)) {
+        ret = -EIO;
+        goto failed;
+    }
+	*/
+
+    ret = do_req_filebacked(pxd_dev, cmd->rq);
+    /* complete non-aio request */
+    if (!cmd->use_aio || ret) {
+        cmd->ret = ret ? -EIO : 0;
+        blk_mq_complete_request(cmd->rq);
+    }
+}
+
+static int loop_init_request(struct blk_mq_tag_set *set, struct request *rq,
+        unsigned int hctx_idx, unsigned int numa_node)
+{
+    struct loop_cmd *cmd = blk_mq_rq_to_pdu(rq);
+
+    cmd->rq = rq;
+    kthread_init_work(&cmd->work, loop_queue_work);
+
+    return 0;
+}
+
+static void pxd_complete_rq(struct request *rq)
+{
+    struct loop_cmd *cmd = blk_mq_rq_to_pdu(rq);
+
+    if (unlikely(req_op(cmd->rq) == REQ_OP_READ && cmd->use_aio &&
+             cmd->ret >= 0 && cmd->ret < blk_rq_bytes(cmd->rq))) {
+        struct bio *bio = cmd->rq->bio;
+
+        bio_advance(bio, cmd->ret);
+        zero_fill_bio(bio);
+    }
+
+    blk_mq_end_request(rq, cmd->ret < 0 ? BLK_STS_IOERR : BLK_STS_OK);
+}
+
+
+static const struct blk_mq_ops pxd_mq_ops = {
+    .queue_rq       = loop_queue_rq,
+    .init_request   = loop_init_request,
+    .complete   = pxd_complete_rq,
+};
+
+static struct request_queue* _pxd_new_queue_init(struct pxd_device *pxd_dev) {
+	struct request_queue* q;
+	int err;
+
+    pxd_dev->tag_set.ops = &pxd_mq_ops;
+    //pxd_dev->tag_set.nr_hw_queues = 1; // nr_cpu_ids: kernel exported num
+    pxd_dev->tag_set.nr_hw_queues = nr_cpu_ids; // nr_cpu_ids: kernel exported num
+    pxd_dev->tag_set.queue_depth = 128;
+    pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
+    pxd_dev->tag_set.cmd_size = sizeof(struct loop_cmd);
+    pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_SG_MERGE;
+    pxd_dev->tag_set.driver_data = pxd_dev;
+
+    err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
+    if (err) return NULL;
+
+	q = blk_mq_init_queue(&pxd_dev->tag_set);
+    if (IS_ERR_OR_NULL(q)) {
+		return q;
+        //err = PTR_ERR(q);
+        //goto out_cleanup_tags;
+    }
+
+    q->queuedata = pxd_dev;
+	return q;
+}
+#endif
 
 // Forward decl
 static int refreshFsPath(struct pxd_device *pxd_dev, bool);
+#ifndef NEWDRIVER
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
@@ -139,6 +460,7 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages);
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
+#endif
 
 #define	REQCTR(fc) (fc)->reqctr
 /***********************/
@@ -152,7 +474,8 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 #define SECTOR_SHIFT (9)
 
 /* Common functions */
-static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
+STATIC
+int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 {
 	ssize_t bw;
 	mm_segment_t old_fs = get_fs();
@@ -191,7 +514,7 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	return bw;
 }
 
-static
+STATIC
 ssize_t _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
 	int result;
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
@@ -214,7 +537,16 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
 		printk(KERN_ERR "_pxd_setup called to enable IO\n");
 	}
 
-#ifndef USE_REQUEST_QUEUE
+#ifdef NEWDRIVER
+	spin_lock_irq(&pxd_dev->dlock);
+	if (enable) {
+		refreshFsPath(pxd_dev, true);
+	} else {
+		if (pxd_dev->file) filp_close(pxd_dev->file, NULL);
+		pxd_dev->file = NULL;
+	}
+	spin_unlock_irq(&pxd_dev->dlock);
+#elif !USE_REQUEST_QUEUE
 	spin_lock_irq(&pxd_dev->dlock);
 	if (enable) {
 		refreshFsPath(pxd_dev, true);
@@ -249,6 +581,7 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {
 }
 
 
+#ifndef NEWDRIVER
 #ifndef USE_REQUEST_QUEUE
 static ssize_t
 do_pxd_receive(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t pos)
@@ -810,6 +1143,7 @@ static void cleanupReqQ(struct pxd_device *pxd_dev) {
 }
 
 #endif
+#endif
 
 static inline unsigned int get_op_flags(struct bio *bio)
 {
@@ -826,7 +1160,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-#ifndef USE_REQUEST_QUEUE
+#if !NEWDRIVER && !USE_REQUEST_QUEUE
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 static blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
 #define BLK_QC_RETVAL BLK_QC_T_NONE
@@ -936,7 +1270,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
-#else
+#elif USE_REQUEST_QUEUE
 
 /***********************/
 /***********************/
@@ -1044,7 +1378,8 @@ static int refreshFsPath(struct pxd_device *pxd_dev, bool force) {
 #ifdef DMTHINPOOL
 		sprintf(newPath, DMTHINVOLFMT, pool, pxd_dev->dev_id);
 #else
-		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
+		//sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
+		sprintf(newPath, "/dev/xvdg");
 #endif
 
 		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
@@ -1069,12 +1404,33 @@ static int refreshFsPath(struct pxd_device *pxd_dev, bool force) {
 }
 
 static int initBackingFsPath(struct pxd_device *pxd_dev) {
-	int err;
+	int err; (void) err;
 
 	atomic_set(&pxd_dev->index, 0);
 	atomic_set(&pxd_dev->connected, 1);
 
-#ifndef USE_REQUEST_QUEUE
+#if NEWDRIVER
+	{
+	int i;
+	struct thread_context *tc;
+	for (i=0; i<MAX_THREADS; i++) {
+		tc = &pxd_dev->tc[i];
+		tc->pxd_dev = pxd_dev;
+		kthread_init_worker(&tc->worker);
+		tc->pxd_thread = kthread_create(loop_kthread_worker_fn, tc, "pxd%d:%llu",
+			i, pxd_dev->dev_id);
+		if (IS_ERR(tc->pxd_thread)) {
+			pxd_printk("Init kthread for device %llu failed %lu\n",
+				pxd_dev->dev_id, PTR_ERR(tc->pxd_thread));
+			return -EINVAL;
+		}
+
+		set_user_nice(tc->pxd_thread, MIN_NICE);
+		wake_up_process(tc->pxd_thread);
+	}
+	}
+
+#elif !USE_REQUEST_QUEUE
 	err = initBIO(pxd_dev);
 	if (err < 0) {
 		return err;
@@ -1091,7 +1447,19 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 }
 
 static void cleanupBackingFsPath(struct pxd_device *pxd_dev) {
-#ifndef USE_REQUEST_QUEUE
+#ifdef NEWDRIVER
+	struct request_queue *q = pxd_dev->disk->queue;
+	blk_mq_freeze_queue(q);
+	{
+	int i;
+	for (i=0; i<MAX_THREADS; i++) {
+		struct thread_context *tc = &pxd_dev->tc[i];
+    	kthread_flush_worker(&tc->worker);
+		kthread_stop(tc->pxd_thread);
+	}
+	}
+	//loop_unprepare_queue(pxd_dev);
+#elif !USE_REQUEST_QUEUE
 	cleanupBIO(pxd_dev);
 #else
 	cleanupReqQ(pxd_dev);
@@ -1201,7 +1569,8 @@ static const struct block_device_operations pxd_bd_ops = {
 	.release		= pxd_release,
 };
 
-static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
+STATIC
+void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 	int cpu = part_stat_lock();
@@ -1223,7 +1592,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 #define	REQCTR(fc) (fc)->reqctr
 #endif
 #endif
-
+#ifndef NEWDRIVER
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
 	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
@@ -1420,8 +1789,9 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 }
 #endif
+#endif
 
-#ifdef USE_REQUEST_QUEUE
+#if USE_REQUEST_QUEUE
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -1492,7 +1862,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	/* Bypass queue if queue_depth is zero. */
 	printk(KERN_INFO "Adding device %llu with queue_depth %u\n",
 			pxd_dev->dev_id, add->queue_depth);
-#ifndef USE_REQUEST_QUEUE
+#ifdef NEWDRIVER
+	q = _pxd_new_queue_init(pxd_dev);
+	if (IS_ERR_OR_NULL(q)) {
+		goto out_disk;
+	}
+
+#elif !USE_REQUEST_QUEUE
 	//if (true || add->queue_depth == 0) {
 		q = blk_alloc_queue(GFP_KERNEL);
 		if (!q)
