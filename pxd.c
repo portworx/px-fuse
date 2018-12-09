@@ -364,7 +364,7 @@ static int _pxd_discard(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos)
 	return ret;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
@@ -896,7 +896,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	unsigned int rw = bio_op(bio);
 #else
 	unsigned int rw = bio_rw(bio);
@@ -905,7 +905,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	struct thread_context *tc;
 
 	/* single threaded write performance is better */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	if (!WRITEMULTITHREAD && op_is_write(rw)) {
 #else
 	if (!WRITEMULTITHREAD && bio_rw(bio) == WRITE) {
@@ -916,7 +916,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	}
 	tc = &pxd_dev->tc[thread];
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	if (!pxd_dev) {
 #else
 	if (rw == READA) rw = READ;
