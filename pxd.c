@@ -370,6 +370,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	struct pxd_device *pxd_dev = tc->pxd_dev;
 	loff_t pos;
 	unsigned int op = bio_op(bio);
+	int ret;
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				tc->bio_count);
@@ -380,15 +381,30 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 #endif
 
 	switch (op) {
+	case REQ_OP_READ:
+		return pxd_receive(pxd_dev, bio, pos);
+	case REQ_OP_WRITE:
+
+		if (bio->bi_opf & REQ_PREFLUSH) {
+			ret = _pxd_flush(pxd_dev);
+			if (ret < 0) return ret;
+		}
+
+		ret = do_pxd_send(pxd_dev, bio, pos);
+		if (ret < 0) return ret;
+
+		if (bio->bi_opf & REQ_FUA) {
+			ret = _pxd_flush(pxd_dev);
+			if (ret < 0) return ret;
+		}
+
+		return 0;
+
 	case REQ_OP_FLUSH:
 		return _pxd_flush(pxd_dev);
 	case REQ_OP_DISCARD:
 	case REQ_OP_WRITE_ZEROES:
 		return _pxd_discard(pxd_dev, bio, pos);
-	case REQ_OP_WRITE:
-		return do_pxd_send(pxd_dev, bio, pos);
-	case REQ_OP_READ:
-		return pxd_receive(pxd_dev, bio, pos);
 	default:
 		WARN_ON_ONCE(1);
 		return -EIO;
