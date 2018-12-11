@@ -8,6 +8,7 @@
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
 #include <linux/uio.h>
+#include <linux/kthread.h>
 
 #include "fuse_i.h"
 #include "pxd.h"
@@ -33,6 +34,12 @@
 //#define SYNCWRITES
 #define WRITEMULTITHREAD  (false)
 //#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
+//
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
+#define blk_status_t int
+#define BLK_STS_OK		(0)
+#define BLK_STS_IOERR		(10)
+#endif
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -102,7 +109,9 @@ struct pxd_mq_rqcmd {
     long ret;
     struct kiocb iocb;
     struct bio_vec *bvec;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0) 
     struct cgroup_subsys_state *css;
+#endif
 };
 #else
 struct thread_context {
@@ -245,10 +254,15 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	}
 
 	set_fs(get_ds());
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
 	bw = vfs_iter_write(file, &i, pos, 0);
+	file_end_write(file);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
+	file_start_write(file);
+	bw = vfs_iter_write(file, &i, pos);
 	file_end_write(file);
 #else
 	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
@@ -355,11 +369,16 @@ static inline int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_
 static
 ssize_t _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
 	int result;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	struct iov_iter i;
 
 	iov_iter_bvec(&i, ITER_BVEC, bvec, 1, bvec->bv_len);
 	result = vfs_iter_read(pxd_dev->file, &i, pos, 0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	struct iov_iter i;
+
+	iov_iter_bvec(&i, ITER_BVEC, bvec, 1, bvec->bv_len);
+	result = vfs_iter_read(pxd_dev->file, &i, pos);
 #else
 	mm_segment_t old_fs = get_fs();
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
@@ -493,7 +512,9 @@ void pxd_rw_aio_complete(struct kiocb *iocb, long ret, long ret2)
 {
 	struct pxd_mq_rqcmd *cmd = container_of(iocb, struct pxd_mq_rqcmd, iocb);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0) 
 	if (cmd->css) css_put(cmd->css);
+#endif
 
 	cmd->ret = ret;
 	pxd_rw_aio_do_completion(cmd);
@@ -554,8 +575,10 @@ static inline int pxd_rw_aio(struct pxd_device *pxd_dev,
 	cmd->iocb.ki_filp = file;
     cmd->iocb.ki_complete = pxd_rw_aio_complete;
     cmd->iocb.ki_flags = IOCB_DIRECT;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0) 
     if (cmd->css)
         kthread_associate_blkcg(cmd->css);
+#endif
 
     if (rw == WRITE)
         ret = call_write_iter(file, &cmd->iocb, &iter);
@@ -563,7 +586,9 @@ static inline int pxd_rw_aio(struct pxd_device *pxd_dev,
         ret = call_read_iter(file, &cmd->iocb, &iter);
 
     pxd_rw_aio_do_completion(cmd);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
     kthread_associate_blkcg(NULL);
+#endif
 
     if (ret != -EIOCBQUEUED)
         cmd->iocb.ki_complete(&cmd->iocb, ret, 0);
@@ -1670,12 +1695,14 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		cmd->use_aio = true;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0) 
 	cmd->css = NULL;
 #ifdef CONFIG_BLK_CGROUP
 	if (cmd->use_aio && cmd->rq->bio && cmd->rq->bio->bi_css) {
 		cmd->css = cmd->rq->bio->bi_css;
 		css_get(cmd->css);
 	}
+#endif
 #endif
 
 	kthread_queue_work(&pxd_dev->worker, &cmd->work);
