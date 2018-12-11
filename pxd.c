@@ -4,6 +4,7 @@
 #include <linux/crc32.h>
 #include <linux/miscdevice.h>
 #include <linux/atomic.h>
+#include <linux/dma-mapping.h>
 
 #include "fuse_i.h"
 #include "pxd.h"
@@ -54,6 +55,8 @@
 #endif
 #define SEGMENT_SIZE (1024 * 1024)
 
+#define MAX_WRITESEGS_FOR_FLUSH ((16*SEGMENT_SIZE)/PXD_LBS)
+
 #define PXD_TIMER_SECS_MIN 30
 #define PXD_TIMER_SECS_MAX 600
 
@@ -98,7 +101,6 @@ struct thread_context {
 	unsigned int     rq_count;
 	struct list_head waiting_queue;
 #else
-	unsigned int     bio_count;
 	struct bio_list  bio_list;
 #endif
 };
@@ -115,6 +117,7 @@ struct pxd_device {
 	struct list_head node;
 	int open_count;
 	bool removing;
+	wait_queue_head_t   congestion_wait;
 
 	// Extended information
 	uint32_t pool_id;
@@ -124,6 +127,8 @@ struct pxd_device {
 	struct thread_context tc[MAX_THREADS];
 	atomic_t index;
 	atomic_t connected;
+	atomic_t bio_count;
+	atomic_t write_counter;
 	struct pxd_context *ctx;
 };
 
@@ -155,7 +160,6 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 {
 	ssize_t bw;
-	mm_segment_t old_fs = get_fs();
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
 
 	pxd_printk("_pxd_write entry buf %p offset %lld, length %d entered\n",
@@ -165,19 +169,16 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
 	}
 
-	set_fs(get_ds());
-	file_start_write(file);
-#ifdef SYNCWRITES
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	bw = __kernel_write(pxd_dev->file, kaddr, bvec->bv_len, pos);
 #else
-	bw = do_sync_write(file, kaddr, bvec->bv_len, pos);
+	{
+		mm_segment_t old_fs = get_fs();
+		set_fs(get_ds());
+		bw = vfs_write(file, kaddr, bvec->bv_len, pos);
+		set_fs(old_fs);
+	}
 #endif
-#else
-	bw = file->f_op->write(file, kaddr, bvec->bv_len, pos);
-#endif
-	file_end_write(file);
-	set_fs(old_fs);
 	kunmap(bvec->bv_page);
 
 	if (likely(bw == bvec->bv_len)) {
@@ -195,14 +196,19 @@ static
 ssize_t _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
 	int result;
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
-	mm_segment_t old_fs = get_fs();
 
         /* read from file at offset pos into the buffer */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	result = kernel_read(pxd_dev->file, kaddr, bvec->bv_len, pos);
+#else
+	mm_segment_t old_fs = get_fs();
 	set_fs(get_ds());
 	result = vfs_read(pxd_dev->file, kaddr, bvec->bv_len, pos);
 	set_fs(old_fs);
+#endif
 
 	kunmap(bvec->bv_page);
+	if (result < 0) printk(KERN_ERR "__vfs_read return %d\n", result);
 	return result;
 }
 
@@ -304,6 +310,9 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 	int i;
 #endif
 
+	pxd_printk("do_pxd_send bio%p, off%lld bio_segments %d\n", bio, pos, bio_segments(bio));
+
+	atomic_add(bio_segments(bio), &pxd_dev->write_counter);
 	//bio_request_contiguous(bio);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
@@ -340,6 +349,8 @@ static int _pxd_flush(struct pxd_device *pxd_dev) {
 	if (unlikely(ret && ret != -EINVAL)) {
 		ret = -EIO;
 	}
+
+	atomic_set(&pxd_dev->write_counter, 0);
 	return ret;
 }
 
@@ -417,9 +428,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	struct pxd_device *pxd_dev = tc->pxd_dev;
 	loff_t pos;
 	int ret;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	unsigned int op = bio_op(bio);
-#endif
+	bool shouldFlush = false;
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				tc->bio_count);
@@ -429,16 +438,8 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	pos = ((loff_t) bio->bi_sector << 9);
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	if (op_is_write(op)) {
-#else
 	if (bio_rw(bio) == WRITE) {
-#endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-		if (op_is_flush(op)) {
-#else
 		if (bio->bi_rw & REQ_FLUSH) {
-#endif
 			ret = _pxd_flush(pxd_dev);
 			if (ret < 0) goto out;
 		}
@@ -449,21 +450,14 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 		 * encryption is enabled, because it may give an attacker
 		 * useful information.
 		 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-		if (op & (REQ_OP_DISCARD|REQ_OP_WRITE_ZEROES)) {
-#else
 		if (bio->bi_rw & REQ_DISCARD) {
-#endif
 			ret = _pxd_discard(pxd_dev, bio, pos);
 			goto out;
 		}
 		ret = do_pxd_send(pxd_dev, bio, pos);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-		if ((op & REQ_FUA) && !ret) {
-#else
-		if ((bio->bi_rw & REQ_FUA) && !ret) {
-#endif
+		shouldFlush = ((atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH));
+		if (((bio->bi_rw & REQ_FUA) && !ret) || shouldFlush) {
 			ret = _pxd_flush(pxd_dev);
 		}
 	} else {
@@ -502,14 +496,23 @@ static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio, bo
 }
 
 static void pxd_add_bio(struct thread_context *tc, struct bio *bio) {
-	tc->bio_count++;
+	atomic_inc(&tc->pxd_dev->bio_count);
+
+	spin_lock_irq(&tc->lock);
 	bio_list_add(&tc->bio_list, bio);
+	spin_unlock_irq(&tc->lock);
 }
 
 static struct bio* pxd_get_bio(struct thread_context *tc, bool *shouldClose) {
-	tc->bio_count--;
+	struct bio* bio;
+	atomic_dec(&tc->pxd_dev->bio_count);
+
 	*shouldClose = (atomic_read(&tc->pxd_dev->connected) == 0);
-	return bio_list_pop(&tc->bio_list);
+	spin_lock_irq(&tc->lock);
+	bio=bio_list_pop(&tc->bio_list);
+	spin_unlock_irq(&tc->lock);
+
+	return bio;
 }
 
 static int pxd_io_thread(void *data) {
@@ -526,9 +529,12 @@ static int pxd_io_thread(void *data) {
 
 		pxd_printk("pxd_io_thread new bio for device %llu, pending %u\n",
 				tc->pxd_dev->dev_id, tc->bio_count);
-		spin_lock_irq(&tc->lock);
 		bio = pxd_get_bio(tc, &shouldClose);
-		spin_unlock_irq(&tc->lock);
+
+		if (atomic_read(&tc->pxd_dev->bio_count) < tc->pxd_dev->disk->queue->nr_congestion_off) {
+			//printk(KERN_ERR"congestion cleared\n");
+			wake_up(&tc->pxd_dev->congestion_wait);
+		}
 
 		BUG_ON(!bio);
 		pxd_handle_bio(tc, bio, shouldClose);
@@ -538,6 +544,11 @@ static int pxd_io_thread(void *data) {
 
 static int initBIO(struct pxd_device *pxd_dev) {
 	int i;
+
+	// congestion init
+	init_waitqueue_head(&pxd_dev->congestion_wait);
+	atomic_set(&pxd_dev->bio_count,0);
+
 	for (i=0; i<MAX_THREADS; i++) {
 		struct thread_context *tc = &pxd_dev->tc[i];
 		tc->pxd_dev = pxd_dev;
@@ -945,9 +956,16 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
 
-	spin_lock_irq(&tc->lock);
+	{ /* add congestion handling */
+		if (atomic_read(&pxd_dev->bio_count) >= q->nr_congestion_on) {
+			//printk(KERN_ERR"Hit congestion... wait until clear\n");
+			wait_event_interruptible(pxd_dev->congestion_wait,
+					atomic_read(&pxd_dev->bio_count) < q->nr_congestion_off);
+		}
+
+	}
+
 	pxd_add_bio(tc, bio);
-	spin_unlock_irq(&tc->lock);
 	wake_up(&tc->pxd_event);
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
@@ -1540,6 +1558,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	blk_queue_io_min(q, PXD_LBS);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
+	blk_queue_bounce_limit(q, BLK_BOUNCE_ANY);
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
@@ -1566,6 +1585,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
+
+	printk(KERN_ERR"pxd_add_disk with congestion on %d, off %d\n",
+			q->nr_congestion_on, q->nr_congestion_off);
 
 	return 0;
 freeq:
