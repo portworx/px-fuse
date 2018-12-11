@@ -312,10 +312,10 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 
 	pxd_printk("do_pxd_send bio%p, off%lld bio_segments %d\n", bio, pos, bio_segments(bio));
 
-	atomic_add(bio_segments(bio), &pxd_dev->write_counter);
 	//bio_request_contiguous(bio);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
+		atomic_inc(&pxd_dev->write_counter);
 		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
 		if (ret < 0) {
 			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
@@ -327,6 +327,7 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 	}
 #else
 	bio_for_each_segment(bvec, bio, i) {
+		atomic_inc(&pxd_dev->write_counter);
 		ret = _pxd_write(pxd_dev->file, bvec, &pos);
 		if (ret < 0) {
 			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
@@ -382,6 +383,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	loff_t pos;
 	unsigned int op = bio_op(bio);
 	int ret;
+	bool shouldFlush = false;
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				tc->bio_count);
@@ -404,7 +406,8 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 		ret = do_pxd_send(pxd_dev, bio, pos);
 		if (ret < 0) return ret;
 
-		if (bio->bi_opf & REQ_FUA) {
+		shouldFlush = ((atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH));
+		if ((bio->bi_opf & REQ_FUA) || shouldFlush) {
 			ret = _pxd_flush(pxd_dev);
 			if (ret < 0) return ret;
 		}
@@ -548,6 +551,7 @@ static int initBIO(struct pxd_device *pxd_dev) {
 	// congestion init
 	init_waitqueue_head(&pxd_dev->congestion_wait);
 	atomic_set(&pxd_dev->bio_count,0);
+	atomic_set(&pxd_dev->write_counter,0);
 
 	for (i=0; i<MAX_THREADS; i++) {
 		struct thread_context *tc = &pxd_dev->tc[i];
