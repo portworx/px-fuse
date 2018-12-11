@@ -5,6 +5,10 @@
 #include <linux/miscdevice.h>
 #include <linux/atomic.h>
 
+#include <linux/blkdev.h>
+#include <linux/blk-mq.h>
+#include <linux/uio.h>
+
 #include "fuse_i.h"
 #include "pxd.h"
 
@@ -24,8 +28,9 @@
 // as default.
 //
 
+#define USE_REQUEST_QUEUE
 #define MAX_THREADS (32)
-#define SYNCWRITES
+//#define SYNCWRITES
 #define WRITEMULTITHREAD  (false)
 //#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
 
@@ -88,12 +93,23 @@ module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 
 struct pxd_device;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
+struct pxd_mq_rqcmd {
+    struct kthread_work work;
+    struct request *rq;
+    bool use_aio; /* use AIO interface to handle I/O */
+    atomic_t ref; /* only for aio */
+    long ret;
+    struct kiocb iocb;
+    struct bio_vec *bvec;
+    struct cgroup_subsys_state *css;
+};
+#else
 struct thread_context {
 	struct pxd_device  *pxd_dev;
 	struct task_struct *pxd_thread;
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
-//#define USE_REQUEST_QUEUE
 #ifdef USE_REQUEST_QUEUE
 	unsigned int     rq_count;
 	struct list_head waiting_queue;
@@ -102,6 +118,7 @@ struct thread_context {
 	struct bio_list  bio_list;
 #endif
 };
+#endif
 
 struct pxd_device {
 	uint64_t dev_id;
@@ -121,7 +138,14 @@ struct pxd_device {
 	char     device_path[64];
 	bool     block_device;
 	struct file * file;
+	loff_t offset; // offset into the backing device/file
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
+	struct blk_mq_tag_set   tag_set;
+	struct kthread_worker   worker;
+	struct task_struct  *worker_task;
+#else
 	struct thread_context tc[MAX_THREADS];
+#endif
 	atomic_t index;
 	atomic_t connected;
 	struct pxd_context *ctx;
@@ -152,11 +176,66 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 #define SECTOR_SHIFT (9)
 
 /* Common functions */
+static int _pxd_flush(struct pxd_device *pxd_dev) {
+	int ret;
+	struct file *file = pxd_dev->file;
+	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
+	ret = vfs_fsync(file, 0);
+	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
+	if (unlikely(ret && ret != -EINVAL)) {
+		ret = -EIO;
+	}
+	return ret;
+}
+
+static inline int _pxd_bio_discard(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
+	struct file *file = pxd_dev->file;
+	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+	int ret;
+
+	pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->device_path);
+	if ((!file->f_op->fallocate)) {
+		return -EOPNOTSUPP;
+	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
+#else
+	ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
+#endif
+	pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
+	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+		ret = -EIO;
+
+	return ret;
+}
+
+static inline 
+int _pxd_req_discard(struct pxd_device *pxd_dev, struct request *rq, loff_t pos) {
+	struct file *file = pxd_dev->file;
+	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+	int ret;
+
+	pxd_printk("do_pxd_bio_discard %llu pos %lld, bytes %u\n",
+			pxd_dev->dev_id, pos, blk_rq_bytes(rq));
+	if (!file->f_op->fallocate) {
+		return -EOPNOTSUPP;
+	}
+	ret = file->f_op->fallocate(file, mode, pos, blk_rq_bytes(rq));
+	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP)) {
+		ret = -EIO;
+	}
+	return ret;
+}
+
 static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 {
 	ssize_t bw;
 	mm_segment_t old_fs = get_fs();
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	struct iov_iter i;
+#else
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
+#endif
 
 	pxd_printk("_pxd_write entry buf %p offset %lld, length %d entered\n",
                 kaddr, *pos, bvec->bv_len);
@@ -166,17 +245,14 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	}
 
 	set_fs(get_ds());
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
-#ifdef SYNCWRITES
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
-#else
-	bw = do_sync_write(file, kaddr, bvec->bv_len, pos);
-#endif
-#else
-	bw = file->f_op->write(file, kaddr, bvec->bv_len, pos);
-#endif
+	bw = vfs_iter_write(file, &i, pos, 0);
 	file_end_write(file);
+#else
+	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
+#endif
 	set_fs(old_fs);
 	kunmap(bvec->bv_page);
 
@@ -191,20 +267,309 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	return bw;
 }
 
+static inline int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq,
+		loff_t pos) {
+	struct req_iterator iter;
+	int ret = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+
+	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+	rq_for_each_segment(bvec, rq, iter) {
+		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
+		len = vfs_iter_read(pxd->lo_backing_file, &i, &pos, 0);
+		if (len < 0)
+			return len;
+		*/
+		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#else
+	struct bio_vec *bvec;
+
+	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+	rq_for_each_segment(bvec, rq, iter) {
+		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
+		len = vfs_iter_read(pxd->lo_backing_file, &i, &pos, 0);
+		if (len < 0)
+			return len;
+		*/
+		ret = _pxd_write(pxd_dev->file, bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#endif
+	pxd_printk("do_pxd_write pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
+	return 0;
+}
+
+static inline int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
+	int ret = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+
+	//bio_request_contiguous(bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bio_for_each_segment(bvec, bio, i) {
+		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#else
+	bio_for_each_segment(bvec, bio, i) {
+		ret = _pxd_write(pxd_dev->file, bvec, &pos);
+		if (ret < 0) {
+			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
+			return ret;
+		}
+
+		cond_resched();
+	}
+#endif
+	return 0;
+}
+
+
 static
 ssize_t _pxd_read(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t *pos) {
 	int result;
-	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
-	mm_segment_t old_fs = get_fs();
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	struct iov_iter i;
 
-        /* read from file at offset pos into the buffer */
+	iov_iter_bvec(&i, ITER_BVEC, bvec, 1, bvec->bv_len);
+	result = vfs_iter_read(pxd_dev->file, &i, pos, 0);
+#else
+	mm_segment_t old_fs = get_fs();
+	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
+	/* read from file at offset pos into the buffer */
 	set_fs(get_ds());
 	result = vfs_read(pxd_dev->file, kaddr, bvec->bv_len, pos);
 	set_fs(old_fs);
 
 	kunmap(bvec->bv_page);
+#endif
+
 	return result;
 }
+
+static ssize_t do_pxd_receive(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t pos)
+{
+        return _pxd_read(pxd_dev, bvec, &pos);
+}
+
+static inline int pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos)
+{
+	ssize_t s;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+
+	pxd_printk("pxd_receive[%llu] with bio=%p, pos=%llu\n",
+				pxd_dev->dev_id, bio, pos);
+	bio_for_each_segment(bvec, bio, i) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+		s = do_pxd_receive(pxd_dev, &bvec, pos);
+		if (s < 0) return s;
+
+		if (s != bvec.bv_len) {
+			zero_fill_bio(bio);
+			break;
+		}
+		pos += bvec.bv_len;
+#else
+		s = do_pxd_receive(pxd_dev, bvec, pos);
+		if (s < 0) return s;
+
+		if (s != bvec->bv_len) {
+			zero_fill_bio(bio);
+			break;
+		}
+		pos += bvec->bv_len;
+#endif
+	}
+	return 0;
+}
+
+static inline int do_pxd_read(struct pxd_device *pxd_dev, struct request *rq, loff_t pos) {
+	struct req_iterator iter;
+	ssize_t len = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+
+	rq_for_each_segment(bvec, rq, iter) {
+		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
+		len = vfs_iter_read(pxd->file, &i, &pos, 0);
+		if (len < 0)
+			return len;
+
+		*/
+		len = _pxd_read(pxd_dev, &bvec, &pos);
+
+		flush_dcache_page(bvec.bv_page);
+		if (len != bvec.bv_len) {
+			struct bio *bio;
+
+			__rq_for_each_bio(bio, rq)
+				zero_fill_bio(bio);
+
+			break;
+		}
+
+		cond_resched();
+	}
+#else
+	struct bio_vec *bvec;
+	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
+
+
+	rq_for_each_segment(bvec, rq, iter) {
+		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
+		len = vfs_iter_read(pxd->file, &i, &pos, 0);
+		if (len < 0)
+			return len;
+
+		*/
+		len = _pxd_read(pxd_dev, bvec, &pos);
+
+		flush_dcache_page(bvec->bv_page);
+		if (len != bvec->bv_len) {
+			struct bio *bio;
+
+			__rq_for_each_bio(bio, rq)
+				zero_fill_bio(bio);
+
+			break;
+		}
+
+		cond_resched();
+	}
+#endif
+
+	pxd_printk("do_pxd_read pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
+	if (len < 0) return len;
+	return 0;
+
+}
+
+static
+void pxd_rw_aio_do_completion(struct pxd_mq_rqcmd *cmd) {
+	if (!atomic_dec_and_test(&cmd->ref))
+		return;
+
+	kfree(cmd->bvec);
+	cmd->bvec = NULL;
+	blk_mq_complete_request(cmd->rq);
+}
+
+static 
+void pxd_rw_aio_complete(struct kiocb *iocb, long ret, long ret2)
+{
+	struct pxd_mq_rqcmd *cmd = container_of(iocb, struct pxd_mq_rqcmd, iocb);
+
+	if (cmd->css) css_put(cmd->css);
+
+	cmd->ret = ret;
+	pxd_rw_aio_do_completion(cmd);
+}
+
+static inline int pxd_rw_aio(struct pxd_device *pxd_dev, 
+		struct pxd_mq_rqcmd *cmd, loff_t pos, bool rw) {
+	struct iov_iter iter;
+	struct bio_vec *bvec;
+	struct request *rq = cmd->rq;
+	struct bio *bio = rq->bio;
+	struct file *file = pxd_dev->file;
+	unsigned int offset;
+	int segments = 0;
+	int ret;
+
+	if (rq->bio != rq->biotail) {
+		struct req_iterator iter;
+		struct bio_vec tmp;
+
+		__rq_for_each_bio(bio, rq)
+			segments += bio_segments(bio);
+
+		bvec = kmalloc(sizeof(struct bio_vec) * segments, GFP_NOIO);
+		if (!bvec)
+			return -EIO;
+		cmd->bvec = bvec;
+
+        /*
+         * The bios of the request may be started from the middle of
+         * the 'bvec' because of bio splitting, so we can't directly
+         * copy bio->bi_iov_vec to new bvec. The rq_for_each_segment
+         * API will take care of all details for us.
+         */
+        rq_for_each_segment(tmp, rq, iter) {
+            *bvec = tmp;
+            bvec++;
+        }
+        bvec = cmd->bvec;
+        offset = 0;
+	} else {
+        /*
+         * Same here, this bio may be started from the middle of the
+         * 'bvec' because of bio splitting, so offset from the bvec
+         * must be passed to iov iterator
+         */
+        offset = bio->bi_iter.bi_bvec_done;
+        bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
+        segments = bio_segments(bio);
+    }
+    atomic_set(&cmd->ref, 2);
+
+	iov_iter_bvec(&iter, ITER_BVEC | rw, bvec,
+              segments, blk_rq_bytes(rq));
+    iter.iov_offset = offset;
+
+	cmd->iocb.ki_pos = pos;
+	cmd->iocb.ki_filp = file;
+    cmd->iocb.ki_complete = pxd_rw_aio_complete;
+    cmd->iocb.ki_flags = IOCB_DIRECT;
+    if (cmd->css)
+        kthread_associate_blkcg(cmd->css);
+
+    if (rw == WRITE)
+        ret = call_write_iter(file, &cmd->iocb, &iter);
+    else
+        ret = call_read_iter(file, &cmd->iocb, &iter);
+
+    pxd_rw_aio_do_completion(cmd);
+    kthread_associate_blkcg(NULL);
+
+    if (ret != -EIOCBQUEUED)
+        cmd->iocb.ki_complete(&cmd->iocb, ret, 0);
+    return 0;
+}
+
 
 static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
 	if (!enable) {
@@ -249,121 +614,9 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {
 }
 
 
+
+
 #ifndef USE_REQUEST_QUEUE
-static ssize_t
-do_pxd_receive(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t pos)
-{
-        return _pxd_read(pxd_dev, bvec, &pos);
-}
-
-static int
-pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos)
-{
-	ssize_t s;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-#else
-	struct bio_vec *bvec;
-	int i;
-#endif
-
-	pxd_printk("pxd_receive[%llu] with bio=%p, pos=%llu\n",
-				pxd_dev->dev_id, bio, pos);
-	bio_for_each_segment(bvec, bio, i) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-		s = do_pxd_receive(pxd_dev, &bvec, pos);
-		if (s < 0) return s;
-
-		if (s != bvec.bv_len) {
-			zero_fill_bio(bio);
-			break;
-		}
-		pos += bvec.bv_len;
-#else
-		s = do_pxd_receive(pxd_dev, bvec, pos);
-		if (s < 0) return s;
-
-		if (s != bvec->bv_len) {
-			zero_fill_bio(bio);
-			break;
-		}
-		pos += bvec->bv_len;
-#endif
-	}
-	return 0;
-}
-
-static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
-	int ret = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-#else
-	struct bio_vec *bvec;
-	int i;
-#endif
-
-	//bio_request_contiguous(bio);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	bio_for_each_segment(bvec, bio, i) {
-		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#else
-	bio_for_each_segment(bvec, bio, i) {
-		ret = _pxd_write(pxd_dev->file, bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#endif
-	return 0;
-}
-
-static int _pxd_flush(struct pxd_device *pxd_dev) {
-	int ret;
-	struct file *file = pxd_dev->file;
-	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
-	ret = vfs_fsync(file, 0);
-	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
-	if (unlikely(ret && ret != -EINVAL)) {
-		ret = -EIO;
-	}
-	return ret;
-}
-
-static int _pxd_discard(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
-	struct file *file = pxd_dev->file;
-	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-	int ret;
-
-	pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->device_path);
-	if ((!file->f_op->fallocate)) {
-		return -EOPNOTSUPP;
-	}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	ret = file->f_op->fallocate(file, mode, pos, bio->bi_iter.bi_size);
-#else
-	ret = file->f_op->fallocate(file, mode, pos, bio->bi_size);
-#endif
-	pxd_printk("discard [%s] (REQ_DISCARD) done...\n", pxd_dev->device_path);
-	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-		ret = -EIO;
-
-	return ret;
-}
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 {
@@ -404,7 +657,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 		return _pxd_flush(pxd_dev);
 	case REQ_OP_DISCARD:
 	case REQ_OP_WRITE_ZEROES:
-		return _pxd_discard(pxd_dev, bio, pos);
+		return _pxd_bio_discard(pxd_dev, bio, pos);
 	default:
 		WARN_ON_ONCE(1);
 		return -EIO;
@@ -454,7 +707,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 #else
 		if (bio->bi_rw & REQ_DISCARD) {
 #endif
-			ret = _pxd_discard(pxd_dev, bio, pos);
+			ret = _pxd_bio_discard(pxd_dev, bio, pos);
 			goto out;
 		}
 		ret = do_pxd_send(pxd_dev, bio, pos);
@@ -565,7 +818,7 @@ static void cleanupBIO(struct pxd_device *pxd_dev) {
 }
 
 
-#else /* USE_REQUEST_QUEUE */
+#elif  LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0) /* USE_REQUEST_QUEUE */
 
 static
 int do_pxd_flush(struct pxd_device *pxd_dev, struct request *rq) {
@@ -582,143 +835,16 @@ int do_pxd_flush(struct pxd_device *pxd_dev, struct request *rq) {
 	return ret;
 }
 
-static
-int do_pxd_discard(struct pxd_device *pxd_dev, struct request *rq) {
-	struct file *file = pxd_dev->file;
-	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-	int ret;
-	loff_t pos = blk_rq_pos(rq);
-
-	pxd_printk("do_pxd_discard %llu pos %lld, bytes %u\n",
-			pxd_dev->dev_id, pos, blk_rq_bytes(rq));
-	if (!file->f_op->fallocate) {
-		return -EOPNOTSUPP;
-	}
-	ret = file->f_op->fallocate(file, mode, pos, blk_rq_bytes(rq));
-	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP)) {
-		ret = -EIO;
-	}
-	return ret;
-}
 
 static void pxd_end_request(struct request *rq, int err)
 {
 	blk_end_request_all(rq, err);
 }
 
-static
-int do_pxd_read(struct pxd_device *pxd_dev, struct request *rq) {
-	struct req_iterator iter;
-	ssize_t len = 0;
-	loff_t pos = blk_rq_pos(rq) << SECTOR_SHIFT;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-
-	rq_for_each_segment(bvec, rq, iter) {
-		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
-		len = vfs_iter_read(pxd->file, &i, &pos, 0);
-		if (len < 0)
-			return len;
-
-		*/
-		len = _pxd_read(pxd_dev, &bvec, &pos);
-
-		flush_dcache_page(bvec.bv_page);
-		if (len != bvec.bv_len) {
-			struct bio *bio;
-
-			__rq_for_each_bio(bio, rq)
-				zero_fill_bio(bio);
-
-			break;
-		}
-
-		cond_resched();
-	}
-#else
-	struct bio_vec *bvec;
-	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-
-
-	rq_for_each_segment(bvec, rq, iter) {
-		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
-		len = vfs_iter_read(pxd->file, &i, &pos, 0);
-		if (len < 0)
-			return len;
-
-		*/
-		len = _pxd_read(pxd_dev, bvec, &pos);
-
-		flush_dcache_page(bvec->bv_page);
-		if (len != bvec->bv_len) {
-			struct bio *bio;
-
-			__rq_for_each_bio(bio, rq)
-				zero_fill_bio(bio);
-
-			break;
-		}
-
-		cond_resched();
-	}
-#endif
-
-	pxd_printk("do_pxd_read pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
-	if (len < 0) return len;
-	return 0;
-
-}
-
-static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq) {
-	struct req_iterator iter;
-	loff_t pos = blk_rq_pos(rq) << SECTOR_SHIFT;
-	int ret = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-
-	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-	rq_for_each_segment(bvec, rq, iter) {
-		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
-		len = vfs_iter_read(pxd->lo_backing_file, &i, &pos, 0);
-		if (len < 0)
-			return len;
-		*/
-		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#else
-	struct bio_vec *bvec;
-
-	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-	rq_for_each_segment(bvec, rq, iter) {
-		/*iov_iter_bvec(&i, READ, &bvec, 1, bvec.bv_len);
-		len = vfs_iter_read(pxd->lo_backing_file, &i, &pos, 0);
-		if (len < 0)
-			return len;
-		*/
-		ret = _pxd_write(pxd_dev->file, bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#endif
-	pxd_printk("do_pxd_write pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
-	return 0;
-}
-
 static inline void pxd_handle_req(struct thread_context *tc, struct request *req, bool shouldClose)
 {
+	loff_t pos = ((loff_t) blk_rq_pos(req) << 9) + tc->pxd_dev->offset;
+
         int ret = 0;
 	if (shouldClose) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
@@ -731,21 +857,21 @@ static inline void pxd_handle_req(struct thread_context *tc, struct request *req
         if (req->cmd_flags & REQ_FLUSH) {
                 /* do flush */
                 pxd_printk("do flush... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                ret = do_pxd_flush(tc->pxd_dev, req);
+                ret = _pxd_flush(tc->pxd_dev);
         } else if (rq_data_dir(req) == WRITE) {
                 if ((req->cmd_flags & REQ_DISCARD)) {
                         /* handle discard */
                         pxd_printk("do discard... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                        ret=do_pxd_discard(tc->pxd_dev,req);
+                        ret=_pxd_req_discard(tc->pxd_dev,req, pos);
                 } else {
                         /* handle write */
                         pxd_printk("do write... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                        ret=do_pxd_write(tc->pxd_dev,req);
+                        ret=do_pxd_write(tc->pxd_dev,req, pos);
                 }
         } else {
                 /* handle read */
                 pxd_printk("do read... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-                ret=do_pxd_read(tc->pxd_dev, req);
+                ret=do_pxd_read(tc->pxd_dev, req, pos);
         }
 
         pxd_end_request(req, ret);
@@ -804,7 +930,7 @@ static int initReqQ(struct pxd_device *pxd_dev) {
 		spin_lock_init(&tc->lock);
 		init_waitqueue_head(&tc->pxd_event);
 		INIT_LIST_HEAD(&tc->waiting_queue);
-		tc->pxd_thread = kthread_create(pxd_io_thread, tc, "pxd%d:%llu",
+		tc->pxd_thread = kthread_create(pxd_io_thread, tc, "pxdold%d:%llu",
 			i, pxd_dev->dev_id);
 		if (IS_ERR(tc->pxd_thread)) {
 			pxd_printk("Init kthread for device %llu failed %lu\n",
@@ -823,6 +949,28 @@ static void cleanupReqQ(struct pxd_device *pxd_dev) {
 		struct thread_context *tc = &pxd_dev->tc[i];
 		kthread_stop(tc->pxd_thread);
 	}
+}
+
+#else
+static int pxd_kthread_worker_fn(void *worker_ptr)
+{
+    current->flags |= PF_LESS_THROTTLE;
+    return kthread_worker_fn(worker_ptr);
+}
+
+static int initReqQ(struct pxd_device *pxd_dev) {
+	kthread_init_worker(&pxd_dev->worker);
+	pxd_dev->worker_task = kthread_run(pxd_kthread_worker_fn,
+			&pxd_dev->worker, "pxd%d", pxd_dev->minor);
+	if (IS_ERR(pxd_dev->worker_task))
+		return -ENOMEM;
+	set_user_nice(pxd_dev->worker_task, MIN_NICE);
+	return 0;
+}
+
+static void cleanupReqQ(struct pxd_device *pxd_dev) {
+	kthread_flush_worker(&pxd_dev->worker);
+	kthread_stop(pxd_dev->worker_task);
 }
 
 #endif
@@ -952,7 +1100,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 
 /***********************/
 /***********************/
@@ -1063,7 +1211,7 @@ static int refreshFsPath(struct pxd_device *pxd_dev, bool force) {
 		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
 #endif
 
-		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
+		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
 				pxd_dev->dev_id, newPath, PTR_ERR(f));
@@ -1240,7 +1388,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 #endif
 #endif
 
-static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
+static inline void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
 	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
 			__func__, req, req->in.h.unique,
@@ -1279,7 +1427,7 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	pxd_request_complete(fc, req);
 }
 
-static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
+static inline struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 {
 	int eintr = 0;
 	struct fuse_req *req = NULL;
@@ -1384,7 +1532,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static inline void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
 			uint64_t reqctr)
 {
@@ -1438,6 +1586,134 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 
 #ifdef USE_REQUEST_QUEUE
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+static int do_req_filebacked(struct pxd_device *pxd_dev, struct request *rq)
+{
+    struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(rq);
+    loff_t pos = ((loff_t) blk_rq_pos(rq) << 9) + pxd_dev->offset;
+
+    /*
+     * lo_write_simple and lo_read_simple should have been covered
+     * by io submit style function like lo_rw_aio(), one blocker
+     * is that lo_read_simple() need to call flush_dcache_page after
+     * the page is written from kernel, and it isn't easy to handle
+     * this in io submit style function which submits all segments
+     * of the req at one time. And direct read IO doesn't need to
+     * run flush_dcache_page().
+     */
+    switch (req_op(rq)) {
+    case REQ_OP_FLUSH:
+        return _pxd_flush(pxd_dev);
+    case REQ_OP_DISCARD:
+    case REQ_OP_WRITE_ZEROES:
+        return _pxd_req_discard(pxd_dev,rq,pos);
+    case REQ_OP_WRITE:
+        if (cmd->use_aio)
+            return pxd_rw_aio(pxd_dev, cmd, pos, WRITE);
+        return do_pxd_write(pxd_dev, rq, pos);
+    case REQ_OP_READ:
+        if (cmd->use_aio)
+            return pxd_rw_aio(pxd_dev, cmd, pos, READ);
+        return do_pxd_read(pxd_dev, rq, pos);
+    default:
+        WARN_ON_ONCE(1);
+        return -EIO;
+        break;
+    }
+}
+
+static void pxd_handle_cmd(struct pxd_mq_rqcmd *cmd)
+{
+    struct pxd_device *pxd_dev = cmd->rq->q->queuedata;
+    int ret = 0;
+
+#if 0
+    const bool write = op_is_write(req_op(cmd->rq));
+    if (write && (lo->lo_flags & LO_FLAGS_READ_ONLY)) {
+        ret = -EIO;
+        goto failed;
+    }
+#endif
+
+    ret = do_req_filebacked(pxd_dev, cmd->rq);
+// failed:
+    /* complete non-aio request */
+    if (!cmd->use_aio || ret) {
+        cmd->ret = ret ? -EIO : 0;
+        blk_mq_complete_request(cmd->rq);
+    }
+}
+
+static void pxd_queue_work(struct kthread_work *work)
+{
+    struct pxd_mq_rqcmd *cmd =
+        container_of(work, struct pxd_mq_rqcmd, work);
+
+    pxd_handle_cmd(cmd);
+}
+
+static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
+        const struct blk_mq_queue_data *bd)
+{
+	struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(bd->rq);
+	struct pxd_device *pxd_dev = cmd->rq->q->queuedata;
+
+	blk_mq_start_request(bd->rq);
+
+	switch (req_op(cmd->rq)) {
+	case REQ_OP_FLUSH:
+	case REQ_OP_DISCARD:
+	case REQ_OP_WRITE_ZEROES:
+		cmd->use_aio = false;
+		break;
+	default:
+		cmd->use_aio = true;
+	}
+
+	cmd->css = NULL;
+#ifdef CONFIG_BLK_CGROUP
+	if (cmd->use_aio && cmd->rq->bio && cmd->rq->bio->bi_css) {
+		cmd->css = cmd->rq->bio->bi_css;
+		css_get(cmd->css);
+	}
+#endif
+
+	kthread_queue_work(&pxd_dev->worker, &cmd->work);
+	return BLK_STS_OK;
+}
+
+static int pxd_init_request(struct blk_mq_tag_set *set, struct request *rq,
+	unsigned int hctx_idx, unsigned int numa_node)
+{
+	struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(rq);
+
+	cmd->rq = rq;
+	kthread_init_work(&cmd->work, pxd_queue_work);
+
+	return 0;
+}
+
+static void pxd_complete_rq(struct request *rq)
+{
+    struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(rq);
+
+    if (unlikely(req_op(cmd->rq) == REQ_OP_READ &&
+             cmd->ret >= 0 && cmd->ret < blk_rq_bytes(cmd->rq))) {
+        struct bio *bio = cmd->rq->bio;
+
+        bio_advance(bio, cmd->ret);
+        zero_fill_bio(bio);
+    }
+
+    blk_mq_end_request(rq, cmd->ret < 0 ? BLK_STS_IOERR : BLK_STS_OK);
+}
+
+static const struct blk_mq_ops pxd_mq_ops = {
+	.queue_rq = pxd_queue_rq,
+	.init_request = pxd_init_request,
+	.complete = pxd_complete_rq,
+};
+#else
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -1496,6 +1772,7 @@ static void pxd_rq_fn(struct request_queue *q)
 	}
 }
 #endif
+#endif
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
@@ -1516,10 +1793,33 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		blk_queue_make_request(q, pxd_make_request);
 	//} else {
 #else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	{
+		int err;
+		pxd_dev->tag_set.ops = &pxd_mq_ops;
+		pxd_dev->tag_set.nr_hw_queues = 1;
+		pxd_dev->tag_set.queue_depth = 128;
+		pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
+		pxd_dev->tag_set.cmd_size = sizeof(struct pxd_mq_rqcmd);
+		pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_SG_MERGE;
+		pxd_dev->tag_set.driver_data = pxd_dev;
+
+		err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
+		if (err)
+			goto out_disk;
+
+		q = blk_mq_init_queue(&pxd_dev->tag_set);
+		if (IS_ERR_OR_NULL(q)) {
+			err = PTR_ERR(q);
+			goto out_disk;
+		}
+	}
+#else
 		q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 		if (!q)
 			goto out_disk;
 	//}
+#endif
 #endif
 
 	/* Create gendisk info. */
@@ -1570,6 +1870,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	return 0;
 freeq:
 	blk_cleanup_queue(q);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
+	blk_mq_free_tag_set(&pxd_dev->tag_set);
+#endif
 
 out_disk:
 	return -ENOMEM;
