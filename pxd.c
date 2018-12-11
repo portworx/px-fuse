@@ -170,7 +170,7 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	bw = __kernel_write(pxd_dev->file, kaddr, bvec->bv_len, pos);
+	bw = __kernel_write(file, kaddr, bvec->bv_len, pos);
 #else
 	{
 		mm_segment_t old_fs = get_fs();
