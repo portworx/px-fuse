@@ -44,12 +44,13 @@
 #include <pxd_trace.h>
 #undef CREATE_TRACE_POINTS
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+#include <linux/blk-mq.h>
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+#include <linux/blk-mq.h>
 #define blk_status_t int
 #define BLK_STS_OK		(0)
 #define BLK_STS_IOERR		(10)
-#else
-#include <linux/blk-mq.h>
 #endif
 
 #include "pxd_compat.h"
