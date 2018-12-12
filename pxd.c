@@ -30,7 +30,7 @@
 //
 
 // uses blk-mq request model for >=4.12+ kernels if enabled.
-//#define USE_REQUEST_QUEUE
+#define USE_REQUEST_QUEUE
 
 #define MAX_THREADS (32)
 #define WRITEMULTITHREAD  (false)
@@ -651,7 +651,7 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {
 
 
 #ifndef USE_REQUEST_QUEUE
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
@@ -662,7 +662,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->ncount));
-	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9) + pxd_dev->offset;
 
 	switch (op) {
 	case REQ_OP_READ:
@@ -706,9 +706,13 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->ncount));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9) + pxd_dev->offset;
+#else
 	pos = ((loff_t) bio->bi_sector << 9) + pxd_dev->offset;
+#endif
 
-	if (bio_rw(bio) == WRITE) {
+	if (bio_data_dir(bio) == WRITE) {
 		if (bio->bi_rw & REQ_FLUSH) {
 			ret = _pxd_flush(pxd_dev);
 			if (ret < 0) goto out;
@@ -893,7 +897,7 @@ static inline void pxd_handle_req(struct thread_context *tc, struct request *req
 	if (req->cmd_flags & REQ_FLUSH) {
 		/* do flush */
 		pxd_printk("do flush... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
-		ret = do_pxd_flush(tc->pxd_dev);
+		ret = _pxd_flush(tc->pxd_dev);
 	} else if (rq_data_dir(req) == WRITE) {
 		if ((req->cmd_flags & REQ_DISCARD)) {
 			/* handle discard */
@@ -905,7 +909,7 @@ static inline void pxd_handle_req(struct thread_context *tc, struct request *req
 			ret=do_pxd_write(tc->pxd_dev,req,pos);
 			shouldFlush = ((atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH));
 			if (((req->cmd_flags & REQ_FUA) && !ret) || shouldFlush)  {
-				ret = do_pxd_flush(tc->pxd_dev);
+				ret = _pxd_flush(tc->pxd_dev);
 			}
 		}
 	} else {
@@ -1166,24 +1170,21 @@ void pxd_rq_fn_kernel(struct pxd_device *pxd_dev, struct request_queue *q, struc
 	tc = &pxd_dev->tc[thread];
 
 
-	sect_num = blk_rq_pos(rq);
+	sect_num = blk_rq_pos(req);
 	/* deal whole segments */
-	sect_cnt = blk_rq_sectors(rq);
+	sect_cnt = blk_rq_sectors(req);
 
 	pxd_printk("pxd_rq_fn_kernel device %llu, sector %llu, count %llu, cmd_type %d, dir %d\n",
-			pxd_dev->dev_id, sect_num, sect_cnt, rq->cmd_type, rq_data_dir(rq));
+			pxd_dev->dev_id, sect_num, sect_cnt, req->cmd_type, req_data_dir(req));
 
-	if (unlikely(rq->cmd_type != REQ_TYPE_FS)) {
+	if (unlikely(req->cmd_type != REQ_TYPE_FS)) {
 		printk(KERN_ERR"%s: bad access: cmd_type %x not fs\n",
-			rq->rq_disk->disk_name, rq->cmd_type);
-		__blk_end_request_all(rq, -EIO);
+			req->rq_disk->disk_name, req->cmd_type);
+		__blk_end_request_all(req, -EIO);
 		return;
 	}
 
-	spin_lock_irq(&tc->lock);
-	pxd_add_rq(tc, rq);
-	spin_unlock_irq(&tc->lock);
-
+	pxd_add_rq(tc, req);
 	wake_up(&tc->pxd_event);
 }
 
@@ -1791,7 +1792,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		if (!atomic_read(&pxd_dev->connected)) {
 			printk(KERN_ERR"px is disconnected, failing IO.\n");
 			__blk_end_request_all(rq, -ENXIO);
-			return BLK_QC_RETVAL;
+			return;
 		}
 
 		spin_unlock_irq(&pxd_dev->qlock);
