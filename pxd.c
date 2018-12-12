@@ -30,7 +30,7 @@
 //
 
 // uses blk-mq request model for >=4.12+ kernels if enabled.
-#define USE_REQUEST_QUEUE
+//#define USE_REQUEST_QUEUE
 
 #define MAX_THREADS (32)
 #define WRITEMULTITHREAD  (false)
