@@ -30,10 +30,12 @@
 //
 
 // uses blk-mq request model for >=4.12+ kernels if enabled.
+// This path is good
 //#define USE_REQUEST_QUEUE
 
-#define MAX_THREADS (32)
-#define WRITEMULTITHREAD  (false)
+//#define USE_DIO -- experimental do not enable
+
+#define MAX_THREADS (nr_cpu_ids)
 
 //#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
 //
@@ -108,6 +110,8 @@ module_param(pxd_num_contexts, uint, 0644);
 
 struct pxd_device;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
+static char *mode = "blk-mq";
+#define DRIVER_MODE_BLKMQ
 struct pxd_mq_rqcmd {
     struct kthread_work work;
     struct request *rq;
@@ -120,18 +124,23 @@ struct pxd_mq_rqcmd {
     struct cgroup_subsys_state *css;
 #endif
 };
-#else
+#elif defined(USE_REQUEST_QUEUE)
+static char *mode = "blk-rq";
 struct thread_context {
 	struct pxd_device  *pxd_dev;
 	struct task_struct *pxd_thread;
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
-#ifdef USE_REQUEST_QUEUE
-	unsigned int     rq_count;
 	struct list_head waiting_queue;
+};
 #else
+static char *mode = "blk-bio";
+struct thread_context {
+	struct pxd_device  *pxd_dev;
+	struct task_struct *pxd_thread;
+	wait_queue_head_t   pxd_event;
+	spinlock_t  		lock;
 	struct bio_list  bio_list;
-#endif
 };
 #endif
 
@@ -154,18 +163,23 @@ struct pxd_device {
 	bool     block_device;
 	struct file * file;
 	loff_t offset; // offset into the backing device/file
+	int bg_flush_enabled; // dynamically enable bg flush from driver
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
 	struct blk_mq_tag_set   tag_set;
 	struct kthread_worker   worker;
 	struct task_struct  *worker_task;
 #else
-	struct thread_context tc[MAX_THREADS];
+	struct thread_context *tc;
 #endif
 	wait_queue_head_t   congestion_wait;
-	atomic_t index;
-	atomic_t connected;
-	atomic_t ncount;
-	atomic_t write_counter;
+	wait_queue_head_t   sync_event;
+	spinlock_t   	sync_lock;
+	atomic_t sync_active; // currently active?
+	atomic_t nsync; // number of forced syncs completed
+	atomic_t ncount; // total active requests
+	atomic_t ncomplete; // total completed requests
+	atomic_t write_counter; // completed writes, gets cleared on a threshold
+	volatile bool connected; // fc connected status
 	struct pxd_context *ctx;
 };
 
@@ -205,12 +219,54 @@ static int _pxd_flush(struct pxd_device *pxd_dev) {
 	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) call...\n", pxd_dev->device_path);
 	ret = vfs_fsync(file, 0);
 	pxd_printk("vfs_fsync[%s] (REQ_FLUSH) done...\n", pxd_dev->device_path);
+	atomic_set(&pxd_dev->write_counter, 0);
 	if (unlikely(ret && ret != -EINVAL)) {
 		ret = -EIO;
 	}
-	atomic_set(&pxd_dev->write_counter, 0);
 	return ret;
 }
+
+static int pxd_should_flush(struct pxd_device *pxd_dev, int *active) {
+	*active = atomic_read(&pxd_dev->sync_active);
+	if (pxd_dev->bg_flush_enabled &&
+		(atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH) &&
+		!*active) {
+		atomic_set(&pxd_dev->sync_active, 1);
+		return 1;
+	}
+	return 0;
+}
+
+static void pxd_issue_sync(struct pxd_device *pxd_dev) {
+	struct block_device *bdev = bdget_disk(pxd_dev->disk, 0);
+	if (!bdev) return;
+
+	vfs_fsync(pxd_dev->file, 0);
+
+	spin_lock_irq(&pxd_dev->sync_lock);
+	atomic_set(&pxd_dev->write_counter, 0);
+	atomic_set(&pxd_dev->sync_active, 0);
+	atomic_inc(&pxd_dev->nsync);
+	spin_unlock_irq(&pxd_dev->sync_lock);
+
+	wake_up(&pxd_dev->sync_event);
+}
+
+static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev) {
+	int sync_wait, sync_now;
+	spin_lock_irq(&pxd_dev->sync_lock);
+	sync_now = pxd_should_flush(pxd_dev, &sync_wait);
+
+	if (sync_wait) {
+		wait_event_lock_irq(pxd_dev->sync_event,
+				!atomic_read(&pxd_dev->sync_active),
+				pxd_dev->sync_lock);
+	}
+	spin_unlock_irq(&pxd_dev->sync_lock);
+
+	if (sync_now) pxd_issue_sync(pxd_dev);
+}
+
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
 	/* Shall use block mq request mechanism */
@@ -266,21 +322,21 @@ static int pxd_rw_aio(struct pxd_device *pxd_dev,
          * copy bio->bi_iov_vec to new bvec. The rq_for_each_segment
          * API will take care of all details for us.
          */
-        rq_for_each_segment(tmp, rq, iter) {
-            *bvec = tmp;
-            bvec++;
-        }
-        bvec = cmd->bvec;
-        offset = 0;
+		rq_for_each_segment(tmp, rq, iter) {
+			*bvec = tmp;
+			bvec++;
+		}
+		bvec = cmd->bvec;
+		offset = 0;
 	} else {
         /*
          * Same here, this bio may be started from the middle of the
          * 'bvec' because of bio splitting, so offset from the bvec
          * must be passed to iov iterator
          */
-        offset = bio->bi_iter.bi_bvec_done;
-        bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
-        segments = bio_segments(bio);
+		offset = bio->bi_iter.bi_bvec_done;
+		bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
+		segments = bio_segments(bio);
     }
 
     atomic_set(&cmd->ref, 2);
@@ -298,14 +354,14 @@ static int pxd_rw_aio(struct pxd_device *pxd_dev,
         kthread_associate_blkcg(cmd->css);
 #endif
 
-    if (rw == WRITE) {
+	if (rw == WRITE) {
 		atomic_add(segments, &pxd_dev->write_counter);
-        ret = call_write_iter(file, &cmd->iocb, &iter);
+		ret = call_write_iter(file, &cmd->iocb, &iter);
 	} else {
-        ret = call_read_iter(file, &cmd->iocb, &iter);
+		ret = call_read_iter(file, &cmd->iocb, &iter);
 	}
 
-    pxd_rw_aio_do_completion(cmd);
+	pxd_rw_aio_do_completion(cmd);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
     kthread_associate_blkcg(NULL);
 #endif
@@ -524,6 +580,8 @@ static ssize_t do_pxd_read(struct pxd_device *pxd_dev, struct request *rq, loff_
 	rq_for_each_segment(bvec, rq, iter) {
 		len = _pxd_read(pxd_dev, &bvec, &pos);
 
+		if (len < 0) return len;
+
 		flush_dcache_page(bvec.bv_page);
 		if (len != bvec.bv_len) {
 			struct bio *bio;
@@ -611,7 +669,7 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t p
 static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
 	if (!enable) {
 		printk(KERN_ERR "_pxd_setup called to disable IO\n");
-		atomic_set(&pxd_dev->connected, false /* false==>io-disabled */);
+		pxd_dev->connected = false;
 	} else {
 		printk(KERN_ERR "_pxd_setup called to enable IO\n");
 	}
@@ -636,7 +694,7 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
 	spin_unlock_irq(&pxd_dev->qlock);
 #endif
 
-	if (enable) atomic_set(&pxd_dev->connected, true /* false==>io-disabled */);
+	if (enable) pxd_dev->connected = true;
 }
 
 static void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {
@@ -659,7 +717,6 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	loff_t pos;
 	unsigned int op = bio_op(bio);
 	int ret;
-	bool shouldFlush = false;
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->ncount));
@@ -675,11 +732,13 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 			if (ret < 0) return ret;
 		}
 
+		/* Before any newer writes happen, make sure previous write/sync complete */
+		pxd_check_write_cache_flush(pxd_dev);
+
 		ret = do_pxd_send(pxd_dev, bio, pos);
 		if (ret < 0) return ret;
 
-		shouldFlush = ((atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH));
-		if ((bio->bi_opf & REQ_FUA) || shouldFlush) {
+		if (bio->bi_opf & REQ_FUA) {
 			ret = _pxd_flush(pxd_dev);
 			if (ret < 0) return ret;
 		}
@@ -703,7 +762,6 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	struct pxd_device *pxd_dev = tc->pxd_dev;
 	loff_t pos;
 	int ret;
-	bool shouldFlush = false;
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->ncount));
@@ -729,12 +787,15 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 			ret = _pxd_bio_discard(pxd_dev, bio, pos);
 			goto out;
 		}
+		/* Before any newer writes happen, make sure previous write/sync complete */
+		pxd_check_write_cache_flush(pxd_dev);
 		ret = do_pxd_send(pxd_dev, bio, pos);
 
-		shouldFlush = ((atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH));
-		if (((bio->bi_rw & REQ_FUA) && !ret) || shouldFlush) {
+		if ((bio->bi_rw & REQ_FUA) && !ret) {
 			ret = _pxd_flush(pxd_dev);
+			if (ret < 0) goto out;
 		}
+
 	} else {
 		ret = pxd_receive(pxd_dev, bio, pos);
 	}
@@ -759,6 +820,8 @@ static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio, bo
 		bio_io_error(bio);
 		return;
 	}
+
+	atomic_inc(&tc->pxd_dev->ncomplete);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 	bio_endio(bio);
 #else
@@ -778,8 +841,8 @@ static struct bio* pxd_get_bio(struct thread_context *tc, bool *shouldClose) {
 	struct bio* bio;
 	atomic_dec(&tc->pxd_dev->ncount);
 
-	*shouldClose = (atomic_read(&tc->pxd_dev->connected) == 0);
 	spin_lock_irq(&tc->lock);
+	*shouldClose = !tc->pxd_dev->connected;
 	bio=bio_list_pop(&tc->bio_list);
 	spin_unlock_irq(&tc->lock);
 
@@ -804,10 +867,11 @@ static int pxd_io_thread(void *data) {
 		bio = pxd_get_bio(tc, &shouldClose);
 		BUG_ON(!bio);
 
+		spin_lock_irq(&tc->pxd_dev->dlock);
 		if (atomic_read(&tc->pxd_dev->ncount) < tc->pxd_dev->disk->queue->nr_congestion_off) {
-			//printk(KERN_ERR"congestion cleared\n");
 			wake_up(&tc->pxd_dev->congestion_wait);
 		}
+		spin_unlock_irq(&tc->pxd_dev->dlock);
 
 		pxd_handle_bio(tc, bio, shouldClose);
 	}
@@ -817,24 +881,20 @@ static int pxd_io_thread(void *data) {
 static int initBIO(struct pxd_device *pxd_dev) {
 	int i;
 
-	// congestion init
-	init_waitqueue_head(&pxd_dev->congestion_wait);
-	atomic_set(&pxd_dev->ncount,0);
-	atomic_set(&pxd_dev->write_counter,0);
-
 	for (i=0; i<MAX_THREADS; i++) {
 		struct thread_context *tc = &pxd_dev->tc[i];
 		tc->pxd_dev = pxd_dev;
 		spin_lock_init(&tc->lock);
 		init_waitqueue_head(&tc->pxd_event);
-		tc->pxd_thread = kthread_create(pxd_io_thread, tc, "pxd%d:%llu",
-			i, pxd_dev->dev_id);
+		tc->pxd_thread = kthread_create_on_node(pxd_io_thread, tc, cpu_to_node(i),
+				"pxd%d:%llu", i, pxd_dev->dev_id);
 		if (IS_ERR(tc->pxd_thread)) {
 			pxd_printk("Init kthread for device %llu failed %lu\n",
 				pxd_dev->dev_id, PTR_ERR(tc->pxd_thread));
 			return -EINVAL;
 		}
 
+		kthread_bind(tc->pxd_thread, i);
 		wake_up_process(tc->pxd_thread);
 	}
 	return 0;
@@ -863,7 +923,7 @@ static int pxd_kthread_worker_fn(void *worker_ptr)
 static int initReqQ(struct pxd_device *pxd_dev) {
 	kthread_init_worker(&pxd_dev->worker);
 	pxd_dev->worker_task = kthread_run(pxd_kthread_worker_fn,
-			&pxd_dev->worker, "pxd%d", pxd_dev->minor);
+			&pxd_dev->worker, "pxd:%lld", pxd_dev->dev_id);
 	if (IS_ERR(pxd_dev->worker_task))
 		return -ENOMEM;
 	set_user_nice(pxd_dev->worker_task, MIN_NICE);
@@ -878,6 +938,7 @@ static void cleanupReqQ(struct pxd_device *pxd_dev) {
 #else 
 static void pxd_end_request(struct request *rq, int err)
 {
+	atomic_inc(&tc->pxd_dev->ncomplete);
 	blk_end_request_all(rq, err);
 }
 
@@ -885,7 +946,6 @@ static inline void pxd_handle_req(struct thread_context *tc, struct request *req
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
 	loff_t pos = ((loff_t) blk_rq_pos(req) << 9) + pxd_dev->offset;
-	bool shouldFlush = false;
 	int ret = 0;
 	if (shouldClose) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
@@ -907,9 +967,11 @@ static inline void pxd_handle_req(struct thread_context *tc, struct request *req
 		} else {
 			/* handle write */
 			pxd_printk("do write... sector %lu, bytes %d\n", blk_rq_pos(req), blk_rq_bytes(req));
+			/* Before any newer writes happen, make sure previous write/sync complete */
+			pxd_check_write_cache_flush(pxd_dev);
+
 			ret=do_pxd_write(tc->pxd_dev,req,pos);
-			shouldFlush = ((atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH));
-			if (((req->cmd_flags & REQ_FUA) && !ret) || shouldFlush)  {
+			if ((req->cmd_flags & REQ_FUA) && !ret) {
 				ret = _pxd_flush(tc->pxd_dev);
 			}
 		}
@@ -936,10 +998,10 @@ static void pxd_add_rq(struct thread_context *tc, struct request *rq) {
 static struct request* pxd_get_rq(struct thread_context *tc, bool *shouldClose) {
 	struct request* req;
 
-	*shouldClose = (atomic_read(&tc->pxd_dev->connected) == 0);
 	atomic_dec(&tc->pxd_dev->ncount);
 
 	spin_lock_irq(&tc->lock);
+	*shouldClose = !tc->pxd_dev->connected;
 	req = list_entry(tc->waiting_queue.next, struct request, queuelist);
 	list_del_init(&req->queuelist);
 	spin_unlock_irq(&tc->lock);
@@ -962,15 +1024,16 @@ static int pxd_io_thread(void *data) {
 			continue;
 
 		pxd_printk("pxd_io_thread new req for device %llu, pending %u\n",
-			tc->pxd_dev->dev_id, tc->rq_count);
+			tc->pxd_dev->dev_id, atomic_read(&tc->pxd_dev->ncount));
 
 		req = pxd_get_rq(tc, &shouldClose);
 		BUG_ON(!req);
 
+		spin_lock_irq(&tc->pxd_dev->dlock);
 		if (atomic_read(&tc->pxd_dev->ncount) < tc->pxd_dev->disk->queue->nr_congestion_off) {
-			//printk(KERN_ERR"congestion cleared\n");
 			wake_up(&tc->pxd_dev->congestion_wait);
 		}
+		spin_unlock_irq(&tc->pxd_dev->dlock);
 
 		pxd_handle_req(tc, req, shouldClose);
 	}
@@ -979,27 +1042,23 @@ static int pxd_io_thread(void *data) {
 
 static int initReqQ(struct pxd_device *pxd_dev) {
 	int i;
-	struct thread_context *tc;
-
-    // congestion init
-    init_waitqueue_head(&pxd_dev->congestion_wait);
-    atomic_set(&pxd_dev->ncount,0);
-    atomic_set(&pxd_dev->write_counter,0);
 
 	for (i=0; i<MAX_THREADS; i++) {
-		tc = &pxd_dev->tc[i];
+		struct thread_context *tc = &pxd_dev->tc[i];
 		tc->pxd_dev = pxd_dev;
 		spin_lock_init(&tc->lock);
 		init_waitqueue_head(&tc->pxd_event);
 		INIT_LIST_HEAD(&tc->waiting_queue);
-		tc->pxd_thread = kthread_create(pxd_io_thread, tc, "pxd%d:%llu",
-			i, pxd_dev->dev_id);
+		tc->pxd_thread = kthread_create_on_node(pxd_io_thread, tc,
+				cpu_to_node(i),
+				"pxd%d:%llu", i, pxd_dev->dev_id);
 		if (IS_ERR(tc->pxd_thread)) {
 			pxd_printk("Init kthread for device %llu failed %lu\n",
 				pxd_dev->dev_id, PTR_ERR(tc->pxd_thread));
 			return -EINVAL;
 		}
 
+		kthread_bind(tc->pxd_thread, i);
 		wake_up_process(tc->pxd_thread);
 	}
 	return 0;
@@ -1090,19 +1149,9 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 #else
 	unsigned int rw = bio_rw(bio);
 #endif
-	int thread;
+	int thread = get_cpu() % MAX_THREADS;
 	struct thread_context *tc;
 
-	/* single threaded write performance is better */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
-	if (!WRITEMULTITHREAD && op_is_write(rw)) {
-#else
-	if (!WRITEMULTITHREAD && bio_rw(bio) == WRITE) {
-#endif
-		thread = 0;
-	} else {
-		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
-	}
 	tc = &pxd_dev->tc[thread];
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
@@ -1117,7 +1166,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-	if (!atomic_read(&pxd_dev->connected)) {
+	if (!pxd_dev->connected) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
@@ -1135,11 +1184,16 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
 
 	{ /* add congestion handling */
+		spin_lock_irq(&pxd_dev->dlock);
 		if (atomic_read(&pxd_dev->ncount) >= q->nr_congestion_on) {
-			//printk(KERN_ERR"Hit congestion... wait until clear\n");
-			wait_event_interruptible(pxd_dev->congestion_wait,
-					atomic_read(&pxd_dev->ncount) < q->nr_congestion_off);
+			pxd_printk("Hit congestion... wait until clear\n");
+			wait_event_lock_irq(pxd_dev->congestion_wait,
+				atomic_read(&pxd_dev->ncount) < q->nr_congestion_off,
+				pxd_dev->dlock);
+			pxd_printk("congestion cleared\n");
 		}
+
+		spin_unlock_irq(&pxd_dev->dlock);
 
 	}
 
@@ -1159,18 +1213,10 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 static
 void pxd_rq_fn_kernel(struct pxd_device *pxd_dev, struct request_queue *q, struct request *req) {
 	u64 sect_num, sect_cnt;
-	int thread;
+	int thread = get_cpu() % MAX_THREADS;
 	struct thread_context *tc;
 
-	/* single threaded write performance is better */
-	if (!WRITEMULTITHREAD && rq_data_dir(req) == WRITE) {
-		thread = 0;
-	} else {
-		thread = atomic_inc_return(&pxd_dev->index) % MAX_THREADS;
-	}
 	tc = &pxd_dev->tc[thread];
-
-
 	sect_num = blk_rq_pos(req);
 	/* deal whole segments */
 	sect_cnt = blk_rq_sectors(req);
@@ -1260,7 +1306,11 @@ static int refreshFsPath(struct pxd_device *pxd_dev, bool force) {
 		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
 #endif
 
+#ifdef USE_DIO
+		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+#else
 		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
+#endif
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
 				pxd_dev->dev_id, newPath, PTR_ERR(f));
@@ -1284,8 +1334,26 @@ static int refreshFsPath(struct pxd_device *pxd_dev, bool force) {
 static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	int err;
 
-	atomic_set(&pxd_dev->index, 0);
-	atomic_set(&pxd_dev->connected, 1);
+	printk(KERN_INFO"Number of cpu ids %d\n", MAX_THREADS);
+
+	// congestion init
+	init_waitqueue_head(&pxd_dev->congestion_wait);
+	init_waitqueue_head(&pxd_dev->sync_event);
+	spin_lock_init(&pxd_dev->sync_lock);
+	atomic_set(&pxd_dev->sync_active, 0);
+	atomic_set(&pxd_dev->nsync, 0);
+
+	atomic_set(&pxd_dev->ncount,0);
+	atomic_set(&pxd_dev->ncomplete,0);
+	atomic_set(&pxd_dev->write_counter,0);
+	pxd_dev->connected = 1;
+	pxd_dev->offset = 0;
+	pxd_dev->bg_flush_enabled = true;
+
+#ifndef DRIVER_MODE_BLKMQ
+	pxd_dev->tc = kzalloc(MAX_THREADS * sizeof(struct thread_context), GFP_NOIO);
+	if (!pxd_dev->tc) return -ENOMEM;
+#endif
 
 #ifndef USE_REQUEST_QUEUE
 	err = initBIO(pxd_dev);
@@ -1314,6 +1382,10 @@ static void cleanupBackingFsPath(struct pxd_device *pxd_dev) {
 		filp_close(pxd_dev->file, NULL);
 	}
 	pxd_dev->file = NULL;
+
+#ifndef DRIVER_MODE_BLKMQ
+	if (pxd_dev->tc) kfree(pxd_dev->tc);
+#endif
 }
 
 
@@ -1336,6 +1408,17 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 			pxd_dev->open_count++;
 		spin_unlock(&pxd_dev->dlock);
 
+		{
+			struct file *file = pxd_dev->file;
+			struct inode    *inode;
+			struct address_space *mapping;
+
+			if (file) {
+				mapping = file->f_mapping;
+				inode = mapping->host;
+				set_blocksize(bdev, S_ISBLK(inode->i_mode) ?  block_size(inode->i_bdev) : PAGE_SIZE);
+			}
+		}
 		if (!err)
 			(void)get_device(&pxd_dev->dev);
 	}
@@ -1642,61 +1725,50 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	/* shall use block multiqueue mechanism */
 static int do_req_filebacked(struct pxd_device *pxd_dev, struct request *rq)
 {
-    struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(rq);
-    loff_t pos = ((loff_t) blk_rq_pos(rq) << 9) + pxd_dev->offset;
-	bool shouldClose = (atomic_read(&pxd_dev->connected) == 0);
+	struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(rq);
+	loff_t pos = ((loff_t) blk_rq_pos(rq) << 9) + pxd_dev->offset;
+	bool shouldClose = !pxd_dev->connected;
 
 	if (shouldClose) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		return -ENXIO;
 	}
 
-    switch (req_op(rq)) {
-    case REQ_OP_FLUSH:
-        return _pxd_flush(pxd_dev);
-    case REQ_OP_DISCARD:
-    case REQ_OP_WRITE_ZEROES:
-        return _pxd_req_discard(pxd_dev,rq,pos);
-    case REQ_OP_WRITE:
-        if (cmd->use_aio) {
-            int ret=pxd_rw_aio(pxd_dev, cmd, pos, WRITE);
-			if (!ret && (atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH)) {
-				return _pxd_flush(pxd_dev);	
-			}
-			return ret;
+	switch (req_op(rq)) {
+	case REQ_OP_FLUSH:
+		return _pxd_flush(pxd_dev);
+	case REQ_OP_DISCARD:
+	case REQ_OP_WRITE_ZEROES:
+		return _pxd_req_discard(pxd_dev,rq,pos);
+	case REQ_OP_WRITE:
+		/* Before any newer writes happen, make sure previous write/sync complete */
+		pxd_check_write_cache_flush(pxd_dev);
+		if (cmd->use_aio) {
+			return pxd_rw_aio(pxd_dev, cmd, pos, WRITE);
 		}
-        return do_pxd_write(pxd_dev, rq, pos);
-    case REQ_OP_READ:
-        if (cmd->use_aio)
-            return pxd_rw_aio(pxd_dev, cmd, pos, READ);
-        return do_pxd_read(pxd_dev, rq, pos);
-    default:
-        WARN_ON_ONCE(1);
-        return -EIO;
-        break;
-    }
+		return do_pxd_write(pxd_dev, rq, pos);
+	case REQ_OP_READ:
+		if (cmd->use_aio)
+			return pxd_rw_aio(pxd_dev, cmd, pos, READ);
+		return do_pxd_read(pxd_dev, rq, pos);
+	default:
+		WARN_ON_ONCE(1);
+		return -EIO;
+	}
 }
 
 static void pxd_handle_cmd(struct pxd_mq_rqcmd *cmd)
 {
-    struct pxd_device *pxd_dev = cmd->rq->q->queuedata;
-    int ret = 0;
+	struct pxd_device *pxd_dev = cmd->rq->q->queuedata;
+	int ret = 0;
 
-#if 0
-    const bool write = op_is_write(req_op(cmd->rq));
-    if (write && (lo->lo_flags & LO_FLAGS_READ_ONLY)) {
-        ret = -EIO;
-        goto failed;
-    }
-#endif
-
-    ret = do_req_filebacked(pxd_dev, cmd->rq);
-// failed:
-    /* complete non-aio request */
-    if (!cmd->use_aio || ret) {
-        cmd->ret = ret ? -EIO : 0;
-        blk_mq_complete_request(cmd->rq);
-    }
+	ret = do_req_filebacked(pxd_dev, cmd->rq);
+	/* complete non-aio request */
+	if (!cmd->use_aio || ret) {
+		atomic_inc(&pxd_dev->ncomplete);
+		cmd->ret = ret ? -EIO : 0;
+		blk_mq_complete_request(cmd->rq);
+	}
 }
 
 static void pxd_queue_work(struct kthread_work *work)
@@ -1722,7 +1794,11 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		cmd->use_aio = false;
 		break;
 	default:
+#ifdef USE_DIO
 		cmd->use_aio = true;
+#else
+		cmd->use_aio = false;
+#endif
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
@@ -1754,7 +1830,7 @@ static void pxd_complete_rq(struct request *rq)
 {
     struct pxd_mq_rqcmd *cmd = blk_mq_rq_to_pdu(rq);
 
-    if (unlikely(req_op(cmd->rq) == REQ_OP_READ &&
+    if (unlikely(req_op(cmd->rq) == REQ_OP_READ && cmd->use_aio &&
              cmd->ret >= 0 && cmd->ret < blk_rq_bytes(cmd->rq))) {
         struct bio *bio = cmd->rq->bio;
 
@@ -1790,7 +1866,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		if (!atomic_read(&pxd_dev->connected)) {
+		if (!pxd_dev->connected) {
 			printk(KERN_ERR"px is disconnected, failing IO.\n");
 			__blk_end_request_all(rq, -ENXIO);
 			return;
@@ -1869,6 +1945,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		q = blk_mq_init_queue(&pxd_dev->tag_set);
 		if (IS_ERR_OR_NULL(q)) {
 			err = PTR_ERR(q);
+			blk_mq_free_tag_set(&pxd_dev->tag_set);
 			goto out_disk;
 		}
 	}
@@ -1899,8 +1976,29 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_bounce_limit(q, BLK_BOUNCE_ANY);
 
+	{
+		struct address_space *mapping;
+		gfp_t mapmask;
+		struct inode *inode;
+
+		mapping = pxd_dev->file->f_mapping;
+		inode = mapping->host;
+		mapmask = mapping_gfp_mask(mapping);
+		mapping_set_gfp_mask(mapping, mapmask & ~(__GFP_IO|__GFP_FS));
+
+		if (mapping->a_ops->direct_IO)
+			printk(KERN_INFO"direct IO supported\n");
+
+		printk(KERN_INFO"Backing logical block size %d\n", 
+				bdev_logical_block_size(inode->i_sb->s_bdev));
+
+		if (pxd_dev->file->f_op->fsync)
+			printk(KERN_INFO "backing device supports fsync\n");
+	}
+
 	set_capacity(disk, add->size / SECTOR_SIZE);
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
+	queue_flag_clear_unlocked(QUEUE_FLAG_NOMERGES, q);
 
 	/* Enable discard support. */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
@@ -1931,6 +2029,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	return 0;
 freeq:
 	blk_cleanup_queue(q);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
+	blk_mq_free_tag_set(&pxd_dev->tag_set);
+#endif
 
 out_disk:
 	return -ENOMEM;
@@ -2220,16 +2321,85 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxd_mode_show(struct device *dev,
+		     struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "mode:%s\n", mode);
+}
+
+static ssize_t pxd_active_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "nactive: %u/%u\n", atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncomplete));
+}
+
+static ssize_t pxd_sync_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "sync: %u/%u %s\n",
+			atomic_read(&pxd_dev->sync_active),
+			atomic_read(&pxd_dev->nsync),
+			(pxd_dev->bg_flush_enabled ? "(enabled)" : "(disabled)"));
+}
+ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int enable = 0;
+
+	sscanf(buf, "%d", &enable);
+
+	if (enable) {
+		pxd_dev->bg_flush_enabled = 1;
+	} else {
+		pxd_dev->bg_flush_enabled = 0;
+	}
+
+	return count;
+}
+
+
+static ssize_t pxd_congestion_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	struct request_queue *q = pxd_dev->disk->queue;
+
+	bool congested = atomic_read(&pxd_dev->ncount) >= q->nr_congestion_on;
+	return sprintf(buf, "congested: %d\n", congested);
+}
+
+ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	// debug interface to force wakeup of congestion wait threads 
+	wake_up(&pxd_dev->congestion_wait);
+	return count;
+}
+
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
+static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
+static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
+static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
+static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
 	&dev_attr_major.attr,
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
+	&dev_attr_mode.attr,
+	&dev_attr_active.attr,
+	&dev_attr_sync.attr,
+	&dev_attr_congested.attr,
 	NULL
 };
 
