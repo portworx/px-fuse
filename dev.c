@@ -285,10 +285,9 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 	queue_request(fc, req);
 }
 
-void fuse_wakeup(struct fuse_conn *fc)
+void fuse_timer_wakeup(struct fuse_conn *fc)
 {
-       if (fc->active_background)
-               fuse_conn_wakeup(fc);
+	fuse_conn_wakeup(fc);
 }
 
 static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
@@ -304,7 +303,7 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
 
-		if (fc->active_background >= 32)
+		if (fc->active_background >= fc->accumulate)
 			fuse_conn_wakeup(fc);
 	} else {
 		req->out.h.error = -ENOTCONN;

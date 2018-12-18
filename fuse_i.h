@@ -564,6 +564,9 @@ struct fuse_conn {
 
 	/* Alow operations on disconnected fuse conenction. */
 	int allow_disconnected;
+
+	/* Accumulate requests before signaling */
+	unsigned accumulate;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
@@ -735,8 +738,7 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
  */
 void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req);
 
-
-void fuse_wakeup(struct fuse_conn *fc);
+void fuse_timer_wakeup(struct fuse_conn *fc);
 
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);

@@ -53,6 +53,7 @@ struct pxd_context {
 	struct list_head pending_requests;
 	struct timer_list timer;
 	struct timer_list fc_timer;
+	unsigned long last_enqueued;
 	bool init_sent;
 	uint64_t unique;
 };
@@ -61,10 +62,12 @@ struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
-uint32_t pxd_fc_timeout_secs = 1;
+uint32_t pxd_fc_timeout = 1 * HZ;
+uint32_t pxd_accumulate = 1;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
+module_param(pxd_accumulate, uint, 0644);
 
 struct pxd_device {
 	uint64_t dev_id;
@@ -489,6 +492,8 @@ static void pxd_rq_fn(struct request_queue *q)
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
 		}
+
+		pxd_dev->ctx->last_enqueued = jiffies;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
@@ -1120,6 +1125,21 @@ static void pxd_fuse_conn_release(struct fuse_conn *conn)
 {
 }
 
+static void pxd_wakeup(struct pxd_context *ctx)
+{
+	struct fuse_conn *fc = &ctx->fc;
+	/* No requests arrived within timeout */
+	if (jiffies - ctx->last_enqueued > pxd_fc_timeout) {
+		if (fc->active_background) {
+			fuse_timer_wakeup(fc);
+			fc->accumulate = min(fc->active_background, pxd_accumulate);
+		} else {
+			/* Reset accumulation to default when idle. */
+			fc->accumulate = pxd_accumulate;
+		}
+	}
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 static void pxd_timeout(struct timer_list *args)
 #else
@@ -1143,9 +1163,9 @@ static void pxd_timeout(unsigned long args)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-static void pxd_fc_timeout(struct timer_list *args)
+static void pxd_fc_timeout_fn(struct timer_list *args)
 #else
-static void pxd_fc_timeout(unsigned long args)
+static void pxd_fc_timeout_fn(unsigned long args)
 #endif
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
@@ -1153,17 +1173,16 @@ static void pxd_fc_timeout(unsigned long args)
 #else
 	struct pxd_context *ctx = (struct pxd_context *)args;
 #endif
-	struct fuse_conn *fc = &ctx->fc;
 	BUG_ON(!ctx);
-	fuse_wakeup(fc);
-	mod_timer(&ctx->fc_timer, jiffies + (pxd_fc_timeout_secs * HZ));
+	pxd_wakeup(ctx);
+	mod_timer(&ctx->fc_timer, jiffies + pxd_fc_timeout);
 }
 
-int pxd_context_init(struct pxd_context *ctx, int i)
+int pxd_context_init(struct pxd_context *ctx, int id)
 {
 	int err;
 	spin_lock_init(&ctx->lock);
-	ctx->id = i;
+	ctx->id = id;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
@@ -1178,20 +1197,23 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	}
 	ctx->fc.release = pxd_fuse_conn_release;
 	ctx->fc.allow_disconnected = 1;
+	ctx->fc.accumulate = pxd_accumulate;
+	ctx->last_enqueued = 0;
 	INIT_LIST_HEAD(&ctx->list);
-	sprintf(ctx->name, "pxd/pxd-control-%d", i);
+	sprintf(ctx->name, "pxd/pxd-control-%d", id);
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
 	INIT_LIST_HEAD(&ctx->pending_requests);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	timer_setup(&ctx->timer, pxd_timeout, 0);
-	timer_setup(&ctx->fc_timer, pxd_fc_timeout, 0);
+	timer_setup(&ctx->fc_timer, pxd_fc_timeout_fn, 0);
 #else
 	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
-	setup_timer(&ctx->fc_timer, pxd_fc_timeout, (unsigned long) ctx);
+	setup_timer(&ctx->fc_timer, pxd_fc_timeout_fn, (unsigned long) ctx);
 #endif
-	mod_timer(&ctx->fc_timer, jiffies + (pxd_fc_timeout_secs * HZ));
+	if (ctx->fc.accumulate > 1) 
+		mod_timer(&ctx->fc_timer, jiffies + pxd_fc_timeout);
 	return 0;
 }
 
