@@ -154,6 +154,7 @@ struct pxd_device {
 	atomic_t ncount; // total active requests
 	atomic_t ncomplete; // total completed requests
 	atomic_t write_counter; // completed writes, gets cleared on a threshold
+	atomic_t index;
 	volatile bool connected; // fc connected status
 	struct pxd_context *ctx;
 };
@@ -965,6 +966,7 @@ static int pxd_io_thread(void *data) {
 static int initBIO(struct pxd_device *pxd_dev) {
 	int i;
 
+	atomic_set(&pxd_dev->index, 0);
 	for (i=0; i<MAX_THREADS; i++) {
 		struct thread_context *tc = &pxd_dev->tc[i];
 		tc->pxd_dev = pxd_dev;
@@ -1234,9 +1236,8 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 	unsigned int rw = bio_rw(bio);
 #endif
 	int thread = get_cpu() % MAX_THREADS;
-	struct thread_context *tc;
 
-	tc = &pxd_dev->tc[thread];
+	struct thread_context *tc;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	if (!pxd_dev) {
@@ -1280,6 +1281,12 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 		spin_unlock_irq(&pxd_dev->dlock);
 
 	}
+
+	/* keep writes on same cpu, but allow reads to spread */
+	if (rw == READ) {
+		thread = (atomic_add_return(1, &pxd_dev->index) % MAX_THREADS);
+	}
+	tc = &pxd_dev->tc[thread];
 
 	pxd_add_bio(tc, bio);
 	wake_up(&tc->pxd_event);
@@ -2420,7 +2427,31 @@ static ssize_t pxd_active_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	return sprintf(buf, "nactive: %u/%u\n", atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncomplete));
+	char *cp = buf;
+	int ncount;
+	int available=PAGE_SIZE-1;
+
+#if 1
+	ncount=snprintf(cp, available, "nactive: %u/%u\n",
+                atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncomplete));
+
+#else
+	ncount = snprintf(cp, available, "nactive: %u/%u\n",
+		atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncomplete));
+	available -= ncount;
+	cp += ncount;
+	{
+	int i;
+	for (i=0; i<MAX_THREADS; i++) {
+		int c=snprintf(cp, available, "[%d]:%u\n",
+				i, atomic_read(&pxd_dev->tc[i].tcount));
+		cp+=c;
+		ncount+=c;
+		available -= c;
+	}
+	}
+#endif
+	return ncount;
 }
 
 static ssize_t pxd_sync_show(struct device *dev,
