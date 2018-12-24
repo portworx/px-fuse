@@ -23,6 +23,8 @@
 #include <linux/random.h>
 #include <linux/version.h>
 #include <linux/blkdev.h>
+
+#include "pxd_config.h"
 #include "pxd_compat.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
@@ -616,7 +618,14 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 #else
 	struct bio_vec *bvec = NULL;
 #endif
+
+#ifdef USE_REQUEST_QUEUE
 	struct req_iterator breq_iter;
+#elif defined(HAVE_BVEC_ITER)
+	struct bvec_iter bvec_iter;
+#else
+	int bvec_iter;
+#endif
 	struct iov_iter data_iter;
 	size_t copied, skipped = 0;
 	int ret;
@@ -651,7 +660,11 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
+#ifdef USE_REQUEST_QUEUE
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
+#else
+	bio_for_each_segment(bvec, req->bio, bvec_iter) {
+#endif
 		copied = 0;
 		len = BVEC(bvec).bv_len;
 		if (skipped < read_data.offset) {
@@ -792,12 +805,13 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	req->out.h = oh;
 
 	if (req->bio_pages && req->out.numargs && iter->count > 0) {
-		struct request *breq = req->rq;
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
 #else
 		struct bio_vec *bvec = NULL;
 #endif
+#ifdef USE_REQUEST_QUEUE
+		struct request *breq = req->rq;
 		struct req_iterator breq_iter;
 		if (breq->nr_phys_segments && req->in.h.opcode == PXD_READ) {
 			int i = 0;
@@ -813,6 +827,29 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 				copied += len;
 			}
 		}
+#else
+#ifdef HAVE_BVEC_ITER
+		struct bvec_iter bvec_iter;
+#else
+		int bvec_iter;
+#endif
+		int i = 0;
+		int nsegs = bio_segments(req->bio);
+		if (req->in.h.opcode == PXD_READ) {
+			bio_for_each_segment(bvec, req->bio, bvec_iter) {
+				len = BVEC(bvec).bv_len;
+				if (copy_page_from_iter(BVEC(bvec).bv_page,
+							BVEC(bvec).bv_offset,
+							len, iter) != len) {
+					printk(KERN_ERR "%s: copy page %d of %d error\n",
+							__func__, i, nsegs);
+					return -EFAULT;
+				}
+				i++;
+				copied += len;
+			}
+		}
+#endif
 	}
 	err = 0;
 

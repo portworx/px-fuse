@@ -9,36 +9,11 @@
 #include <linux/kthread.h>
 #include <linux/dma-mapping.h>
 
+#include "pxd_config.h"
+
 #include "fuse_i.h"
 #include "pxd.h"
 
-
-// Configuration parameters
-// Summary of test results:
-// Multiple threads are needed to saturate random reads
-// Single threaded write path with sync writes offer better performance, or have
-// negligible loss when compared to async writes. Sync writes are good for data
-// integrity as well. If available exported sync interface, use it.
-// So the above will be the default configuration.
-//
-// Also generally block request handling has two interfaces, one fetching
-// directly each BIO, the other does collect requests in a queue and does
-// batch push them through elevator merging... we are directly using the
-// original block io interface, did not find much performance help using
-// the request Queue interface... So USE_REQUEST_QUEUE shall remain disabled
-// as default.
-//
-
-// uses blk-mq request model for >=4.12+ kernels if enabled.
-// This path is good
-//#define USE_REQUEST_QUEUE
-
-//#define USE_DIO -- experimental do not enable
-
-#define MAX_THREADS (nr_cpu_ids)
-
-//#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
-//
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
@@ -210,7 +185,9 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
+#ifndef SECTOR_SHIFT
 #define SECTOR_SHIFT (9)
+#endif
 
 /* Common functions */
 static int _pxd_flush(struct pxd_device *pxd_dev) {
@@ -936,7 +913,7 @@ static void cleanupReqQ(struct pxd_device *pxd_dev) {
 }
 
 #else 
-static void pxd_end_request(struct request *rq, int err)
+static void pxd_end_request(struct thread_context *tc, struct request *rq, int err)
 {
 	atomic_inc(&tc->pxd_dev->ncomplete);
 	blk_end_request_all(rq, err);
@@ -981,10 +958,10 @@ static inline void pxd_handle_req(struct thread_context *tc, struct request *req
 		ret=do_pxd_read(tc->pxd_dev, req,pos);
 	}
 
-	pxd_end_request(req, ret);
+	pxd_end_request(tc, req, ret);
 	return;
 error_out:
-	pxd_end_request(req, -EIO);
+	pxd_end_request(tc, req, -EIO);
 }
 
 static void pxd_add_rq(struct thread_context *tc, struct request *rq) {
@@ -1136,10 +1113,10 @@ static void pxd_make_request_orig(struct request_queue *q, struct bio *bio) __de
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+STATIC blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-static void pxd_make_request(struct request_queue *q, struct bio *bio)
+STATIC void pxd_make_request(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
@@ -1924,7 +1901,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		q = blk_alloc_queue(GFP_KERNEL);
 		if (!q)
 			goto out_disk;
-		blk_queue_make_request(q, pxd_make_request);
+		//blk_queue_make_request(q, pxd_make_request);
+		blk_queue_make_request(q, pxd_make_request_orig);
 	//} else {
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	/* shall use block multiqueue mechanism */
@@ -1989,7 +1967,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		if (mapping->a_ops->direct_IO)
 			printk(KERN_INFO"direct IO supported\n");
 
-		printk(KERN_INFO"Backing logical block size %d\n", 
+		if (inode && inode->i_sb && inode->i_sb->s_bdev)
+			printk(KERN_INFO"Backing logical block size %d\n", 
 				bdev_logical_block_size(inode->i_sb->s_bdev));
 
 		if (pxd_dev->file->f_op->fsync)
@@ -1997,15 +1976,18 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	}
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
-	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
-	queue_flag_clear_unlocked(QUEUE_FLAG_NOMERGES, q);
 
 	/* Enable discard support. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
+	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
+	queue_flag_clear_unlocked(QUEUE_FLAG_NOMERGES, q);
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
 #else
+	blk_queue_flag_set(QUEUE_FLAG_NONROT, q);
+	blk_queue_flag_clear(QUEUE_FLAG_NOMERGES, q);
 	blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
 #endif
+
 	q->limits.discard_granularity = PXD_LBS;
 	q->limits.discard_alignment = PXD_LBS;
 	if (add->discard_size < SECTOR_SIZE)
