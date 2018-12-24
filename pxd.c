@@ -325,7 +325,7 @@ static int pxd_rw_aio(struct pxd_device *pxd_dev,
 	cmd->iocb.ki_pos = pos;
 	cmd->iocb.ki_filp = file;
     cmd->iocb.ki_complete = pxd_rw_aio_complete;
-    cmd->iocb.ki_flags = IOCB_DIRECT;
+    cmd->iocb.ki_flags = iocb_flags(file);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
     if (cmd->css)
         kthread_associate_blkcg(cmd->css);
@@ -386,6 +386,113 @@ static int _pxd_req_discard(struct pxd_device *pxd_dev, struct request *rq, loff
 		ret = -EIO;
 	}
 	return ret;
+}
+#endif
+
+#ifdef DIO
+/* Shall use block mq request mechanism */
+struct aio_cmd {
+	atomic_t ref; /* only for aio */
+	struct kiocb iocb;
+	struct bio *bio;  /* original bio */
+	struct bio_vec *bvec;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	struct cgroup_subsys_state *css;
+#endif
+};
+
+static
+void pxd_rw_aio_do_completion(struct aio_cmd *cmd, int ret) {
+	struct bio *bio;
+	if (!atomic_dec_and_test(&cmd->ref))
+		return;
+
+	//TODO
+	//if (cmd is ReAD, and ret is num of bytes, then advance bio and zero fill)
+	bio = cmd->bio;
+	kfree(cmd);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	if (ret) {
+		bio_io_error(bio);
+	} else {
+		bio_endio(bio);
+	}
+#else
+	bio_endio(bio, ret);
+#endif
+}
+
+static
+void pxd_rw_aio_complete(struct kiocb *iocb, long ret, long ret2)
+{
+	struct aio_cmd *cmd = container_of(iocb, struct aio_cmd, iocb);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	if (cmd->css) css_put(cmd->css);
+#endif
+
+	pxd_rw_aio_do_completion(cmd, ret);
+}
+
+static int pxd_rw_aio(struct pxd_device *pxd_dev,
+		struct bio *bio, loff_t pos, bool rw) {
+	struct iov_iter iter;
+	struct file *file = pxd_dev->file;
+	unsigned int offset;
+	int segments = 0;
+	int ret;
+	unsigned nbytes = 0;
+
+	struct bio_vec *bvec;
+	struct bvec_iter bvec_iter;
+
+	struct aio_cmd *cmd = kmalloc(sizeof(aio_cmd), GFP_NOIO|GFP_KERNEL);
+	if (!cmd) {
+		bio_io_error(bio);
+		return;
+	}
+	cmd->bio = bio;
+
+        /*
+         * Same here, this bio may be started from the middle of the
+         * 'bvec' because of bio splitting, so offset from the bvec
+         * must be passed to iov iterator
+         */
+	offset = bio->bi_iter.bi_bvec_done;
+	bio_for_each_segment(bvec, bio, bvec_iter) {
+		segments++;
+		nbytes += bvec_iter_len(bvec);
+	}
+	bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
+
+	atomic_set(&cmd->ref, 2);
+	iov_iter_bvec(&iter, ITER_BVEC | rw, bvec, segments, nbytes);
+	iter.iov_offset = offset;
+
+	cmd->iocb.ki_pos = pos;
+	cmd->iocb.ki_filp = file;
+	cmd->iocb.ki_complete = pxd_rw_aio_complete;
+	cmd->iocb.ki_flags = iocb_flags(file);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	if (cmd->css)
+		kthread_associate_blkcg(cmd->css);
+#endif
+
+	if (rw == WRITE) {
+		atomic_add(segments, &pxd_dev->write_counter);
+		ret = call_write_iter(file, &cmd->iocb, &iter);
+	} else {
+		ret = call_read_iter(file, &cmd->iocb, &iter);
+	}
+
+	pxd_rw_aio_do_completion(cmd);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	kthread_associate_blkcg(NULL);
+#endif
+
+	if (ret != -EIOCBQUEUED)
+		cmd->iocb.ki_complete(&cmd->iocb, ret, 0);
+	return 0;
 }
 #endif
 
@@ -1069,10 +1176,10 @@ static inline unsigned int get_op_flags(struct bio *bio)
 
 #ifndef USE_REQUEST_QUEUE
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-static blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
+STATIC blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-static void pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
+STATIC void pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
 #define BLK_QC_RETVAL
 #endif
 {
@@ -1113,10 +1220,10 @@ static void pxd_make_request_orig(struct request_queue *q, struct bio *bio) __de
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-STATIC blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-STATIC void pxd_make_request(struct request_queue *q, struct bio *bio)
+void pxd_make_request(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
@@ -1901,8 +2008,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		q = blk_alloc_queue(GFP_KERNEL);
 		if (!q)
 			goto out_disk;
-		//blk_queue_make_request(q, pxd_make_request);
-		blk_queue_make_request(q, pxd_make_request_orig);
+		blk_queue_make_request(q, pxd_make_request);
+		//blk_queue_make_request(q, pxd_make_request_orig);
 	//} else {
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	/* shall use block multiqueue mechanism */
