@@ -93,14 +93,13 @@ struct pxd_add_out {
 struct pxd_add_vol_out {
 	uint64_t dev_id;
 	size_t size;
+	loff_t offset;
 	int32_t queue_depth;
 	int32_t discard_size; /**< block device discard size in bytes */
 
-	int32_t extended;
-	uint32_t pool_id;
-	char     device_path[64];
-	bool     block_device; /* is it a block device or a file path */
-	char     pad2[7];
+#define MAX_FD_PER_PXD (3)
+	int32_t nfd; // number of fd passed, hack mode if nfd = 0
+	int32_t fds[MAX_FD_PER_PXD]; // each fd
 };
 
 /**
