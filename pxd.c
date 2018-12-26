@@ -141,12 +141,12 @@ struct pxd_device {
 	bool aio; // async io path - experimental
 
 	int nfd;
-	struct fd fds[MAX_FD_PER_PXD];
-	//struct file * file[MAX_FD_PER_PXD];
+	struct file *file[MAX_FD_PER_PXD];
 
 	// HACK code not needed eventually
 	char device_path[64];
 	int pool_id;
+	uint64_t mirror; // mirror device id
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
 	struct blk_mq_tag_set   tag_set;
@@ -171,7 +171,7 @@ struct pxd_device {
 static inline
 struct file* getFile(struct pxd_device *pxd_dev, int index) {
 	if (index < pxd_dev->nfd) {
-		return pxd_dev->fds[index].file;
+		return pxd_dev->file[index];
 	}
 
 	return NULL;
@@ -635,10 +635,11 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 
 		for (fileindex=0; fileindex < pxd_dev->nfd; fileindex++) {
 			struct file *file = getFile(pxd_dev, fileindex);
-			ret = _pxd_write(file, &bvec, &pos);
+			loff_t tpos = pos;
+			ret = _pxd_write(file, &bvec, &tpos);
 			if (ret < 0) {
-				pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-					pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
+				printk(KERN_ERR"do_pxd_write[%d] pos %lld page %p, off %u for len %d FAILED %d\n",
+					fileindex, pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
 				return ret;
 			}
 		}
@@ -650,7 +651,8 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 		nsegs++;
 		for (fileindex=0; fileindex < pxd_dev->nfd; fileindex++) {
 			struct file *file = getFile(pxd_dev, fileindex);
-			ret = _pxd_write(file, bvec, &pos);
+			loff_t tpos = pos;
+			ret = _pxd_write(file, bvec, &tpos);
 			if (ret < 0) {
 				pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
 					pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
@@ -1415,12 +1417,12 @@ static int initFile(struct pxd_device *pxd_dev, bool force) {
 	/* no hack needed if fds are passed */
 	if (pxd_dev->nfd) {
 		for (i=0; i<pxd_dev->nfd; i++) {
-			struct fd *f = &pxd_dev->fds[i];
-			if (!f->file) {
+			struct file *f = pxd_dev->file[i];
+			if (!f) {
 				printk(KERN_ERR"fd file[fd=%d] invalid", i);
 				return -EINVAL;
 			}
-			inode = f->file->f_inode;
+			inode = f->f_inode;
 			printk(KERN_WARNING"device %lld:%d, inode %lu\n",
 				pxd_dev->dev_id, i, inode->i_ino);
 
@@ -1486,12 +1488,13 @@ static int initFile(struct pxd_device *pxd_dev, bool force) {
 static void cleanupFile(struct pxd_device *pxd_dev) {
 	int i;
 	for (i=0; i<pxd_dev->nfd; i++) {
-		fdput(pxd_dev->fds[i]);
+		filp_close(pxd_dev->file[i], NULL);
 	}
+	pxd_dev->nfd=0;
 }
 
 static int initBackingFsPath(struct pxd_device *pxd_dev) {
-	int err;
+	int err=-EINVAL;
 
 	printk(KERN_INFO"Number of cpu ids %d\n", MAX_THREADS);
 
@@ -1502,9 +1505,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 #define MAXPOOL (5)
 	int pool;
 	char newPath[64];
-	int success=-EINVAL;
 	struct file* f;
-	int fd;
 
 	printk(KERN_INFO"pxd_dev device Id %lld hack code entered..\n",
 			pxd_dev->dev_id);
@@ -1530,26 +1531,76 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		printk(KERN_INFO"Success device %llu backing file %s\n",
 					pxd_dev->dev_id, newPath);
 
-		fd = get_unused_fd_flags(O_RDWR|O_LARGEFILE|O_CLOEXEC);
-		if (fd < 0) {
-			printk(KERN_ERR"Finding fd on current failed %d", fd);
-			return fd;
-		}
-		fd_install(fd, f);
-
 		strcpy(pxd_dev->device_path, newPath);
 		pxd_dev->nfd = 1;
-		pxd_dev->fds[0] = fdget(fd);
-		success = 0;
+		pxd_dev->file[0] = f;
+		err = 0;
 		break;
 	}
 
-	if (!success) {
+	if (err) {
 		printk(KERN_ERR"Setting up fd for backing file (hack) failed\n");
 		return -EINVAL;
 	}
 	printk(KERN_INFO"pxd_dev device Id %lld hack code success exit..\n", pxd_dev->dev_id);
 	} /* hack code */
+
+
+{
+        struct pxd_device *mirror_dev;
+	struct pxd_context *ctx = pxd_dev->ctx;
+	struct list_head *cur;
+	char newPath[64];
+	struct file *f;
+	int pool;
+
+	if (pxd_dev->nfd >= MAX_FD_PER_PXD) {
+		printk(KERN_ERR"Maximum mirrors configured for device %lld\n", pxd_dev->dev_id);
+		goto out;
+	}
+
+	mirror_dev = NULL;
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd = container_of(cur, struct pxd_device, node);
+
+		if (pxd->mirror == pxd_dev->dev_id) {
+			/* configure this pxd as a mirror */
+			mirror_dev = pxd;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	if (!mirror_dev) {
+		printk(KERN_ERR"No mirror device for id %lld, probably need attaching\n", pxd_dev->dev_id);
+		goto out;
+	}
+
+	for (pool=0; pool<MAXPOOL; pool++) {
+		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, mirror_dev->dev_id);
+		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
+		if (IS_ERR_OR_NULL(f)) {
+			printk(KERN_ERR"Failed mirror device %llu at path %s err %ld\n",
+				mirror_dev->dev_id, newPath, PTR_ERR(f));
+			continue;
+		}
+
+		spin_lock_irq(&pxd_dev->dlock);
+		pxd_dev->file[pxd_dev->nfd] = f;
+		pxd_dev->nfd++;
+		spin_unlock_irq(&pxd_dev->dlock);
+		printk(KERN_INFO"Success attaching mirror device %llu to device %lld [nfd:%d]\n",
+			mirror_dev->dev_id, pxd_dev->dev_id, pxd_dev->nfd);
+		goto out;
+	}
+
+	printk(KERN_INFO"Unexpected failed finding mirror device %llu from file path\n",
+			pxd_dev->dev_id);
+}
+out:
+	printk(KERN_INFO"pxd_dev add setting up with %d backing devices, [%p,%p,%p]\n",
+		pxd_dev->nfd, pxd_dev->file[0], pxd_dev->file[1], pxd_dev->file[2]);
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->congestion_wait);
@@ -2326,13 +2377,14 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *arg)
 	pxd_dev->bg_flush_enabled = true;
 
 	for (i=0; i<add->nfd; i++) {
-		pxd_dev->fds[i] = fdget(add->fds[i]);
-		if (getFile(pxd_dev, i)) {
+		pxd_dev->file[i] = fget(add->fds[i]);
+		if (!pxd_dev->file[i]) {
 			err = -EINVAL;
 			goto out_disk;
 		}
 	}
 	pxd_dev->nfd = add->nfd;
+
 
 	err = initBackingFsPath(pxd_dev);
 	if (err) {
@@ -2632,6 +2684,61 @@ ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxd_mirror_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int i;
+	char *cp = buf;
+	int cnt=0;
+
+	for (i=0; i<pxd_dev->nfd; i++) {
+		int c=sprintf(cp, "device[%d]: %p", i, pxd_dev->file[i]);
+		cp+=c;
+		cnt+=c;
+	}
+
+	return cnt;
+}
+
+// debug interface to configure mirror to a pxd_device
+static ssize_t pxd_mirror_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+        struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	uint64_t mirror;
+	struct pxd_device *mirror_dev;
+	struct pxd_context *ctx = pxd_dev->ctx;
+        struct list_head *cur;
+
+	sscanf(buf, "%lld", &mirror);
+
+	/* ensure the mirror device is not attached, if so throw a failure message */
+	mirror_dev = NULL;
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd = container_of(cur, struct pxd_device, node);
+
+		if (pxd->dev_id == mirror) {
+			/* configure this pxd as a mirror */
+			mirror_dev = pxd;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	if (mirror_dev) {
+		printk(KERN_ERR"Mirror device %lld already attached... mirror should be setup before target device is attached\n",
+				mirror);
+		return count;
+	}
+
+	pxd_dev->mirror = mirror;
+
+	printk(KERN_INFO"Configuring device %lld as mirror for %lld\n", pxd_dev->dev_id, mirror);
+	return count;
+}
+
 
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
@@ -2641,6 +2748,7 @@ static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
+static DEVICE_ATTR(mirror, S_IRUGO|S_IWUSR, pxd_mirror_show, pxd_mirror_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -2651,6 +2759,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_active.attr,
 	&dev_attr_sync.attr,
 	&dev_attr_congested.attr,
+	&dev_attr_mirror.attr,
 	NULL
 };
 
