@@ -846,7 +846,7 @@ int fuse_write_inode(struct inode *inode, struct writeback_control *wbc);
 int fuse_do_setattr(struct inode *inode, struct iattr *attr,
 		    struct file *file);
 
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add);
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
 

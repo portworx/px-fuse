@@ -1292,17 +1292,6 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-#if 0
-	if (!pxd_dev->file) {
-		if (initFile(pxd_dev, false)) {
-			printk(KERN_ERR"pxd (%llu) does not have backing file failing hard\n", pxd_dev->dev_id);
-			//bio_io_error(bio);
-			pxd_make_request_orig(q, bio);
-			return BLK_QC_RETVAL;
-		}
-	}
-#endif
-
 	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
 
 	{ /* add congestion handling */
@@ -1408,9 +1397,6 @@ void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, stru
  * extension and argument submission should happen from px-storage!!
  */
 static int initFile(struct pxd_device *pxd_dev, bool force) {
-	//int pool;
-	//char newPath[64];
-	//struct file *f;
 	struct inode *inode;
 	int i;
 
@@ -1441,45 +1427,6 @@ static int initFile(struct pxd_device *pxd_dev, bool force) {
 		}
 		return 0;
 	}
-
-#if 0
-	if (pxd_dev->file[0]) {
-		if (!force) {
-			printk(KERN_INFO"Success device %llu backing file %s\n",
-					pxd_dev->dev_id, pxd_dev->device_path);
-			return 0;
-		}
-
-		filp_close(pxd_dev->file[0], NULL);
-		pxd_dev->file[0] = NULL;
-	}
-
-	for (pool=0; pool<MAXPOOL; pool++) {
-#ifdef DMTHINPOOL
-		sprintf(newPath, DMTHINVOLFMT, pool, pxd_dev->dev_id);
-#else
-		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
-#endif
-
-#ifdef USE_DIO
-		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
-#else
-		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
-#endif
-		if (IS_ERR_OR_NULL(f)) {
-			printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
-				pxd_dev->dev_id, newPath, PTR_ERR(f));
-			continue;
-		}
-
-		printk(KERN_INFO"Success device %llu backing file %s\n",
-					pxd_dev->dev_id, newPath);
-		strcpy(pxd_dev->device_path, newPath);
-		pxd_dev->file[0] = f;
-
-		return 0;
-	}
-#endif
 
 	printk(KERN_ERR"Failed for device %llu no backing file found\n", pxd_dev->dev_id);
 	return -ENODEV;
@@ -1543,11 +1490,10 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		return -EINVAL;
 	}
 	printk(KERN_INFO"pxd_dev device Id %lld hack code success exit..\n", pxd_dev->dev_id);
-	} /* hack code */
+	} /* hack code for configuring pxd volume from path search */
 
-
-{ /* look for configuring an attached pxd volume as a mirror */
-        struct pxd_device *mirror_dev;
+	{ /* hack code for configuring mirror volumes */
+	struct pxd_device *mirror_dev;
 	struct pxd_context *ctx = pxd_dev->ctx;
 	struct list_head *cur;
 	char newPath[64];
@@ -1597,8 +1543,9 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 
 	printk(KERN_INFO"Unexpected failed finding mirror device %llu from file path\n",
 			pxd_dev->dev_id);
-}
+	} /* hack code ends */
 hack_out:
+
 	printk(KERN_INFO"pxd_dev add setting up with %d backing devices, [%p,%p,%p]\n",
 		pxd_dev->nfd, pxd_dev->file[0], pxd_dev->file[1], pxd_dev->file[2]);
 
@@ -2171,7 +2118,7 @@ static void pxd_rq_fn(struct request_queue *q)
 #endif
 #endif
 
-static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
+static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_vol_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
@@ -2324,7 +2271,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 
 }
 
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *arg)
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = NULL;
@@ -2332,8 +2279,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *arg)
 	int new_minor;
 	int err;
 	int i;
-
-	struct pxd_add_vol_out *add = (struct pxd_add_vol_out *) arg;
 
 	err = -ENODEV;
 	if (!try_module_get(THIS_MODULE))
@@ -2392,7 +2337,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *arg)
 		goto out_disk;
 	}
 
-	err = pxd_init_disk(pxd_dev, arg);
+	err = pxd_init_disk(pxd_dev, add);
 	if (err)
 		goto out_id;
 
