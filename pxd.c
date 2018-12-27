@@ -1546,7 +1546,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	} /* hack code */
 
 
-{
+{ /* look for configuring an attached pxd volume as a mirror */
         struct pxd_device *mirror_dev;
 	struct pxd_context *ctx = pxd_dev->ctx;
 	struct list_head *cur;
@@ -1556,7 +1556,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 
 	if (pxd_dev->nfd >= MAX_FD_PER_PXD) {
 		printk(KERN_ERR"Maximum mirrors configured for device %lld\n", pxd_dev->dev_id);
-		goto out;
+		goto hack_out;
 	}
 
 	mirror_dev = NULL;
@@ -1574,7 +1574,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 
 	if (!mirror_dev) {
 		printk(KERN_ERR"No mirror device for id %lld, probably need attaching\n", pxd_dev->dev_id);
-		goto out;
+		goto hack_out;
 	}
 
 	for (pool=0; pool<MAXPOOL; pool++) {
@@ -1592,13 +1592,13 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		spin_unlock_irq(&pxd_dev->dlock);
 		printk(KERN_INFO"Success attaching mirror device %llu to device %lld [nfd:%d]\n",
 			mirror_dev->dev_id, pxd_dev->dev_id, pxd_dev->nfd);
-		goto out;
+		goto hack_out;
 	}
 
 	printk(KERN_INFO"Unexpected failed finding mirror device %llu from file path\n",
 			pxd_dev->dev_id);
 }
-out:
+hack_out:
 	printk(KERN_INFO"pxd_dev add setting up with %d backing devices, [%p,%p,%p]\n",
 		pxd_dev->nfd, pxd_dev->file[0], pxd_dev->file[1], pxd_dev->file[2]);
 
@@ -2739,6 +2739,75 @@ static ssize_t pxd_mirror_store(struct device *dev, struct device_attribute *att
 	return count;
 }
 
+static ssize_t pxd_replicate_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int i;
+	char *cp = buf;
+	int cnt=0;
+
+	for (i=0; i<pxd_dev->nfd; i++) {
+		int c=sprintf(cp, "device[%d]: %p", i, pxd_dev->file[i]);
+		cp+=c;
+		cnt+=c;
+	}
+
+	return cnt;
+}
+
+// debug interface to configure replicate device to a pxd_device
+static ssize_t pxd_replicate_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	char replicate[64];
+	struct file *f;
+	struct inode *inode;
+
+	if (pxd_dev->nfd >= MAX_FD_PER_PXD) {
+		printk(KERN_ERR"Maximum replicate volumes configured for device %lld\n", pxd_dev->dev_id);
+		goto hack_out;
+	}
+
+	sscanf(buf, "%s", replicate);
+	printk(KERN_ERR"Parent device %lld, device path %s\n", pxd_dev->dev_id, replicate);
+
+	/* look for configuring an device given as path as a replicate volume */
+	f = filp_open(replicate, O_LARGEFILE | O_RDWR, 0600);
+	if (IS_ERR_OR_NULL(f)) {
+		printk(KERN_ERR"Failed opening replicate device at path %s err %ld\n",
+				replicate, PTR_ERR(f));
+		goto hack_out;
+	}
+
+	inode = f->f_inode;
+	printk(KERN_WARNING"replicate device %s, inode %lu\n", replicate, inode->i_ino);
+
+	if (S_ISREG(inode->i_mode)) {
+		printk(KERN_INFO"replicate device[%s] is a regular file - inode %lu\n",
+			replicate, inode->i_ino);
+	} else if (S_ISBLK(inode->i_mode)) {
+		printk(KERN_INFO"replicate device[%s] is a block device - inode %lu\n",
+			replicate, inode->i_ino);
+	} else {
+		printk(KERN_INFO"replicate device[%s] inode %lu unknown device %#x\n",
+			replicate, inode->i_ino, inode->i_mode);
+	}
+	spin_lock_irq(&pxd_dev->dlock);
+	pxd_dev->file[pxd_dev->nfd] = f;
+	pxd_dev->nfd++;
+	spin_unlock_irq(&pxd_dev->dlock);
+	printk(KERN_INFO"Success attaching replicate device %s to device %lld [nfd:%d]\n",
+		replicate, pxd_dev->dev_id, pxd_dev->nfd);
+	goto hack_out;
+
+	printk(KERN_INFO"Unexpected failed finding replicate device %s from file path\n",
+			replicate);
+hack_out:
+	return count;
+}
+
 
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
@@ -2749,6 +2818,7 @@ static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
 static DEVICE_ATTR(mirror, S_IRUGO|S_IWUSR, pxd_mirror_show, pxd_mirror_store);
+static DEVICE_ATTR(replicate, S_IRUGO|S_IWUSR, pxd_replicate_show, pxd_replicate_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -2760,6 +2830,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_sync.attr,
 	&dev_attr_congested.attr,
 	&dev_attr_mirror.attr,
+	&dev_attr_replicate.attr,
 	NULL
 };
 
