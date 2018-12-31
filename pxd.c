@@ -2640,7 +2640,7 @@ static ssize_t pxd_mirror_show(struct device *dev,
 	int cnt=0;
 
 	for (i=0; i<pxd_dev->nfd; i++) {
-		int c=sprintf(cp, "device[%d]: %p", i, pxd_dev->file[i]);
+		int c=sprintf(cp, "device[%d]: %p\n", i, pxd_dev->file[i]);
 		cp+=c;
 		cnt+=c;
 	}
@@ -2695,7 +2695,7 @@ static ssize_t pxd_replicate_show(struct device *dev,
 	int cnt=0;
 
 	for (i=0; i<pxd_dev->nfd; i++) {
-		int c=sprintf(cp, "device[%d]: %p", i, pxd_dev->file[i]);
+		int c=sprintf(cp, "device[%d]: %p\n", i, pxd_dev->file[i]);
 		cp+=c;
 		cnt+=c;
 	}
