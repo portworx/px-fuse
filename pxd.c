@@ -644,6 +644,7 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 			}
 		}
 
+		pos += bvec.bv_len;
 		cond_resched();
 	}
 #else
@@ -660,6 +661,7 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 			}
 		}
 
+		pos += bvec->bv_len;
 		cond_resched();
 	}
 #endif
