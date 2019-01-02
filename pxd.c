@@ -1128,11 +1128,15 @@ static void pxd_fuse_conn_release(struct fuse_conn *conn)
 static void pxd_wakeup(struct pxd_context *ctx)
 {
 	struct fuse_conn *fc = &ctx->fc;
+    unsigned accumulate;
+
 	/* No requests arrived within timeout */
 	if (jiffies - ctx->last_enqueued > pxd_fc_timeout) {
 		if (fc->active_background) {
+            accumulate = min(fc->active_background, pxd_accumulate);
+            fc->active_background = 0;
+            fc->accumulate = (accumulate == 0) ? pxd_accumulate : accumulate;
 			fuse_timer_wakeup(fc);
-			fc->accumulate = min(fc->active_background, pxd_accumulate);
 		} else {
 			/* Reset accumulation to default when idle. */
 			fc->accumulate = pxd_accumulate;
