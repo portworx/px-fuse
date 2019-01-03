@@ -71,6 +71,7 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(pages, 0, sizeof(*pages) * npages);
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
+	INIT_LIST_HEAD(&req->merged);
 	INIT_HLIST_NODE(&req->hash_entry);
 	atomic_set(&req->count, 1);
 	req->pages = pages;
@@ -247,6 +248,7 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 __releases(fc->lock)
 {
+    struct fuse_req *first, *next;
 	void (*end) (struct fuse_conn *, struct fuse_req *) = req->end;
 	req->end = NULL;
 	if (!hlist_unhashed(&req->hash_entry))
@@ -262,17 +264,48 @@ __releases(fc->lock)
 			clear_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 		}
 		fc->num_background--;
-		fc->active_background--;
 	}
 	spin_unlock(&fc->lock);
 	if (end)
 		end(fc, req);
+
+    /* Process requests merged with this request */
+    list_for_each_entry_safe(first, next, &req->merged, merged) {
+	    first->end = NULL;
+	    first->state = FUSE_REQ_FINISHED;
+        if (end) {
+            end(fc, first);
+        }
+        fuse_put_request(fc, first);
+    }
 	fuse_put_request(fc, req);
 }
 
-static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
+static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 					    struct fuse_req *req)
 {
+    struct fuse_req *prev;
+    bool wakeup = false;
+
+    /* Check if the request could be merged with another request */
+    if (req->in.h.opcode == PXD_WRITE && !list_empty(&fc->pending)) {
+        prev = list_last_entry(&fc->pending, struct fuse_req, list);
+        if ((prev->in.h.opcode == PXD_WRITE) &&
+            ((prev->misc.pxd_rdwr_in.offset + prev->misc.pxd_rdwr_in.size) ==
+             req->misc.pxd_rdwr_in.offset) &&
+            ((prev->misc.pxd_rdwr_in.size + req->misc.pxd_rdwr_in.size) <=
+             PXD_MAX_IO)) {
+            prev->misc.pxd_rdwr_in.size += req->misc.pxd_rdwr_in.size;
+            list_add_tail(&req->merged, &prev->merged);
+            req->state = FUSE_REQ_PENDING;
+            fc->num_background++;
+            if (fc->active_background >= fc->accumulate) {
+                fc->active_background = 0;
+                return true;
+            }
+            return false;
+        }
+    }
 	BUG_ON(!req->background);
 	fc->num_background++;
 	if (fc->num_background == fc->congestion_threshold &&
@@ -281,8 +314,13 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 	}
 	fc->active_background++;
+    if (fc->active_background >= fc->accumulate) {
+        fc->active_background = 0;
+        wakeup = true;
+    }
 	req->in.h.unique = fuse_get_unique(fc);
 	queue_request(fc, req);
+    return wakeup;
 }
 
 void fuse_timer_wakeup(struct fuse_conn *fc)
@@ -292,6 +330,8 @@ void fuse_timer_wakeup(struct fuse_conn *fc)
 
 static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
+    bool wakeup;
+
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
@@ -300,11 +340,12 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		if (!fc->connected) {
 			printk(KERN_INFO "%s: Request on disconnected FC", __func__);
 		}
-		fuse_request_send_nowait_locked(fc, req);
+		wakeup = fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
 
-		if (fc->active_background >= fc->accumulate)
+        if (wakeup) {
 			fuse_conn_wakeup(fc);
+        }
 	} else {
 		req->out.h.error = -ENOTCONN;
 		request_end(fc, req);
@@ -611,6 +652,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	struct req_iterator breq_iter;
 	struct iov_iter data_iter;
 	size_t copied, skipped = 0;
+    bool merged, tail;
 	int ret;
 
 	if (copy_from_iter(&read_data, len, iter) != len) {
@@ -643,6 +685,10 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
+    merged = !list_empty(&req->merged);
+    tail = true;
+
+more:
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		copied = 0;
 		len = BVEC(bvec).bv_len;
@@ -680,7 +726,17 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 			}
 		}
 	}
-
+    if (merged) {
+        if (tail) {
+            req = list_first_entry(&req->merged, struct fuse_req, merged);
+            tail = false;
+        } else {
+            req = list_next_entry(req, merged);
+        }
+        if (req) {
+            goto more;
+        }
+    }
 	return 0;
 }
 

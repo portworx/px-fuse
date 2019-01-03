@@ -346,6 +346,9 @@ struct fuse_req {
 
 	/** Associate request queue */
 	struct request_queue *queue;
+
+    /* Optional list of requests merged together */
+    struct list_head merged;
 };
 
 /**
