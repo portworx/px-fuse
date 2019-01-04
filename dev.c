@@ -298,7 +298,7 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
             prev->misc.pxd_rdwr_in.size += req->misc.pxd_rdwr_in.size;
             list_add_tail(&req->merged, &prev->merged);
             req->state = FUSE_REQ_PENDING;
-            fc->num_background++;
+            fc->active_background++;
             if (fc->active_background >= fc->accumulate) {
                 fc->active_background = 0;
                 return true;
