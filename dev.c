@@ -262,6 +262,7 @@ __releases(fc->lock)
 			clear_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 		}
 		fc->num_background--;
+		fc->active_background--;
 	}
 	spin_unlock(&fc->lock);
 	if (end)
@@ -269,11 +270,9 @@ __releases(fc->lock)
 	fuse_put_request(fc, req);
 }
 
-static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
+static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 					    struct fuse_req *req)
 {
-    bool wakeup;
-
 	BUG_ON(!req->background);
 	fc->num_background++;
 	if (fc->num_background == fc->congestion_threshold &&
@@ -282,15 +281,8 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 	}
 	fc->active_background++;
-    if (fc->active_background >= fc->accumulate) {
-        fc->active_background = 0;
-        wakeup = true;
-    } else {
-        wakeup = false;
-    }
 	req->in.h.unique = fuse_get_unique(fc);
 	queue_request(fc, req);
-    return wakeup;
 }
 
 void fuse_timer_wakeup(struct fuse_conn *fc)
@@ -300,8 +292,6 @@ void fuse_timer_wakeup(struct fuse_conn *fc)
 
 static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
-    bool wakeup;
-
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
@@ -310,12 +300,11 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		if (!fc->connected) {
 			printk(KERN_INFO "%s: Request on disconnected FC", __func__);
 		}
-		wakeup = fuse_request_send_nowait_locked(fc, req);
+		fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
 
-        if (wakeup) {
+		if (fc->active_background >= fc->accumulate)
 			fuse_conn_wakeup(fc);
-        }
 	} else {
 		req->out.h.error = -ENOTCONN;
 		request_end(fc, req);
