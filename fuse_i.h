@@ -570,6 +570,9 @@ struct fuse_conn {
 
 	/* Accumulate requests before signaling */
 	unsigned accumulate;
+
+    /* Set when requests are queued */
+    bool signaled;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)

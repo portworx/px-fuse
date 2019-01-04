@@ -213,6 +213,7 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
 {
+    fc->signaled = true;
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 }
@@ -441,10 +442,14 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	ssize_t remain = iter->count;
 	bool no_reply = false;
 
+	if (!fc->signaled) {
+		return -EAGAIN;
+	}
 	INIT_LIST_HEAD(&tmp);
 
 	spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
+        fc->signaled = false;
 		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
 			goto err_unlock;
@@ -479,6 +484,9 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	list_cut_position(&tmp, &fc->pending, last);
 	list_splice_tail(&tmp, &fc->processing);
 
+	if (!request_pending(fc)) {
+        fc->signaled = false;
+    }
 	spin_unlock(&fc->lock);
 
 	entry = first;
