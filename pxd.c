@@ -62,6 +62,20 @@ extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
+struct node_cpu_map {
+	int cpu[NR_CPUS];
+	int ncpu;
+};
+
+// A one-time built, static lookup table to distribute requests to cpu within same numa node
+static struct node_cpu_map *node_cpu_map;
+
+static inline int getnextcpu(int node, int pos) {
+	const struct node_cpu_map *map = &node_cpu_map[node];
+	if (map->ncpu == 0) { return 0; }
+	return map->cpu[(pos) % map->ncpu];
+}
+
 struct pxd_context {
 	spinlock_t lock;
 	struct list_head list;
@@ -163,7 +177,7 @@ struct pxd_device {
 	atomic_t ncount; // total active requests
 	atomic_t ncomplete; // total completed requests
 	atomic_t write_counter; // completed writes, gets cleared on a threshold
-	atomic_t index;
+	atomic_t index[MAX_NUMNODES];
 	volatile bool connected; // fc connected status
 	struct pxd_context *ctx;
 };
@@ -1003,7 +1017,10 @@ static int pxd_io_thread(void *data) {
 static int initBIO(struct pxd_device *pxd_dev) {
 	int i;
 
-	atomic_set(&pxd_dev->index, 0);
+	for (i=0; i<nr_node_ids; i++) {
+		atomic_set(&pxd_dev->index[i], 0);
+	}
+
 	for (i=0; i<MAX_THREADS; i++) {
 		struct thread_context *tc = &pxd_dev->tc[i];
 		tc->pxd_dev = pxd_dev;
@@ -1272,7 +1289,8 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 #else
 	unsigned int rw = bio_rw(bio);
 #endif
-	int thread = get_cpu() % MAX_THREADS;
+	int cpu = smp_processor_id();
+	int thread = cpu % MAX_THREADS;
 
 	struct thread_context *tc;
 
@@ -1310,9 +1328,10 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 	}
 
-	/* keep writes on same cpu, but allow reads to spread */
+	/* keep writes on same cpu, but allow reads to spread but within same numa node */
 	if (rw == READ) {
-		thread = (atomic_add_return(1, &pxd_dev->index) % MAX_THREADS);
+		int node = cpu_to_node(cpu);
+		thread = getnextcpu(node, atomic_add_return(1, &pxd_dev->index[node]));
 	}
 	tc = &pxd_dev->tc[thread];
 
@@ -1332,7 +1351,7 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 static
 void pxd_rq_fn_kernel(struct pxd_device *pxd_dev, struct request_queue *q, struct request *req) {
 	u64 sect_num, sect_cnt;
-	int thread = get_cpu() % MAX_THREADS;
+	int thread = smp_processor_id() % MAX_THREADS;
 	struct thread_context *tc;
 
 	tc = &pxd_dev->tc[thread];
@@ -1563,7 +1582,6 @@ hack_out:
 	atomic_set(&pxd_dev->write_counter,0);
 	pxd_dev->connected = 1;
 	pxd_dev->offset = 0;
-
 
 #ifndef DRIVER_MODE_BLKMQ
 	pxd_dev->tc = kzalloc(MAX_THREADS * sizeof(struct thread_context), GFP_NOIO);
@@ -3177,7 +3195,32 @@ int pxd_init(void)
 
 	printk(KERN_INFO "pxd: driver loaded version %s\n", gitversion);
 
+	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", nr_cpu_ids, NR_CPUS, nr_node_ids, MAX_NUMNODES);
+	node_cpu_map = kzalloc(sizeof(struct node_cpu_map) * nr_node_ids, GFP_NOIO|GFP_KERNEL);
+	if (!node_cpu_map) {
+		printk(KERN_ERR "pxd: failed to initialize node_cpu_map: -ENOMEM\n");
+		goto out_sysfs;
+	}
+
+	for (i=0; i<nr_cpu_ids; i++) {
+		struct node_cpu_map *map=&node_cpu_map[cpu_to_node(i)];
+		map->cpu[map->ncpu++] = i;
+	}
+
+	for (i=0; i<nr_node_ids; i++) {
+		struct node_cpu_map *map=&node_cpu_map[i];
+		int j;
+		printk(KERN_INFO"Numa Node %d: ncpu %d\n", i, map->ncpu);
+
+		for (j=0; j<map->ncpu; j++) {
+			printk(KERN_INFO"\tCPU[%d]=%d\n", map->cpu[j], i);
+		}
+	}
+
 	return 0;
+
+out_sysfs:
+	pxd_sysfs_exit();
 
 out_blkdev:
 	unregister_blkdev(0, "pxd");
@@ -3197,6 +3240,8 @@ out:
 void pxd_exit(void)
 {
 	int i;
+
+	if (node_cpu_map) kfree(node_cpu_map);
 
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
