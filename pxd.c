@@ -152,6 +152,7 @@ struct pxd_device {
 	bool   block_device;
 	loff_t offset; // offset into the backing device/file
 	int bg_flush_enabled; // dynamically enable bg flush from driver
+	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
 	bool aio; // async io path - experimental
 
 	int nfd;
@@ -243,7 +244,7 @@ static int _pxd_flush(struct pxd_device *pxd_dev) {
 static int pxd_should_flush(struct pxd_device *pxd_dev, int *active) {
 	*active = atomic_read(&pxd_dev->sync_active);
 	if (pxd_dev->bg_flush_enabled &&
-		(atomic_read(&pxd_dev->write_counter) > MAX_WRITESEGS_FOR_FLUSH) &&
+		(atomic_read(&pxd_dev->write_counter) > pxd_dev->n_flush_wrsegs) &&
 		!*active) {
 		atomic_set(&pxd_dev->sync_active, 1);
 		return 1;
@@ -2340,6 +2341,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add)
 	pxd_dev->offset = add->offset;
 	pxd_dev->aio = false;
 	pxd_dev->bg_flush_enabled = true;
+	pxd_dev->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	for (i=0; i<add->nfd; i++) {
 		pxd_dev->file[i] = fget(add->fds[i]);
@@ -2611,7 +2613,8 @@ static ssize_t pxd_sync_show(struct device *dev,
 			atomic_read(&pxd_dev->nsync),
 			(pxd_dev->bg_flush_enabled ? "(enabled)" : "(disabled)"));
 }
-ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
+
+static ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
@@ -2628,6 +2631,29 @@ ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxd_wrsegment_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "write segment size(bytes): %d\n", pxd_dev->n_flush_wrsegs * PXD_LBS);
+}
+
+static ssize_t pxd_wrsegment_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int nbytes, nsegs;
+
+	sscanf(buf, "%d", &nbytes);
+
+	nsegs = nbytes/PXD_LBS; // num of write segments
+	if (nsegs < MAX_WRITESEGS_FOR_FLUSH) {
+		nsegs = MAX_WRITESEGS_FOR_FLUSH;
+	}
+
+	pxd_dev->n_flush_wrsegs = nsegs;
+	return count;
+}
 
 static ssize_t pxd_congestion_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
@@ -2639,7 +2665,7 @@ static ssize_t pxd_congestion_show(struct device *dev,
 	return sprintf(buf, "congested: %d\n", congested);
 }
 
-ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
+static ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
@@ -2784,6 +2810,7 @@ static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
 static DEVICE_ATTR(mirror, S_IRUGO|S_IWUSR, pxd_mirror_show, pxd_mirror_store);
 static DEVICE_ATTR(replicate, S_IRUGO|S_IWUSR, pxd_replicate_show, pxd_replicate_store);
+static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -2796,6 +2823,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_congested.attr,
 	&dev_attr_mirror.attr,
 	&dev_attr_replicate.attr,
+	&dev_attr_writesegment.attr,
 	NULL
 };
 
@@ -3207,6 +3235,8 @@ int pxd_init(void)
 		map->cpu[map->ncpu++] = i;
 	}
 
+#if 0
+	/* debug dump for verification */
 	for (i=0; i<nr_node_ids; i++) {
 		struct node_cpu_map *map=&node_cpu_map[i];
 		int j;
@@ -3216,6 +3246,7 @@ int pxd_init(void)
 			printk(KERN_INFO"\tCPU[%d]=%d\n", map->cpu[j], i);
 		}
 	}
+#endif
 
 	return 0;
 
