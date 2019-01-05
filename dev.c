@@ -213,9 +213,11 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
 {
-    fc->signaled = true;
-	wake_up(&fc->waitq);
-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
+    if (!fc->signaled) {
+        fc->signaled = true;
+	    wake_up(&fc->waitq);
+	    kill_fasync(&fc->fasync, SIGIO, POLL_IN);
+    }
 }
 
 void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
@@ -282,16 +284,22 @@ __releases(fc->lock)
 	fuse_put_request(fc, req);
 }
 
+static inline bool fuse_request_mergable(enum pxd_opcode op)
+{
+    return (op == PXD_WRITE) || (op == PXD_READ) || (op == PXD_DISCARD);
+}
+
 static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 					    struct fuse_req *req)
 {
+    enum pxd_opcode op = req->in.h.opcode;
     struct fuse_req *prev;
     bool wakeup = false;
 
     /* Check if the request could be merged with another request */
-    if (req->in.h.opcode == PXD_WRITE && !list_empty(&fc->pending)) {
+    if (fuse_request_mergable(op) && !list_empty(&fc->pending)) {
         prev = list_last_entry(&fc->pending, struct fuse_req, list);
-        if ((prev->in.h.opcode == PXD_WRITE) &&
+        if ((prev->in.h.opcode == op) &&
             ((prev->misc.pxd_rdwr_in.offset + prev->misc.pxd_rdwr_in.size) ==
              req->misc.pxd_rdwr_in.offset) &&
             ((prev->misc.pxd_rdwr_in.size + req->misc.pxd_rdwr_in.size) <=
@@ -388,7 +396,7 @@ __acquires(fc->lock)
 ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 	struct request *breq = req->rq;
-	size_t copied = 0;
+	size_t copied;
 	size_t len;
 
 	len = sizeof(req->in.h);
@@ -396,7 +404,7 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 		printk(KERN_ERR "%s: copy header error\n", __func__);
 		return -EFAULT;
 	}
-	copied += len;
+	copied = len;
 
 	len = req->in.args[0].size;
 	if (copy_to_iter((void *)req->in.args[0].value, len, iter) != len) {
@@ -522,7 +530,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 			entry = next;
 		}
 	}
-
 	return copied;
 
  err_unlock:
@@ -660,7 +667,6 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	struct req_iterator breq_iter;
 	struct iov_iter data_iter;
 	size_t copied, skipped = 0;
-    bool merged, tail;
 	int ret;
 
 	if (copy_from_iter(&read_data, len, iter) != len) {
@@ -692,9 +698,6 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	if (unlikely(req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK))
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
-
-    merged = !list_empty(&req->merged);
-    tail = true;
 
 more:
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
@@ -734,16 +737,13 @@ more:
 			}
 		}
 	}
-    if (merged) {
-        if (tail) {
-            req = list_first_entry(&req->merged, struct fuse_req, merged);
-            tail = false;
-        } else {
-            req = list_next_entry(req, merged);
-        }
-        if (req) {
-            goto more;
-        }
+    if (iter->count) {
+        req = list_next_entry(req, merged);
+#ifndef HAVE_BVEC_ITER
+        bvec = NULL;
+#endif
+        skipped = 0;
+        goto more;
     }
 	return 0;
 }
@@ -801,9 +801,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 {
 	int err;
-	struct fuse_req *req;
+	struct fuse_req *req, *next;
 	struct fuse_out_header oh;
-	size_t copied = 0;
 	size_t len;
 	size_t nbytes = iter->count;
 
@@ -815,7 +814,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		printk(KERN_ERR "%s: can't copy header\n", __func__);
 		return -EFAULT;
 	}
-	copied += len;
 
 	if (oh.len != nbytes)
 		return -EINVAL;
@@ -857,6 +855,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		struct req_iterator breq_iter;
 		if (breq->nr_phys_segments && req->in.h.opcode == PXD_READ) {
 			int i = 0;
+            next = req;
+
+more:
 			rq_for_each_segment(bvec, breq, breq_iter) {
 				len = BVEC(bvec).bv_len;
 				if (copy_page_from_iter(BVEC(bvec).bv_page,
@@ -866,15 +867,22 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 					       __func__, i, breq->nr_phys_segments);
 					return -EFAULT;
 				}
-				copied += len;
-			}
+                i++;
+            }
+            if (iter->count) {
+                next = list_next_entry(next, merged);
+	            next->state = FUSE_REQ_WRITING;
+                breq = next->rq;
+#ifndef HAVE_BVEC_ITER
+                bvec = NULL;
+#endif
+                i = 0;
+                goto more;
+            }
 		}
 	}
 	err = 0;
-
 	spin_lock(&fc->lock);
-	if (err)
-		req->out.h.error = -EIO;
 	request_end(fc, req);
 
 	return err ? err : nbytes ;
