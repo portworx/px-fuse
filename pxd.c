@@ -226,7 +226,7 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 
 /* Common functions */
 static int _pxd_flush(struct pxd_device *pxd_dev) {
-	int ret;
+	int ret = 0;
 	int index;
 	struct file *file;
 
@@ -630,6 +630,29 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq, loff_t p
 }
 
 #else
+static unsigned getsectors(struct bio *bio) {
+	unsigned nbytes = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bio_for_each_segment(bvec, bio, i) {
+		nbytes += bvec.bv_len;
+	}
+#else
+	bio_for_each_segment(bvec, bio, i) {
+		nbytes += bvec->bv_len;
+	}
+#endif
+
+	return nbytes/SECTOR_SIZE;
+}
+
 static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
 	int ret = 0;
 	int nsegs = 0;
@@ -945,20 +968,32 @@ out:
 static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio, bool shouldClose)
 {
 	int ret;
+	unsigned long startTime = jiffies;
 
 	if (shouldClose) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		bio_io_error(bio);
 		return;
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_start_io_acct(tc->pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &tc->pxd_dev->disk->part0);
+#else
+	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &tc->pxd_dev->disk->part0);
+#endif
 
 	ret = do_bio_filebacked(tc, bio);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_end_io_acct(tc->pxd_dev->disk->queue, bio_op(bio), &tc->pxd_dev->disk->part0, startTime);
+#else
+	generic_end_io_acct(bio_data_dir(bio), &tc->pxd_dev->disk->part0, startTime);
+#endif
+	atomic_inc(&tc->pxd_dev->ncomplete);
+
 	if (ret < 0) {
 		bio_io_error(bio);
 		return;
 	}
-
-	atomic_inc(&tc->pxd_dev->ncomplete);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 	bio_endio(bio);
 #else
@@ -2233,7 +2268,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_vol_out *add
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,5,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
 	queue_flag_clear_unlocked(QUEUE_FLAG_NOMERGES, q);
 	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
