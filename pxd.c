@@ -177,6 +177,7 @@ struct pxd_device {
 	atomic_t nsync; // number of forced syncs completed
 	atomic_t ncount; // total active requests
 	atomic_t ncomplete; // total completed requests
+	atomic_t ncongested; // total number of times queue congested
 	atomic_t write_counter; // completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES];
 	volatile bool connected; // fc connected status
@@ -1354,6 +1355,7 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 		spin_lock_irq(&pxd_dev->dlock);
 		if (atomic_read(&pxd_dev->ncount) >= q->nr_congestion_on) {
 			pxd_printk("Hit congestion... wait until clear\n");
+			atomic_inc(&pxd_dev->ncongested);
 			wait_event_lock_irq(pxd_dev->congestion_wait,
 				atomic_read(&pxd_dev->ncount) < q->nr_congestion_off,
 				pxd_dev->dlock);
@@ -2697,7 +2699,7 @@ static ssize_t pxd_congestion_show(struct device *dev,
 	struct request_queue *q = pxd_dev->disk->queue;
 
 	bool congested = atomic_read(&pxd_dev->ncount) >= q->nr_congestion_on;
-	return sprintf(buf, "congested: %d\n", congested);
+	return sprintf(buf, "congested: %d/%d\n", congested, atomic_read(&pxd_dev->ncongested));
 }
 
 static ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
