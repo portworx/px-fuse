@@ -284,9 +284,25 @@ __releases(fc->lock)
 	fuse_put_request(fc, req);
 }
 
-static inline bool fuse_request_mergable(enum pxd_opcode op)
+static inline bool fuse_request_mergeable(struct fuse_req *req,
+                                          enum pxd_opcode op)
 {
-    return (op == PXD_WRITE) || (op == PXD_READ) || (op == PXD_DISCARD);
+    return ((op == PXD_WRITE) && req->misc.pxd_rdwr_in.size) ||
+           (op == PXD_READ) || (op == PXD_DISCARD);
+}
+
+static inline bool fuse_request_queue(struct fuse_conn *fc,
+                                      struct fuse_req *req)
+{
+	fc->active_background++;
+    if ((fc->active_background >= fc->accumulate) ||
+        ((req->in.h.opcode == PXD_WRITE) &&
+         ((req->misc.pxd_rdwr_in.size == 0) ||
+          (req->misc.pxd_rdwr_in.flags & PXD_FLAGS_FLUSH)))) {
+        fc->active_background = 0;
+        return true;
+    }
+    return false;
 }
 
 static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
@@ -294,12 +310,12 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 {
     enum pxd_opcode op = req->in.h.opcode;
     struct fuse_req *prev;
-    bool wakeup = false;
+    bool wakeup;
 
     /* Check if the request could be merged with another request */
-    if (fuse_request_mergable(op) && !list_empty(&fc->pending)) {
+    if (fuse_request_mergeable(req, op) && !list_empty(&fc->pending)) {
         prev = list_last_entry(&fc->pending, struct fuse_req, list);
-        if ((prev->in.h.opcode == op) &&
+        if ((prev->in.h.opcode == op) && prev->misc.pxd_rdwr_in.size &&
             ((prev->misc.pxd_rdwr_in.offset + prev->misc.pxd_rdwr_in.size) ==
              req->misc.pxd_rdwr_in.offset) &&
             ((prev->misc.pxd_rdwr_in.size + req->misc.pxd_rdwr_in.size) <=
@@ -307,12 +323,7 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
             prev->misc.pxd_rdwr_in.size += req->misc.pxd_rdwr_in.size;
             list_add_tail(&req->merged, &prev->merged);
             req->state = FUSE_REQ_PENDING;
-            fc->active_background++;
-            if (fc->active_background >= fc->accumulate) {
-                fc->active_background = 0;
-                return true;
-            }
-            return false;
+            return fuse_request_queue(fc, req);
         }
     }
 	BUG_ON(!req->background);
@@ -322,11 +333,7 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 		set_bdi_congested(&fc->bdi, BLK_RW_SYNC);
 		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 	}
-	fc->active_background++;
-    if (fc->active_background >= fc->accumulate) {
-        fc->active_background = 0;
-        wakeup = true;
-    }
+    wakeup = fuse_request_queue(fc, req);
 	req->in.h.unique = fuse_get_unique(fc);
 	queue_request(fc, req);
     return wakeup;
