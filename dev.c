@@ -211,9 +211,9 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 	req->state = FUSE_REQ_PENDING;
 }
 
-static void fuse_conn_wakeup(struct fuse_conn *fc)
+static void fuse_conn_wakeup(struct fuse_conn *fc, bool force)
 {
-    if (!fc->signaled) {
+    if (!fc->signaled || force) {
         fc->signaled = true;
 	    wake_up(&fc->waitq);
 	    kill_fasync(&fc->fasync, SIGIO, POLL_IN);
@@ -235,7 +235,7 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 	req->state = FUSE_REQ_PENDING;
 	spin_unlock(&fc->lock);
 
-	fuse_conn_wakeup(fc);
+	fuse_conn_wakeup(fc, false);
 }
 
 /*
@@ -299,7 +299,6 @@ static inline bool fuse_request_queue(struct fuse_conn *fc,
         ((req->in.h.opcode == PXD_WRITE) &&
          ((req->misc.pxd_rdwr_in.size == 0) ||
           (req->misc.pxd_rdwr_in.flags & PXD_FLAGS_FLUSH)))) {
-        fc->active_background = 0;
         return true;
     }
     return false;
@@ -341,7 +340,7 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 
 void fuse_timer_wakeup(struct fuse_conn *fc)
 {
-	fuse_conn_wakeup(fc);
+	fuse_conn_wakeup(fc, true);
 }
 
 static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
@@ -360,7 +359,7 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		spin_unlock(&fc->lock);
 
         if (wakeup) {
-			fuse_conn_wakeup(fc);
+			fuse_conn_wakeup(fc, false);
         }
 	} else {
 		req->out.h.error = -ENOTCONN;
@@ -464,7 +463,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 
 	spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
-        fc->signaled = false;
+        pxd_reset_active_background(fc);
 		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
 			goto err_unlock;
@@ -500,7 +499,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	list_splice_tail(&tmp, &fc->processing);
 
 	if (!request_pending(fc)) {
-        fc->signaled = false;
+        pxd_reset_active_background(fc);
     }
 	spin_unlock(&fc->lock);
 
