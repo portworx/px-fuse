@@ -30,3 +30,6 @@ autom4te.cache
 config.*
 *.mk
 *.ur-safe
+
+cscope.*
+tags
