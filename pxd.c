@@ -1148,6 +1148,7 @@ void pxd_reset_active_background(struct fuse_conn *fc)
     }
     fc->signaled = false;
     fc->active_background = 0;
+    fc->pending_total = 0;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)

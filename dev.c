@@ -291,11 +291,15 @@ static inline bool fuse_request_mergeable(struct fuse_req *req,
            (op == PXD_READ) || (op == PXD_DISCARD);
 }
 
+uint64_t pxd_accumulate_size = (128 * 1024 * 1024);
+
 static inline bool fuse_request_queue(struct fuse_conn *fc,
                                       struct fuse_req *req)
 {
 	fc->active_background++;
+    fc->pending_total += req->misc.pxd_rdwr_in.size;
     if ((fc->active_background >= fc->accumulate) ||
+        (fc->pending_total >= pxd_accumulate_size) ||
         ((req->in.h.opcode == PXD_WRITE) &&
          ((req->misc.pxd_rdwr_in.size == 0) ||
           (req->misc.pxd_rdwr_in.flags & PXD_FLAGS_FLUSH)))) {
