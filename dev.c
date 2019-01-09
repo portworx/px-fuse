@@ -291,7 +291,7 @@ static inline bool fuse_request_mergeable(struct fuse_req *req,
            (op == PXD_READ) || (op == PXD_DISCARD);
 }
 
-uint64_t pxd_accumulate_size = (128 * 1024 * 1024);
+uint64_t pxd_accumulate_size = (128 * 1024);
 
 static inline bool fuse_request_queue(struct fuse_conn *fc,
                                       struct fuse_req *req)
