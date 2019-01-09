@@ -267,6 +267,9 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	req->in.numargs = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	req->bio_pages = true;
 	req->in.h.pid = current->pid;
 	req->misc.pxd_rdwr_in.minor = minor;
@@ -329,9 +332,6 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
 
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
 		pxd_write_same_request(req, size, off, minor, flags, qfn);
@@ -358,9 +358,6 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
 
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
 		/* FALLTHROUGH */
