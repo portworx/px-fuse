@@ -306,7 +306,37 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
+	struct req_iterator breq_iter;
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+#else
+	struct bio_vec *bvec = NULL;
+#endif
+	char *kaddr, *p;
+	size_t i, len;
+
 	req->in.h.opcode = PXD_WRITE;
+
+	/* Check if this is a write of zero blocks and if so, convert that to a
+	 * discard request.
+	 */
+	if (size && qfn && !(flags & (REQ_FLUSH | REQ_FUA))) {
+		rq_for_each_segment(bvec, req->rq, breq_iter) {
+			kaddr = kmap_atomic(BVEC(bvec).bv_page);
+			p = kaddr + BVEC(bvec).bv_offset;
+			len = BVEC(bvec).bv_len;
+			for (i = 0; i < len; i++) {
+				if (p[i]) {
+					kunmap_atomic(kaddr);
+					goto out;
+				}
+			}
+			kunmap_atomic(kaddr);
+		}
+		req->in.h.opcode = PXD_DISCARD;
+	}
+
+out:
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -477,6 +507,8 @@ static void pxd_rq_fn(struct request_queue *q)
 
 		pxd_dev->ctx->last_enqueued = jiffies;
 
+		req->rq = rq;
+		req->queue = q;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
@@ -487,8 +519,6 @@ static void pxd_rq_fn(struct request_queue *q)
 			    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
-		req->rq = rq;
-		req->queue = q;
 		fuse_request_send_background(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
