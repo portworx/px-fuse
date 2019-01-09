@@ -300,6 +300,20 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
+static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
+			uint32_t minor, uint32_t flags, bool qfn)
+{
+	req->in.h.opcode = PXD_DISCARD;
+	req->in.numargs = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
+	req->in.argpages = 0;
+	req->out.numargs = 0;
+	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+
+	pxd_req_misc(req, size, off, minor, flags);
+}
+
 static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
@@ -311,8 +325,7 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 	char *kaddr, *p;
 	size_t i, len;
-
-	req->in.h.opcode = PXD_WRITE;
+	uint64_t *q;
 
 	/* Check if this is a write of zero blocks and if so, convert that to a
 	 * discard request.
@@ -321,8 +334,15 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		rq_for_each_segment(bvec, req->rq, breq_iter) {
 			kaddr = kmap_atomic(BVEC(bvec).bv_page);
 			p = kaddr + BVEC(bvec).bv_offset;
+			q = (uint64_t *)p;
 			len = BVEC(bvec).bv_len;
-			for (i = 0; i < len; i++) {
+			for (i = 0; i < (len / 8); i++) {
+				if (q[i]) {
+					kunmap_atomic(kaddr);
+					goto out;
+				}
+			}
+			for (i = len - (len % 8); i < len; i++) {
 				if (p[i]) {
 					kunmap_atomic(kaddr);
 					goto out;
@@ -330,28 +350,16 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			}
 			kunmap_atomic(kaddr);
 		}
-		req->in.h.opcode = PXD_DISCARD;
+		pxd_discard_request(req, size, off, minor, flags, qfn);
+		return;
 	}
 
 out:
+	req->in.h.opcode = PXD_WRITE;
 	req->in.numargs = 1;
 	req->in.argpages = 0;
 	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
 	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->out.numargs = 0;
-	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
-
-	pxd_req_misc(req, size, off, minor, flags);
-}
-
-static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn)
-{
-	req->in.h.opcode = PXD_DISCARD;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->in.argpages = 0;
 	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
