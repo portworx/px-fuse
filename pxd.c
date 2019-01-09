@@ -287,14 +287,9 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_READ;
-	req->in.numargs = 1;
-	req->in.argpages = 0;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	req->out.numargs = 1;
 	req->out.argpages = 1;
 	req->out.args[0].size = size;
-	req->out.args[0].value = NULL;
 	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -304,11 +299,6 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
-	req->in.numargs = 1;
-	req->in.argpages = 0;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -318,11 +308,6 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_DISCARD;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->in.argpages = 0;
-	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -332,11 +317,6 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE_SAME;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->in.argpages = 0;
-	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -349,6 +329,9 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
 
+	req->in.numargs = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
 		pxd_write_same_request(req, size, off, minor, flags, qfn);
@@ -375,6 +358,9 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
 
+	req->in.numargs = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
 		/* FALLTHROUGH */
@@ -447,7 +433,6 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
-	req->misc.pxd_rdwr_in.chksum = 0;
 	req->bio = bio;
 	req->queue = q;
 
@@ -498,8 +483,6 @@ static void pxd_rq_fn(struct request_queue *q)
 			    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
-		req->num_pages = 0;
-		req->misc.pxd_rdwr_in.chksum = 0;
 		req->rq = rq;
 		req->queue = q;
 		fuse_request_send_background(&pxd_dev->ctx->fc, req);
