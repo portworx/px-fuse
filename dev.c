@@ -321,6 +321,7 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
         if ((prev->in.h.opcode == op) && prev->misc.pxd_rdwr_in.size &&
             ((prev->misc.pxd_rdwr_in.offset + prev->misc.pxd_rdwr_in.size) ==
              req->misc.pxd_rdwr_in.offset) &&
+            (req->misc.pxd_rdwr_in.flags == prev->misc.pxd_rdwr_in.flags) &&
             ((prev->misc.pxd_rdwr_in.size + req->misc.pxd_rdwr_in.size) <=
              PXD_MAX_IO)) {
             prev->misc.pxd_rdwr_in.size += req->misc.pxd_rdwr_in.size;
@@ -667,7 +668,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 {
 	struct pxd_read_data_out read_data;
 	size_t len = sizeof(read_data);
-	struct fuse_req *req;
+	struct fuse_req *req, *first;
 	struct iovec iov[IOV_BUF_SIZE];
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
@@ -709,6 +710,8 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
+    first = req;
+
 more:
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		copied = 0;
@@ -747,8 +750,8 @@ more:
 			}
 		}
 	}
-    if (iter->count) {
-        req = list_next_entry(req, merged);
+    req = list_next_entry(req, merged);
+    if (req && (req != first)) {
 #ifndef HAVE_BVEC_ITER
         bvec = NULL;
 #endif
@@ -879,8 +882,8 @@ more:
 				}
                 i++;
             }
-            if (iter->count) {
-                next = list_next_entry(next, merged);
+            next = list_next_entry(next, merged);
+            if (next && (next != req)) {
 	            next->state = FUSE_REQ_WRITING;
                 breq = next->rq;
 #ifndef HAVE_BVEC_ITER
