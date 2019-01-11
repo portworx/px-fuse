@@ -1523,11 +1523,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
 #endif
 
-#ifdef USE_DIO
 		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
-#else
-		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
-#endif
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
 				pxd_dev->dev_id, newPath, PTR_ERR(f));
@@ -2377,7 +2373,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->offset = add->offset;
 	pxd_dev->aio = false;
-	pxd_dev->bg_flush_enabled = true;
+	pxd_dev->bg_flush_enabled = false; // introduces high latency
 	pxd_dev->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	for (i=0; i<add->nfd; i++) {
