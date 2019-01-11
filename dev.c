@@ -733,7 +733,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	int err;
 	struct fuse_req *req;
 	struct fuse_out_header oh;
-	size_t copied = 0;
 	size_t len;
 	size_t nbytes = iter->count;
 
@@ -745,7 +744,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		printk(KERN_ERR "%s: can't copy header\n", __func__);
 		return -EFAULT;
 	}
-	copied += len;
 
 	if (oh.len != nbytes)
 		return -EINVAL;
@@ -796,18 +794,13 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 					       __func__, i, breq->nr_phys_segments);
 					return -EFAULT;
 				}
-				copied += len;
+				i++;
 			}
 		}
 	}
-	err = 0;
-
 	spin_lock(&fc->lock);
-	if (err)
-		req->out.h.error = -EIO;
 	request_end(fc, req);
-
-	return err ? err : nbytes ;
+	return nbytes;
 
  err_unlock:
 	spin_unlock(&fc->lock);
