@@ -72,7 +72,6 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
 	INIT_HLIST_NODE(&req->hash_entry);
-	atomic_set(&req->count, 1);
 	req->pages = pages;
 	req->page_descs = page_descs;
 	req->max_pages = npages;
@@ -127,11 +126,6 @@ void fuse_request_free(struct fuse_req *req)
 	kmem_cache_free(fuse_req_cachep, req);
 }
 
-void __fuse_get_request(struct fuse_req *req)
-{
-	atomic_inc(&req->count);
-}
-
 static void fuse_req_init_context(struct fuse_req *req)
 {
 	req->in.h.uid = from_kuid_munged(&init_user_ns, current_fsuid());
@@ -172,12 +166,6 @@ struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
 					     unsigned npages)
 {
 	return __fuse_get_req(fc, npages, true);
-}
-
-void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
-{
-	if (atomic_dec_and_test(&req->count))
-		fuse_request_free(req);
 }
 
 static unsigned len_args(unsigned numargs, struct fuse_arg *args)
@@ -267,7 +255,7 @@ __releases(fc->lock)
 	spin_unlock(&fc->lock);
 	if (end)
 		end(fc, req);
-	fuse_put_request(fc, req);
+	fuse_request_free(req);
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,

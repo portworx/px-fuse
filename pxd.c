@@ -954,7 +954,6 @@ static void pxd_process_init_reply(struct fuse_conn *fc,
 	if (req->out.h.error != 0)
 		fc->connected = 0;
 	fc->pend_open = 0;
-	fuse_put_request(fc, req);
 }
 
 static int pxd_send_init(struct fuse_conn *fc)
@@ -1014,7 +1013,7 @@ err_free_pages:
 		if (req->pages[i])
 			put_page(req->pages[i]);
 	}
-	fuse_put_request(fc, req);
+	fuse_request_free(req);
 err:
 	return rc;
 }
