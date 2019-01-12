@@ -755,7 +755,6 @@ more:
 #ifndef HAVE_BVEC_ITER
         bvec = NULL;
 #endif
-        skipped = 0;
         goto more;
     }
 	return 0;
