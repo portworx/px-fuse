@@ -1096,9 +1096,8 @@ void fuse_restart_requests(struct fuse_conn *fc)
 	list_for_each_entry(req, &fc->processing, list)
 		req->state = FUSE_REQ_PENDING;
 	list_splice_init(&fc->processing, &fc->pending);
-	wake_up(&fc->waitq);
-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	spin_unlock(&fc->lock);
+	fuse_conn_wakeup(fc, true);
 }
 
 static int fuse_dev_fasync(int fd, struct file *file, int on)
