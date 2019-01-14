@@ -303,57 +303,19 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
-static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
-	req->in.h.opcode = PXD_DISCARD;
+	req->in.h.opcode = PXD_WRITE;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
 
-static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
-	struct req_iterator breq_iter;
-#ifdef HAVE_BVEC_ITER
-	struct bio_vec bvec;
-#else
-	struct bio_vec *bvec = NULL;
-#endif
-	char *kaddr, *p;
-	size_t i, len;
-	uint64_t *q;
-
-	/* Check if this is a write of zero blocks and if so, convert that to a
-	 * discard request.
-	 */
-	if (size && qfn && !(flags & (REQ_FLUSH | REQ_FUA))) {
-		rq_for_each_segment(bvec, req->rq, breq_iter) {
-			kaddr = kmap_atomic(BVEC(bvec).bv_page);
-			p = kaddr + BVEC(bvec).bv_offset;
-			q = (uint64_t *)p;
-			len = BVEC(bvec).bv_len;
-			for (i = 0; i < (len / 8); i++) {
-				if (q[i]) {
-					kunmap_atomic(kaddr);
-					goto out;
-				}
-			}
-			for (i = len - (len % 8); i < len; i++) {
-				if (p[i]) {
-					kunmap_atomic(kaddr);
-					goto out;
-				}
-			}
-			kunmap_atomic(kaddr);
-		}
-		pxd_discard_request(req, size, off, minor, flags, qfn);
-		return;
-	}
-
-out:
-	req->in.h.opcode = PXD_WRITE;
+	req->in.h.opcode = PXD_DISCARD;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);

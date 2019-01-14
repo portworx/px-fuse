@@ -426,6 +426,44 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 	return copied;
 }
 
+/* Check if the request is writing zeroes and if so, convert it as a discard
+ * request.
+ */
+static void fuse_convert_zero_writes(struct fuse_req *req)
+{
+	uint8_t wsize = sizeof(uint64_t);
+	struct req_iterator breq_iter;
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+#else
+	struct bio_vec *bvec = NULL;
+#endif
+	char *kaddr, *p;
+	size_t i, len;
+	uint64_t *q;
+
+	rq_for_each_segment(bvec, req->rq, breq_iter) {
+		kaddr = kmap_atomic(BVEC(bvec).bv_page);
+		p = kaddr + BVEC(bvec).bv_offset;
+		q = (uint64_t *)p;
+		len = BVEC(bvec).bv_len;
+		for (i = 0; i < (len / wsize); i++) {
+			if (q[i]) {
+				kunmap_atomic(kaddr);
+				return;
+			}
+		}
+		for (i = len - (len % wsize); i < len; i++) {
+			if (p[i]) {
+				kunmap_atomic(kaddr);
+				return;
+			}
+		}
+		kunmap_atomic(kaddr);
+	}
+	req->in.h.opcode = PXD_DISCARD;
+}
+
 /*
  * Read a single request into the userspace filesystem's buffer.  This
  * function waits until a request is available, then removes it from
@@ -495,6 +533,10 @@ retry:
 	entry = first;
 	while (1) {
 		req = list_entry(entry, struct fuse_req, list);
+		if ((req->in.h.opcode == PXD_WRITE) && req->misc.pxd_rdwr_in.size &&
+			!(req->misc.pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
+			fuse_convert_zero_writes(req);
+		}
 		next = entry->next;
 		copied_this_time = fuse_copy_req_read(req, iter);
 		if (likely(copied_this_time > 0)) {
