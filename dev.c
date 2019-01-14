@@ -426,7 +426,7 @@ retry:
 		}
 	}
 
-	err = -EINVAL;
+	err = copied ? copied : -EINVAL;
 	if (last == &fc->pending)
 		goto err_unlock;
 
