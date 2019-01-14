@@ -921,9 +921,23 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
-	loff_t pos;
 	int ret;
 
+#ifdef RAWSWITCHDEVICE
+	struct address_space *mapping = pxd_dev->file[0]->f_mapping;
+	struct inode *inode = mapping->host;
+	struct block_device *bdi = I_BDEV(inode);
+	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, NULL);
+
+	if (!clone_bio) {
+		return -ENOMEM;
+	}
+
+	bio_set_dev(clone_bio, bdi);
+	ret = submit_bio_wait(clone_bio);
+	bio_put(clone_bio);
+#else
+	loff_t pos;
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->ncount));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -962,6 +976,7 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	}
 
 out:
+#endif
         return ret;
 }
 #endif
@@ -1458,6 +1473,8 @@ void pxd_rq_fn_process(struct pxd_device *pxd_dev, struct request_queue *q, stru
 static int initFile(struct pxd_device *pxd_dev, bool force) {
 	struct inode *inode;
 	int i;
+	int pool;
+	int err = -ENODEV;
 
 	/* no hack needed if fds are passed */
 	if (pxd_dev->nfd) {
@@ -1487,8 +1504,62 @@ static int initFile(struct pxd_device *pxd_dev, bool force) {
 		return 0;
 	}
 
-	printk(KERN_ERR"Failed for device %llu no backing file found\n", pxd_dev->dev_id);
-	return -ENODEV;
+
+	printk(KERN_INFO"pxd_dev device Id %lld hack code entered..\n",
+			pxd_dev->dev_id);
+
+	for (pool=0; pool<MAXPOOL; pool++) {
+		char newPath[64];
+		struct file* f;
+#ifdef DMTHINPOOL
+		sprintf(newPath, DMTHINVOLFMT, pool, pxd_dev->dev_id);
+#else
+		sprintf(newPath, FSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
+#endif
+
+		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+		if (IS_ERR_OR_NULL(f)) {
+			printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
+				pxd_dev->dev_id, newPath, PTR_ERR(f));
+			continue;
+		}
+
+		printk(KERN_INFO"Success device %llu backing file %s\n",
+					pxd_dev->dev_id, newPath);
+
+		strcpy(pxd_dev->device_path, newPath);
+		pxd_dev->nfd = 1;
+		pxd_dev->file[0] = f;
+		{
+			struct inode *inode = f->f_inode;
+			printk(KERN_WARNING"device %lld, inode %lu\n",
+				pxd_dev->dev_id, inode->i_ino);
+
+			if (S_ISREG(inode->i_mode)) {
+				pxd_dev->block_device = false;
+				printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
+					pxd_dev->dev_id, i, inode->i_ino);
+			} else if (S_ISBLK(inode->i_mode)) {
+				pxd_dev->block_device = true;
+				printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
+					pxd_dev->dev_id, i, inode->i_ino);
+			} else {
+				printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
+					pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+			}
+		}
+		err = 0;
+		break;
+	}
+
+	if (err) {
+		printk(KERN_ERR"Setting up fd for backing file (hack) failed\n");
+		return -EINVAL;
+	}
+	printk(KERN_INFO"pxd_dev device Id %lld hack code success exit..\n", pxd_dev->dev_id);
+	/* hack code for configuring pxd volume from path search */
+
+	return 0;
 }
 
 static void cleanupFile(struct pxd_device *pxd_dev) {
@@ -1505,13 +1576,46 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	printk(KERN_INFO"Number of cpu ids %d\n", MAX_THREADS);
 
 	if (!pxd_dev->nfd) { /* hack code begins */
-#define BASEDIR "/var/.px"
-#define BTRFSVOLFMT  "%s/%d/%llu/pxdev"
-#define DMTHINVOLFMT "/dev/mapper/pxvg%d-%llu"
-#define MAXPOOL (5)
-	int pool;
 	char newPath[64];
 	struct file* f;
+
+#ifdef RAWSWITCHDEVICE
+	printk(KERN_INFO"pxd_dev device Id %lld hack code entered..\n",
+			pxd_dev->dev_id);
+
+	/* only supports a single pxvol switch to raw device */
+	sprintf(newPath, "%s", RAWSWITCHDEVICE);
+		
+	f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+	if (IS_ERR_OR_NULL(f)) {
+		printk(KERN_ERR"Failed device %llu at path %s err %ld\n",
+			pxd_dev->dev_id, newPath, PTR_ERR(f));
+		return -EINVAL;
+	}
+
+	printk(KERN_INFO"Success device %llu backing file %s\n", pxd_dev->dev_id, newPath);
+	strcpy(pxd_dev->device_path, newPath);
+	pxd_dev->nfd = 1;
+	pxd_dev->file[0] = f;
+	{
+		/* check indeed the backing volume is a raw block device.. */
+		struct inode *inode = f->f_inode;
+		printk(KERN_WARNING"device %lld, inode %lu\n", pxd_dev->dev_id, inode->i_ino);
+
+		if (S_ISBLK(inode->i_mode)) {
+			pxd_dev->block_device = true;
+			printk(KERN_INFO"device[%lld] is a block device - inode %lu\n",
+					pxd_dev->dev_id, inode->i_ino);
+		} else {
+			printk(KERN_INFO"device[%lld] inode %lu not a block device %#x\n",
+					pxd_dev->dev_id, inode->i_ino, inode->i_mode);
+			return -EINVAL;
+		}
+	}
+
+	printk(KERN_INFO"pxd_dev device Id %lld hack code success exit..\n", pxd_dev->dev_id);
+#else
+	int pool;
 
 	printk(KERN_INFO"pxd_dev device Id %lld hack code entered..\n",
 			pxd_dev->dev_id);
@@ -1520,7 +1624,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 #ifdef DMTHINPOOL
 		sprintf(newPath, DMTHINVOLFMT, pool, pxd_dev->dev_id);
 #else
-		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
+		sprintf(newPath, FSVOLFMT, BASEDIR, pool, pxd_dev->dev_id);
 #endif
 
 		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
@@ -1536,6 +1640,24 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		strcpy(pxd_dev->device_path, newPath);
 		pxd_dev->nfd = 1;
 		pxd_dev->file[0] = f;
+		{
+			struct inode *inode = f->f_inode;
+			printk(KERN_WARNING"device %lld, inode %lu\n",
+				pxd_dev->dev_id, inode->i_ino);
+
+			if (S_ISREG(inode->i_mode)) {
+				pxd_dev->block_device = false;
+				printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
+					pxd_dev->dev_id, i, inode->i_ino);
+			} else if (S_ISBLK(inode->i_mode)) {
+				pxd_dev->block_device = true;
+				printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
+					pxd_dev->dev_id, i, inode->i_ino);
+			} else {
+				printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
+					pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+			}
+		}
 		err = 0;
 		break;
 	}
@@ -1544,6 +1666,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		printk(KERN_ERR"Setting up fd for backing file (hack) failed\n");
 		return -EINVAL;
 	}
+#endif
 	printk(KERN_INFO"pxd_dev device Id %lld hack code success exit..\n", pxd_dev->dev_id);
 	} /* hack code for configuring pxd volume from path search */
 
@@ -1579,8 +1702,8 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	}
 
 	for (pool=0; pool<MAXPOOL; pool++) {
-		sprintf(newPath, BTRFSVOLFMT, BASEDIR, pool, mirror_dev->dev_id);
-		f = filp_open(newPath, O_LARGEFILE | O_RDWR, 0600);
+		sprintf(newPath, FSVOLFMT, BASEDIR, pool, mirror_dev->dev_id);
+		f = filp_open(newPath, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed mirror device %llu at path %s err %ld\n",
 				mirror_dev->dev_id, newPath, PTR_ERR(f));
@@ -2798,7 +2921,7 @@ static ssize_t pxd_replicate_store(struct device *dev, struct device_attribute *
 	printk(KERN_ERR"Parent device %lld, device path %s\n", pxd_dev->dev_id, replicate);
 
 	/* look for configuring an device given as path as a replicate volume */
-	f = filp_open(replicate, O_LARGEFILE | O_RDWR, 0600);
+	f = filp_open(replicate, O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
 	if (IS_ERR_OR_NULL(f)) {
 		printk(KERN_ERR"Failed opening replicate device at path %s err %ld\n",
 				replicate, PTR_ERR(f));

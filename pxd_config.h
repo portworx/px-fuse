@@ -29,5 +29,11 @@
 //#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
 //
 //
+#define RAWSWITCHDEVICE "/dev/nvme1n1"
+
+#define MAXPOOL (5)
+#define BASEDIR "/var/.px"
+#define FSVOLFMT  "%s/%d/%llu/pxdev"
+#define DMTHINVOLFMT "/dev/mapper/pxvg%d-%llu"
 
 #endif /* _PXD_CONFIG_H_ */
