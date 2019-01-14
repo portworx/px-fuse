@@ -476,7 +476,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	req->bio = bio;
 	req->queue = q;
 
-	fuse_request_send_background(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
 }
 
@@ -527,7 +527,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
-		fuse_request_send_background(&pxd_dev->ctx->fc, req);
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -999,7 +999,7 @@ static void pxd_process_init_reply(struct fuse_conn *fc,
 	if (req->out.h.error != 0)
 		fc->connected = 0;
 	fc->pend_open = 0;
-	fuse_put_request(fc, req);
+	fuse_put_request(req);
 }
 
 static int pxd_send_init(struct fuse_conn *fc)
@@ -1044,7 +1044,6 @@ static int pxd_send_init(struct fuse_conn *fc)
 	req->in.args[1].size = sizeof(struct pxd_dev_id) * ctx->num_devices;
 	req->in.args[1].value = NULL;
 	req->in.argpages = 1;
-	req->out.numargs = 0;
 	req->end = pxd_process_init_reply;
 
 	fuse_request_send_oob(fc, req);
@@ -1059,7 +1058,7 @@ err_free_pages:
 		if (req->pages[i])
 			put_page(req->pages[i]);
 	}
-	fuse_put_request(fc, req);
+	fuse_put_request(req);
 err:
 	return rc;
 }

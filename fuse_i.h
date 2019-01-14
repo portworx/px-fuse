@@ -266,9 +266,6 @@ struct fuse_req {
 	 * fuse_conn->lock
 	 */
 
-	/** True if the request has reply */
-	unsigned isreply:1;
-
 	/** Request is sent in the background */
 	unsigned background:1;
 
@@ -734,7 +731,7 @@ static inline struct fuse_req *fuse_get_req_nopages(struct fuse_conn *fc)
  * Decrement reference count of a request.  If count goes to zero free
  * the request.
  */
-void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req);
+void fuse_put_request(struct fuse_req *req);
 
 /**
  * Send a request to head of pending queue.
@@ -744,7 +741,7 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
 /**
  * Send a request in the background
  */
-void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req);
+void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
 
 void fuse_timer_wakeup(struct fuse_conn *fc);
 
