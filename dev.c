@@ -318,7 +318,6 @@ static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 			 PXD_MAX_IO)) {
 			prev->misc.pxd_rdwr_in.size += req->misc.pxd_rdwr_in.size;
 			list_add_tail(&req->merged, &prev->merged);
-			req->state = FUSE_REQ_PENDING;
 			return fuse_request_queue(fc, req);
 		}
 	}
@@ -552,7 +551,7 @@ retry:
 	}
 
 	/* Check if more requests could be picked up */
-	if (remain && request_pending(fc)) {
+	if (remain && fc->signaled && request_pending(fc)) {
 		INIT_LIST_HEAD(&tmp);
 		spin_lock(&fc->lock);
 		if (request_pending(fc)) {
