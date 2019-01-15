@@ -67,6 +67,14 @@ struct node_cpu_map {
 	int ncpu;
 };
 
+static struct bio_set pxd_bio_set;
+#define PXD_MIN_POOL_PAGES (128)
+struct pxd_io_tracker {
+	unsigned long start;
+	struct bio *orig;
+	struct bio clone;
+};
+
 // A one-time built, static lookup table to distribute requests to cpu within same numa node
 static struct node_cpu_map *node_cpu_map;
 
@@ -183,6 +191,82 @@ struct pxd_device {
 	volatile bool connected; // fc connected status
 	struct pxd_context *ctx;
 };
+
+static unsigned getsectors(struct bio *bio) {
+	unsigned nbytes = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bio_for_each_segment(bvec, bio, i) {
+		nbytes += bvec.bv_len;
+	}
+#else
+	bio_for_each_segment(bvec, bio, i) {
+		nbytes += bvec->bv_len;
+	}
+#endif
+
+	return nbytes/SECTOR_SIZE;
+}
+
+static void pxd_complete_io(struct bio* bio) {
+	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
+	struct pxd_device *pxd_dev = bio->bi_private;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
+#else
+	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+        if (bio->bi_status) { /* non-zero indicates failure */
+                bio_io_error(iot->orig);
+        } else {
+                bio_endio(iot->orig);
+        }
+#else
+        bio_endio(iot->orig, bio->bi_status);
+#endif
+
+	atomic_inc(&pxd_dev->ncomplete);
+
+	bio_put(bio);
+}
+
+static 
+int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
+	struct address_space *mapping = pxd_dev->file[0]->f_mapping;
+	struct inode *inode = mapping->host;
+	struct block_device *bdi = I_BDEV(inode);
+	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, &pxd_bio_set);
+	struct pxd_io_tracker* iot = container_of(clone_bio, struct pxd_io_tracker, clone);
+
+	if (!clone_bio) {
+		return -ENOMEM;
+	}
+
+	iot->orig = bio;
+	iot->start = jiffies;
+	bio_set_dev(clone_bio, bdi);
+	clone_bio->bi_private = pxd_dev;
+	clone_bio->bi_end_io = pxd_complete_io;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &pxd_dev->disk->part0);
+#else
+	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
+#endif
+
+	submit_bio(clone_bio);
+	atomic_inc(&pxd_dev->ncount);
+
+	return 0;
+}
 
 static inline
 struct file* getFile(struct pxd_device *pxd_dev, int index) {
@@ -631,29 +715,6 @@ static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq, loff_t p
 }
 
 #else
-static unsigned getsectors(struct bio *bio) {
-	unsigned nbytes = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-#else
-	struct bio_vec *bvec;
-	int i;
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	bio_for_each_segment(bvec, bio, i) {
-		nbytes += bvec.bv_len;
-	}
-#else
-	bio_for_each_segment(bvec, bio, i) {
-		nbytes += bvec->bv_len;
-	}
-#endif
-
-	return nbytes/SECTOR_SIZE;
-}
-
 static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
 	int ret = 0;
 	int nsegs = 0;
@@ -922,21 +983,6 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
 	int ret;
-
-#ifdef RAWSWITCHDEVICE
-	struct address_space *mapping = pxd_dev->file[0]->f_mapping;
-	struct inode *inode = mapping->host;
-	struct block_device *bdi = I_BDEV(inode);
-	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, NULL);
-
-	if (!clone_bio) {
-		return -ENOMEM;
-	}
-
-	bio_set_dev(clone_bio, bdi);
-	ret = submit_bio_wait(clone_bio);
-	bio_put(clone_bio);
-#else
 	loff_t pos;
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->ncount));
@@ -976,7 +1022,6 @@ static int do_bio_filebacked(struct thread_context *tc, struct bio *bio)
 	}
 
 out:
-#endif
         return ret;
 }
 #endif
@@ -1379,6 +1424,17 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 		spin_unlock_irq(&pxd_dev->dlock);
 
+	}
+
+	if (pxd_dev->block_device) { /* use bio switch path */
+		if (pxd_switch_bio(pxd_dev, bio)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+                	bio_io_error(bio);
+#else
+        		bio_endio(bio, -ENOMEM);
+#endif
+		}
+		return BLK_QC_RETVAL;
 	}
 
 	/* keep writes on same cpu, but allow reads to spread but within same numa node */
@@ -3391,6 +3447,12 @@ int pxd_init(void)
 		map->cpu[map->ncpu++] = i;
 	}
 
+	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone), 0)) {
+		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
+		kfree(node_cpu_map);
+		goto out_sysfs;
+	}
+
 #if 0
 	/* debug dump for verification */
 	for (i=0; i<nr_node_ids; i++) {
@@ -3428,6 +3490,7 @@ void pxd_exit(void)
 {
 	int i;
 
+	bioset_exit(&pxd_bio_set);
 	if (node_cpu_map) kfree(node_cpu_map);
 
 	pxd_sysfs_exit();
