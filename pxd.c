@@ -235,8 +235,16 @@ static void pxd_complete_io(struct bio* bio) {
 #endif
 
 	atomic_inc(&pxd_dev->ncomplete);
+	atomic_dec(&pxd_dev->ncount);
 
 	bio_put(bio);
+
+	/* free up from any prior congestion wait */
+	spin_lock_irq(&pxd_dev->dlock);
+	if (atomic_read(&pxd_dev->ncount) < pxd_dev->disk->queue->nr_congestion_off) {
+		wake_up(&pxd_dev->congestion_wait);
+	}
+	spin_unlock_irq(&pxd_dev->dlock);
 }
 
 static 
