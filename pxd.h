@@ -43,6 +43,7 @@ enum pxd_opcode {
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
 	PXD_ADD2,           /**< add extended device info to kernel */
+	PXD_UPDATE_PATH,	/**< update paths */
 	PXD_LAST,
 };
 
@@ -128,6 +129,20 @@ struct pxd_update_size_out {
 	uint64_t dev_id;
 	size_t size;
 };
+
+/**
+ * PXD_UPDATE_PATH request from user space
+ */
+struct pxd_update_path_out {
+	uint64_t dev_id;
+	size_t size; // count of paths below.
+
+#define MAX_PXD_BACKING_DEVS (3)
+#define MAX_PXD_DEVPATH_LEN (64)
+	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN];
+};
+
+
 
 /**
  * PXD_READ/PXD_WRITE kernel request structure

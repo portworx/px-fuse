@@ -1269,10 +1269,10 @@ static inline unsigned int get_op_flags(struct bio *bio)
 
 #ifndef USE_REQUEST_QUEUE
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-STATIC blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
+STATIC blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-STATIC void pxd_make_request_orig(struct request_queue *q, struct bio *bio) __deprecated
+STATIC void pxd_make_request_orig(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
@@ -1347,6 +1347,11 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
+	}
+
+	if (!pxd_dev->nfd) {
+		printk(KERN_ERR"px has no backing path yet, should take slow path IO.\n");
+		return pxd_make_request_orig(q, bio);
 	}
 
 	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
@@ -2520,6 +2525,86 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 	put_device(&pxd_dev->dev);
 
 	return 0;
+out:
+	return err;
+}
+
+ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path)
+{
+	bool found = false;
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	int err;
+	struct pxd_device *pxd_dev;
+	int i;
+	struct file* f;
+	struct inode* inode;
+
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		if ((pxd_dev->dev_id == update_path->dev_id) && !pxd_dev->removing) {
+			spin_lock(&pxd_dev->dlock);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	if (!found) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	while (pxd_dev->nfd)
+		filp_close(pxd_dev->file[--pxd_dev->nfd], NULL);
+
+	for (i=0; i<update_path->size; i++) {
+		f = filp_open(update_path->devpath[i], O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+		if (IS_ERR_OR_NULL(f)) {
+			printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
+				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
+			continue;
+		}
+
+		pxd_dev->file[pxd_dev->nfd] = f;
+		pxd_dev->nfd++;
+	}
+
+	/* setup whether the access is block access or file access */
+	f = pxd_dev->file[0]; /* always decide based on the first entry in list */
+	if (!f) {
+		printk(KERN_ERR"fd file[fd=%p] invalid", f);
+		err = -EINVAL;
+		goto out;
+	}
+	inode = f->f_inode;
+	if (!inode) {
+		printk(KERN_ERR"fd file[fd=%p] inode %p invalid", f, inode);
+		err = -EINVAL;
+		goto out;
+	}
+
+	printk(KERN_WARNING"device %lld, inode %lu\n", pxd_dev->dev_id, inode->i_ino);
+	if (S_ISBLK(inode->i_mode)) {
+		pxd_dev->block_device = true;
+		printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
+					pxd_dev->dev_id, i, inode->i_ino);
+	} else {
+		pxd_dev->block_device = false;
+		if (S_ISREG(inode->i_mode)) {
+			printk(KERN_INFO"device[%lld] is a regular file - inode %lu\n",
+					pxd_dev->dev_id, inode->i_ino);
+		} else {
+			printk(KERN_INFO"device[%lld] inode %lu unknown device %#x\n",
+				pxd_dev->dev_id, inode->i_ino, inode->i_mode);
+		}
+	}
+
+	spin_unlock(&pxd_dev->dlock);
+
+	printk(KERN_INFO"Success attaching path to device %llu [nfd:%d]\n",
+		pxd_dev->dev_id, pxd_dev->nfd);
+	return 0;
+
 out:
 	return err;
 }
