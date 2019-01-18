@@ -562,7 +562,12 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
 	}
 	set_fs(get_ds());
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
+	iov_iter_bvec(&i, WRITE, bvec, 1, bvec->bv_len);
+	file_start_write(file);
+	bw = vfs_iter_write(file, &i, pos, 0);
+	file_end_write(file);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
 	bw = vfs_iter_write(file, &i, pos, 0);
@@ -711,18 +716,22 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 
 static
 ssize_t _pxd_read(struct file *file, struct bio_vec *bvec, loff_t *pos) {
-	int result;
+	int result = 0;
 
     /* read from file at offset pos into the buffer */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	struct iov_iter i;
 
-	iov_iter_bvec(&i, ITER_BVEC, bvec, 1, bvec->bv_len);
+	iov_iter_bvec(&i, READ, bvec, 1, bvec->bv_len);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	struct iov_iter i;
+
+	iov_iter_bvec(&i, ITER_BVEC|READ, bvec, 1, bvec->bv_len);
 	result = vfs_iter_read(file, &i, pos, 0);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct iov_iter i;
 
-	iov_iter_bvec(&i, ITER_BVEC, bvec, 1, bvec->bv_len);
+	iov_iter_bvec(&i, ITER_BVEC|READ, bvec, 1, bvec->bv_len);
 	result = vfs_iter_read(file, &i, pos);
 #else
 	mm_segment_t old_fs = get_fs();
