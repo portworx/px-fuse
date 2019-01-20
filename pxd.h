@@ -100,6 +100,7 @@ struct pxd_add_vol_out {
 	int32_t discard_size; /**< block device discard size in bytes */
 
 #define MAX_FD_PER_PXD (3)
+#define MAX_DEVPATH_LEN (64)
 	int32_t nfd; // number of fd passed, hack mode if nfd = 0
 	int32_t fds[MAX_FD_PER_PXD]; // each fd
 };

@@ -157,9 +157,7 @@ struct pxd_device {
 
 	int nfd;
 	struct file *file[MAX_FD_PER_PXD];
-
-	// HACK code not needed eventually
-	char device_path[64];
+	char device_path[MAX_FD_PER_PXD][MAX_DEVPATH_LEN];
 	int pool_id;
 	uint64_t mirror; // mirror device id
 
@@ -1305,6 +1303,9 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	pxd_dev->connected = 1;
 	pxd_dev->offset = 0;
 
+	pxd_dev->tc = kzalloc(MAX_THREADS * sizeof(struct thread_context), GFP_NOIO);
+	if (!pxd_dev->tc) return -ENOMEM;
+
 	err = initBIO(pxd_dev);
 	if (err < 0) {
 		return err;
@@ -1752,10 +1753,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_vol_out *add
 	return 0;
 freeq:
 	blk_cleanup_queue(q);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
-	blk_mq_free_tag_set(&pxd_dev->tag_set);
-#endif
-
 out_disk:
 	return -ENOMEM;
 }
@@ -2002,18 +1999,25 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 		goto out;
 	}
 
-	while (pxd_dev->nfd)
-		filp_close(pxd_dev->file[--pxd_dev->nfd], NULL);
-
 	for (i=0; i<update_path->size; i++) {
+		if (!strcmp(pxd_dev->device_path[i], update_path->devpath[i])) {
+			// If previous paths are same.. then skip anymore config.
+			printk(KERN_INFO"pxd%llu already configured for path %s\n",
+				pxd_dev->dev_id, pxd_dev->device_path[i]);
+			continue;
+		}
+
+		if (pxd_dev->file[i] > 0) filp_close(pxd_dev->file[i], NULL);
+
 		f = filp_open(update_path->devpath[i], O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
 				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
-			continue;
+			goto out_file_failed;
 		}
 
 		pxd_dev->file[pxd_dev->nfd] = f;
+		strcpy(pxd_dev->device_path[i], update_path->devpath[i]);
 		pxd_dev->nfd++;
 	}
 
@@ -2022,13 +2026,13 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	if (!f) {
 		printk(KERN_ERR"fd file[fd=%p] invalid", f);
 		err = -EINVAL;
-		goto out;
+		goto out_file_failed;
 	}
 	inode = f->f_inode;
 	if (!inode) {
 		printk(KERN_ERR"fd file[fd=%p] inode %p invalid", f, inode);
 		err = -EINVAL;
-		goto out;
+		goto out_file_failed;
 	}
 
 	printk(KERN_WARNING"device %lld, inode %lu\n", pxd_dev->dev_id, inode->i_ino);
@@ -2053,6 +2057,13 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 		pxd_dev->dev_id, pxd_dev->nfd);
 	return 0;
 
+out_file_failed:
+	for (i=0; i<pxd_dev->nfd; i++) {
+		if (pxd_dev->file[i] > 0) filp_close(pxd_dev->file[i], NULL);
+	}
+	pxd_dev->nfd = 0;
+	memset(pxd_dev->file, 0, sizeof(pxd_dev->file));
+	memset(pxd_dev->device_path, 0, sizeof(pxd_dev->device_path));
 out:
 	if (found) spin_unlock(&pxd_dev->dlock);
 	return err;
