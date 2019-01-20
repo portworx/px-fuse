@@ -133,13 +133,7 @@ struct pxd_device {
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN];
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
-	struct blk_mq_tag_set   tag_set;
-	struct kthread_worker   worker;
-	struct task_struct  *worker_task;
-#else
 	struct thread_context *tc;
-#endif
 	wait_queue_head_t   congestion_wait;
 	wait_queue_head_t   sync_event;
 	spinlock_t   	sync_lock;
@@ -171,7 +165,6 @@ static void cleanupFile(struct pxd_device *pxd_dev);
 /* when request queeuing model is used on version 4.12+, block mq model
  * is used to process IO and requests are never punted over fuse.
  */
-#if !defined(USE_REQUEST_QUEUE) || LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
@@ -182,7 +175,6 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages);
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
-#endif
 
 #define	REQCTR(fc) (fc)->reqctr
 /***********************/
@@ -258,111 +250,6 @@ static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev) {
 }
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
-	/* Shall use block mq request mechanism */
-static
-void pxd_rw_aio_do_completion(struct pxd_mq_rqcmd *cmd) {
-	if (!atomic_dec_and_test(&cmd->ref))
-		return;
-
-	kfree(cmd->bvec);
-	cmd->bvec = NULL;
-	blk_mq_complete_request(cmd->rq);
-}
-
-static
-void pxd_rw_aio_complete(struct kiocb *iocb, long ret, long ret2)
-{
-	struct pxd_mq_rqcmd *cmd = container_of(iocb, struct pxd_mq_rqcmd, iocb);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	if (cmd->css) css_put(cmd->css);
-#endif
-
-	cmd->ret = ret;
-	pxd_rw_aio_do_completion(cmd);
-}
-
-static int pxd_rw_aio(struct pxd_device *pxd_dev,
-		struct pxd_mq_rqcmd *cmd, loff_t pos, bool rw) {
-	struct iov_iter iter;
-	struct bio_vec *bvec;
-	struct request *rq = cmd->rq;
-	struct bio *bio = rq->bio;
-	struct file *file = pxd_dev->file;
-	unsigned int offset;
-	int segments = 0;
-	int ret;
-
-	if (rq->bio != rq->biotail) {
-		struct req_iterator iter;
-		struct bio_vec tmp;
-
-		__rq_for_each_bio(bio, rq)
-			segments += bio_segments(bio);
-
-		bvec = kmalloc(sizeof(struct bio_vec) * segments, GFP_NOIO);
-		if (!bvec)
-			return -EIO;
-		cmd->bvec = bvec;
-
-        /*
-         * The bios of the request may be started from the middle of
-         * the 'bvec' because of bio splitting, so we can't directly
-         * copy bio->bi_iov_vec to new bvec. The rq_for_each_segment
-         * API will take care of all details for us.
-         */
-		rq_for_each_segment(tmp, rq, iter) {
-			*bvec = tmp;
-			bvec++;
-		}
-		bvec = cmd->bvec;
-		offset = 0;
-	} else {
-        /*
-         * Same here, this bio may be started from the middle of the
-         * 'bvec' because of bio splitting, so offset from the bvec
-         * must be passed to iov iterator
-         */
-		offset = bio->bi_iter.bi_bvec_done;
-		bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
-		segments = bio_segments(bio);
-    }
-
-    atomic_set(&cmd->ref, 2);
-
-	iov_iter_bvec(&iter, ITER_BVEC | rw, bvec,
-              segments, blk_rq_bytes(rq));
-    iter.iov_offset = offset;
-
-	cmd->iocb.ki_pos = pos;
-	cmd->iocb.ki_filp = file;
-    cmd->iocb.ki_complete = pxd_rw_aio_complete;
-    cmd->iocb.ki_flags = iocb_flags(file);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-    if (cmd->css)
-        kthread_associate_blkcg(cmd->css);
-#endif
-
-	if (rw == WRITE) {
-		atomic_add(segments, &pxd_dev->write_counter);
-		ret = call_write_iter(file, &cmd->iocb, &iter);
-	} else {
-		ret = call_read_iter(file, &cmd->iocb, &iter);
-	}
-
-	pxd_rw_aio_do_completion(cmd);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-    kthread_associate_blkcg(NULL);
-#endif
-
-    if (ret != -EIOCBQUEUED)
-        cmd->iocb.ki_complete(&cmd->iocb, ret, 0);
-    return 0;
-}
-#endif
-
-#ifndef USE_REQUEST_QUEUE
 static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
 	struct file *file;
 	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
@@ -388,133 +275,6 @@ static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct bio *bio, loff_t 
 
 	return 0;
 }
-#else
-static int _pxd_req_discard(struct pxd_device *pxd_dev, struct request *rq, loff_t pos) {
-	struct file *file;
-	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-	int ret;
-	int i;
-
-	for (i=0; i<pxd_dev->nfd; i++) {
-		file = getFile(pxd_dev, i);
-		if (!file->f_op->fallocate) {
-			return -EOPNOTSUPP;
-		}
-		ret = file->f_op->fallocate(file, mode, pos, blk_rq_bytes(rq));
-		if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP)) {
-			return -EIO;
-		}
-	}
-	return 0;
-}
-#endif
-
-#ifdef DIO
-/* Shall use block mq request mechanism */
-struct aio_cmd {
-	atomic_t ref; /* only for aio */
-	struct kiocb iocb;
-	struct bio *bio;  /* original bio */
-	struct bio_vec *bvec;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	struct cgroup_subsys_state *css;
-#endif
-};
-
-static
-void pxd_rw_aio_do_completion(struct aio_cmd *cmd, int ret) {
-	struct bio *bio;
-	if (!atomic_dec_and_test(&cmd->ref))
-		return;
-
-	//TODO
-	//if (cmd is ReAD, and ret is num of bytes, then advance bio and zero fill)
-	bio = cmd->bio;
-	kfree(cmd);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-	if (ret) {
-		bio_io_error(bio);
-	} else {
-		bio_endio(bio);
-	}
-#else
-	bio_endio(bio, ret);
-#endif
-}
-
-static
-void pxd_rw_aio_complete(struct kiocb *iocb, long ret, long ret2)
-{
-	struct aio_cmd *cmd = container_of(iocb, struct aio_cmd, iocb);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	if (cmd->css) css_put(cmd->css);
-#endif
-
-	pxd_rw_aio_do_completion(cmd, ret);
-}
-
-static int pxd_rw_aio(struct pxd_device *pxd_dev,
-		struct bio *bio, loff_t pos, bool rw) {
-	struct iov_iter iter;
-	struct file *file = pxd_dev->file;
-	unsigned int offset;
-	int segments = 0;
-	int ret;
-	unsigned nbytes = 0;
-
-	struct bio_vec *bvec;
-	struct bvec_iter bvec_iter;
-
-	struct aio_cmd *cmd = kmalloc(sizeof(aio_cmd), GFP_NOIO|GFP_KERNEL);
-	if (!cmd) {
-		bio_io_error(bio);
-		return;
-	}
-	cmd->bio = bio;
-
-        /*
-         * Same here, this bio may be started from the middle of the
-         * 'bvec' because of bio splitting, so offset from the bvec
-         * must be passed to iov iterator
-         */
-	offset = bio->bi_iter.bi_bvec_done;
-	bio_for_each_segment(bvec, bio, bvec_iter) {
-		segments++;
-		nbytes += bvec_iter_len(bvec);
-	}
-	bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
-
-	atomic_set(&cmd->ref, 2);
-	iov_iter_bvec(&iter, ITER_BVEC | rw, bvec, segments, nbytes);
-	iter.iov_offset = offset;
-
-	cmd->iocb.ki_pos = pos;
-	cmd->iocb.ki_filp = file;
-	cmd->iocb.ki_complete = pxd_rw_aio_complete;
-	cmd->iocb.ki_flags = iocb_flags(file);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	if (cmd->css)
-		kthread_associate_blkcg(cmd->css);
-#endif
-
-	if (rw == WRITE) {
-		atomic_add(segments, &pxd_dev->write_counter);
-		ret = call_write_iter(file, &cmd->iocb, &iter);
-	} else {
-		ret = call_read_iter(file, &cmd->iocb, &iter);
-	}
-
-	pxd_rw_aio_do_completion(cmd);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	kthread_associate_blkcg(NULL);
-#endif
-
-	if (ret != -EIOCBQUEUED)
-		cmd->iocb.ki_complete(&cmd->iocb, ret, 0);
-	return 0;
-}
-#endif
 
 static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 {
@@ -564,48 +324,6 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
 	return bw;
 }
 
-#ifdef USE_REQUEST_QUEUE
-static int do_pxd_write(struct pxd_device *pxd_dev, struct request *rq, loff_t pos) {
-	struct req_iterator iter;
-	int ret = 0;
-	int nsegs = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-
-	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-	rq_for_each_segment(bvec, rq, iter) {
-		nsegs++;
-		ret = _pxd_write(pxd_dev->file, &bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#else
-	struct bio_vec *bvec;
-
-	pxd_printk("do_pxd_write entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-	rq_for_each_segment(bvec, rq, iter) {
-		nsegs++;
-		ret = _pxd_write(pxd_dev->file, bvec, &pos);
-		if (ret < 0) {
-			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
-				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
-			return ret;
-		}
-
-		cond_resched();
-	}
-#endif
-	pxd_printk("do_pxd_write pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
-	atomic_add(nsegs, &pxd_dev->write_counter);
-	return 0;
-}
-
-#else
 static inline unsigned getsectors(struct bio *bio) {
 	unsigned nbytes = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -693,7 +411,6 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) 
 	atomic_add(nsegs, &pxd_dev->write_counter);
 	return 0;
 }
-#endif
 
 static
 ssize_t _pxd_read(struct file *file, struct bio_vec *bvec, loff_t *pos) {
@@ -727,58 +444,6 @@ ssize_t _pxd_read(struct file *file, struct bio_vec *bvec, loff_t *pos) {
 	return result;
 }
 
-#ifdef USE_REQUEST_QUEUE
-static ssize_t do_pxd_read(struct pxd_device *pxd_dev, struct request *rq, loff_t pos) {
-	struct req_iterator iter;
-	ssize_t len = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-
-	rq_for_each_segment(bvec, rq, iter) {
-		len = _pxd_read(getFile(pxd_dev, 0), &bvec, &pos);
-		if (len < 0) return len;
-
-		flush_dcache_page(bvec.bv_page);
-		if (len != bvec.bv_len) {
-			struct bio *bio;
-
-			__rq_for_each_bio(bio, rq)
-				zero_fill_bio(bio);
-
-			break;
-		}
-
-		cond_resched();
-	}
-#else
-	struct bio_vec *bvec;
-	pxd_printk("do_pxd_read entry pos %lld length %d entered\n", pos, blk_rq_bytes(rq));
-
-
-	rq_for_each_segment(bvec, rq, iter) {
-		len = _pxd_read(getFile(pxd_dev,0), bvec, &pos);
-
-		flush_dcache_page(bvec->bv_page);
-		if (len != bvec->bv_len) {
-			struct bio *bio;
-
-			__rq_for_each_bio(bio, rq)
-				zero_fill_bio(bio);
-
-			break;
-		}
-
-		cond_resched();
-	}
-#endif
-
-	pxd_printk("do_pxd_read pos %lld for len %d PASSED\n", pos, blk_rq_bytes(rq));
-	if (len < 0) return len;
-	return 0;
-
-}
-#else
 static ssize_t do_pxd_receive(struct pxd_device *pxd_dev, struct bio_vec *bvec, loff_t pos)
 {
         return _pxd_read(getFile(pxd_dev, 0), bvec, &pos);
@@ -820,8 +485,6 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t p
 	}
 	return 0;
 }
-
-#endif
 
 static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
 	if (!enable) {
@@ -1442,7 +1105,6 @@ static const struct block_device_operations pxd_bd_ops = {
 #endif
 #endif
 
-#if !defined(USE_REQUEST_QUEUE) || LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
@@ -1649,7 +1311,6 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		break;
 	}
 }
-#endif
 #endif
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
@@ -2210,9 +1871,8 @@ static ssize_t pxd_replicate_store(struct device *dev, struct device_attribute *
 		const char *buf, size_t count)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	char replicate[64];
+	char replicate[MAX_PXD_DEVPATH_LEN];
 	struct file *f;
-	struct inode *inode;
 
 	if (pxd_dev->nfd >= MAX_PXD_BACKING_DEVS) {
 		printk(KERN_ERR"Maximum replicate volumes configured for device %lld\n", pxd_dev->dev_id);
@@ -2230,29 +1890,14 @@ static ssize_t pxd_replicate_store(struct device *dev, struct device_attribute *
 		goto hack_out;
 	}
 
-	inode = f->f_inode;
-	printk(KERN_WARNING"replicate device %s, inode %lu\n", replicate, inode->i_ino);
-
-	if (S_ISREG(inode->i_mode)) {
-		printk(KERN_INFO"replicate device[%s] is a regular file - inode %lu\n",
-			replicate, inode->i_ino);
-	} else if (S_ISBLK(inode->i_mode)) {
-		printk(KERN_INFO"replicate device[%s] is a block device - inode %lu\n",
-			replicate, inode->i_ino);
-	} else {
-		printk(KERN_INFO"replicate device[%s] inode %lu unknown device %#x\n",
-			replicate, inode->i_ino, inode->i_mode);
-	}
 	spin_lock_irq(&pxd_dev->dlock);
 	pxd_dev->file[pxd_dev->nfd] = f;
+	strcpy(pxd_dev->device_path[pxd_dev->nfd], replicate);
 	pxd_dev->nfd++;
+	initFile(pxd_dev, false);
 	spin_unlock_irq(&pxd_dev->dlock);
 	printk(KERN_INFO"Success attaching replicate device %s to device %lld [nfd:%d]\n",
 		replicate, pxd_dev->dev_id, pxd_dev->nfd);
-	goto hack_out;
-
-	printk(KERN_INFO"Unexpected failed finding replicate device %s from file path\n",
-			replicate);
 hack_out:
 	return count;
 }
