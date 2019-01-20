@@ -10,6 +10,10 @@
 #include <linux/dma-mapping.h>
 #include <linux/statfs.h>
 #include <linux/file.h>
+#include <linux/splice.h>
+#include <linux/fs.h>
+#include <linux/falloc.h>
+#include <linux/bio.h>
 
 #include "pxd_config.h"
 
@@ -23,16 +27,11 @@
 #include <pxd_trace.h>
 #undef CREATE_TRACE_POINTS
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-#include <linux/blk-mq.h>
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-#include <linux/blk-mq.h>
-#define blk_status_t int
-#define BLK_STS_OK		(0)
-#define BLK_STS_IOERR		(10)
-#endif
-
 #include "pxd_compat.h"
+
+#ifndef SECTOR_SHIFT
+#define SECTOR_SHIFT (9)
+#endif
 
 /** enables time tracing */
 //#define GD_TIME_LOG
@@ -162,9 +161,6 @@ struct file* getFile(struct pxd_device *pxd_dev, int index) {
 static void initFile(struct pxd_device *pxd_dev, bool);
 static void cleanupFile(struct pxd_device *pxd_dev);
 
-/* when request queeuing model is used on version 4.12+, block mq model
- * is used to process IO and requests are never punted over fuse.
- */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
@@ -178,15 +174,6 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 
 #define	REQCTR(fc) (fc)->reqctr
 /***********************/
-
-#include <linux/splice.h>
-#include <linux/fs.h>
-#include <linux/falloc.h>
-#include <linux/bio.h>
-
-#ifndef SECTOR_SHIFT
-#define SECTOR_SHIFT (9)
-#endif
 
 /* Common functions */
 static int _pxd_flush(struct pxd_device *pxd_dev) {
