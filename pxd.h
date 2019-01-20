@@ -42,7 +42,6 @@ enum pxd_opcode {
 	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
-	PXD_ADD2,           /**< add extended device info to kernel */
 	PXD_UPDATE_PATH,	/**< update paths */
 	PXD_LAST,
 };
@@ -90,19 +89,8 @@ struct pxd_add_out {
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing. */
 	int32_t discard_size; /**< block device discard size in bytes */
-};
-
-struct pxd_add_vol_out {
-	uint64_t dev_id;
-	size_t size;
-	loff_t offset;
-	int32_t queue_depth;
-	int32_t discard_size; /**< block device discard size in bytes */
-
-#define MAX_FD_PER_PXD (3)
-#define MAX_DEVPATH_LEN (64)
-	int32_t nfd; // number of fd passed, hack mode if nfd = 0
-	int32_t fds[MAX_FD_PER_PXD]; // each fd
+	loff_t offset; /**< offset within the backing device */
+	bool block_device; /**< is backing volume a raw block device */
 };
 
 /**

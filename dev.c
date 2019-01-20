@@ -546,36 +546,13 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 {
 	struct pxd_add_out add;
 	size_t len = sizeof(add);
-	struct pxd_add_vol_out newadd;
 
 	if (copy_from_iter(&add, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
 
-	newadd.dev_id = add.dev_id;
-	newadd.size = add.size;
-	newadd.queue_depth = add.queue_depth;
-	newadd.discard_size = add.discard_size;
-	newadd.offset = 0;
-
-	newadd.nfd = 0; // should go through hack code
-
-	return pxd_add(conn, &newadd);
-}
-
-static int fuse_notify_add2(struct fuse_conn *conn, unsigned int size,
-		struct iov_iter *iter)
-{
-	struct pxd_add_vol_out newadd;
-	size_t len = sizeof(newadd);
-
-	if (copy_from_iter(&newadd, len, iter) != len) {
-		printk(KERN_ERR "%s: can't copy arg\n", __func__);
-		return -EFAULT;
-	}
-
-	return pxd_add(conn, &newadd);
+	return pxd_add(conn, &add);
 }
 
 /* Look up request on processing list by unique ID */
@@ -762,8 +739,6 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_read_data(fc, size, iter);
 	case PXD_ADD:
 		return fuse_notify_add(fc, size, iter);
-	case PXD_ADD2:
-		return fuse_notify_add2(fc, size, iter);
 	case PXD_REMOVE:
 		return fuse_notify_remove(fc, size, iter);
 	case PXD_UPDATE_SIZE:

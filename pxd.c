@@ -100,32 +100,7 @@ module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 
 struct pxd_device;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
-static char *mode = "blk-mq";
-#define DRIVER_MODE_BLKMQ
-struct pxd_mq_rqcmd {
-    struct kthread_work work;
-    struct request *rq;
-    bool use_aio; /* use AIO interface to handle I/O */
-    atomic_t ref; /* only for aio */
-    long ret;
-    struct kiocb iocb;
-    struct bio_vec *bvec;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0) 
-    struct cgroup_subsys_state *css;
-#endif
-};
-#elif defined(USE_REQUEST_QUEUE)
-static char *mode = "blk-rq";
-struct thread_context {
-	struct pxd_device  *pxd_dev;
-	struct task_struct *pxd_thread;
-	wait_queue_head_t   pxd_event;
-	spinlock_t  		lock;
-	struct list_head waiting_queue;
-};
-#else
-static char *mode = "blk-bio";
+static const char *mode = "blk-bio";
 struct thread_context {
 	struct pxd_device  *pxd_dev;
 	struct task_struct *pxd_thread;
@@ -133,7 +108,6 @@ struct thread_context {
 	spinlock_t  		lock;
 	struct bio_list  bio_list;
 };
-#endif
 
 struct pxd_device {
 	uint64_t dev_id;
@@ -153,13 +127,11 @@ struct pxd_device {
 	loff_t offset; // offset into the backing device/file
 	int bg_flush_enabled; // dynamically enable bg flush from driver
 	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
-	bool aio; // async io path - experimental
 
+	// Below information has to be set through new PXD_UPDATE_PATH ioctl
 	int nfd;
-	struct file *file[MAX_FD_PER_PXD];
-	char device_path[MAX_FD_PER_PXD][MAX_DEVPATH_LEN];
-	int pool_id;
-	uint64_t mirror; // mirror device id
+	struct file *file[MAX_PXD_BACKING_DEVS];
+	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN];
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && defined(USE_REQUEST_QUEUE)
 	struct blk_mq_tag_set   tag_set;
@@ -193,7 +165,7 @@ struct file* getFile(struct pxd_device *pxd_dev, int index) {
 }
 
 // Forward decl
-static int initFile(struct pxd_device *pxd_dev, bool);
+static void initFile(struct pxd_device *pxd_dev, bool);
 static void cleanupFile(struct pxd_device *pxd_dev);
 
 /* when request queeuing model is used on version 4.12+, block mq model
@@ -1234,44 +1206,70 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 /***********************/
 
 /* 
- * NOTE
- * Below is a hack to find the backing file/device.. proper ioctl interface
- * extension and argument submission should happen from px-storage!!
+ * shall get called last when new device is added/updated or when fuse connection is lost 
+ * and re-estabilished.
  */
-static int initFile(struct pxd_device *pxd_dev, bool force) {
+static void initFile(struct pxd_device *pxd_dev, bool force) {
+	struct file *f;
 	struct inode *inode;
 	int i;
+	int nfd = pxd_dev->nfd;
 
-	/* no hack needed if fds are passed */
-	if (pxd_dev->nfd) {
-		for (i=0; i<pxd_dev->nfd; i++) {
-			struct file *f = pxd_dev->file[i];
-			if (!f) {
-				printk(KERN_ERR"fd file[fd=%d] invalid", i);
-				return -EINVAL;
-			}
-			inode = f->f_inode;
-			printk(KERN_WARNING"device %lld:%d, inode %lu\n",
-				pxd_dev->dev_id, i, inode->i_ino);
-
-			if (S_ISREG(inode->i_mode)) {
-				pxd_dev->block_device = false;
-				printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
-					pxd_dev->dev_id, i, inode->i_ino);
-			} else if (S_ISBLK(inode->i_mode)) {
-				pxd_dev->block_device = true;
-				printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
-					pxd_dev->dev_id, i, inode->i_ino);
+	for (i=0; i<nfd; i++) {
+		if (pxd_dev->file[i] > 0) { /* valid fd exists already */
+			if (force) {
+				filp_close(pxd_dev->file[i], NULL);
+				f = filp_open(pxd_dev->device_path[i], O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+				if (IS_ERR_OR_NULL(f)) {
+					printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
+						pxd_dev->dev_id, pxd_dev->device_path[i], PTR_ERR(f));
+					goto out_file_failed;
+				}
 			} else {
-				printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
-					pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+				f = pxd_dev->file[i];
+			}
+		} else {
+			f = filp_open(pxd_dev->device_path[i], O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+			if (IS_ERR_OR_NULL(f)) {
+				printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
+					pxd_dev->dev_id, pxd_dev->device_path[i], PTR_ERR(f));
+				goto out_file_failed;
 			}
 		}
-		return 0;
+
+		pxd_dev->file[i] = f;
+
+		inode = f->f_inode;
+		printk(KERN_INFO"device %lld:%d, inode %lu\n", pxd_dev->dev_id, i, inode->i_ino);
+		if (S_ISREG(inode->i_mode)) {
+			pxd_dev->block_device = false; /* override config to use file io */
+			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
+					pxd_dev->dev_id, i, inode->i_ino);
+		} else if (S_ISBLK(inode->i_mode)) {
+			printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
+				pxd_dev->dev_id, i, inode->i_ino);
+		} else {
+			pxd_dev->block_device = false; /* override config to use file io */
+			printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
+				pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+		}
 	}
 
-	printk(KERN_ERR"Device %llu no backing file setup, will take slow path\n", pxd_dev->dev_id);
-	return 0;
+	printk(KERN_INFO"pxd_dev %llu setting up with %d backing volumes, [%p,%p,%p]\n",
+		pxd_dev->dev_id, pxd_dev->nfd,
+		pxd_dev->file[0], pxd_dev->file[1], pxd_dev->file[2]);
+
+	return;
+
+out_file_failed:
+	pxd_dev->nfd = 0;
+	for (i=0; i<nfd; i++) {
+		if (pxd_dev->file[i] > 0) filp_close(pxd_dev->file[i], NULL);
+	}
+	memset(pxd_dev->file, 0, sizeof(pxd_dev->file));
+	memset(pxd_dev->device_path, 0, sizeof(pxd_dev->device_path));
+	printk(KERN_INFO"Device %llu no backing volume setup, will take slow path\n",
+		pxd_dev->dev_id);
 }
 
 static void cleanupFile(struct pxd_device *pxd_dev) {
@@ -1286,8 +1284,8 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	int err=-EINVAL;
 
 	printk(KERN_INFO"Number of cpu ids %d\n", MAX_THREADS);
-	printk(KERN_INFO"pxd_dev add setting up with %d backing devices, [%p,%p,%p]\n",
-		pxd_dev->nfd, pxd_dev->file[0], pxd_dev->file[1], pxd_dev->file[2]);
+	pxd_dev->bg_flush_enabled = false; // introduces high latency
+	pxd_dev->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->congestion_wait);
@@ -1311,7 +1309,8 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 		return err;
 	}
 
-	return initFile(pxd_dev, true);
+	initFile(pxd_dev, true);
+	return 0;
 }
 
 static void cleanupBackingFsPath(struct pxd_device *pxd_dev) {
@@ -1653,7 +1652,7 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 #endif
 
-static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_vol_out *add)
+static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
@@ -1775,14 +1774,13 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 
 }
 
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add)
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = NULL;
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
-	int i;
 
 	err = -ENODEV;
 	if (!try_module_get(THIS_MODULE))
@@ -1791,13 +1789,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add)
 	err = -ENOMEM;
 	if (ctx->num_devices >= PXD_MAX_DEVICES) {
 		printk(KERN_ERR "Too many devices attached..\n");
-		goto out_module;
-	}
-
-	if (add->nfd > MAX_FD_PER_PXD) {
-		err = -EINVAL;
-		printk(KERN_ERR "Too many backing devices for a virtual device %d(max %d)\n",
-				add->nfd, MAX_FD_PER_PXD);
 		goto out_module;
 	}
 
@@ -1822,19 +1813,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_vol_out *add)
 	pxd_dev->ctx = ctx;
 	pxd_dev->size = add->size;
 	pxd_dev->offset = add->offset;
-	pxd_dev->aio = false;
-	pxd_dev->bg_flush_enabled = false; // introduces high latency
-	pxd_dev->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
-
-	for (i=0; i<add->nfd; i++) {
-		pxd_dev->file[i] = fget(add->fds[i]);
-		if (!pxd_dev->file[i]) {
-			err = -EINVAL;
-			goto out_disk;
-		}
-	}
-	pxd_dev->nfd = add->nfd;
-
+	pxd_dev->block_device = add->block_device;
+	pxd_dev->nfd = 0; // will take slow path, if additional info not provided.
 
 	err = initBackingFsPath(pxd_dev);
 	if (err) {
@@ -1982,7 +1962,6 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	struct pxd_device *pxd_dev;
 	int i;
 	struct file* f;
-	struct inode* inode;
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -2016,40 +1995,13 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 			goto out_file_failed;
 		}
 
-		pxd_dev->file[pxd_dev->nfd] = f;
+		pxd_dev->file[i] = f;
 		strcpy(pxd_dev->device_path[i], update_path->devpath[i]);
-		pxd_dev->nfd++;
 	}
+	pxd_dev->nfd = update_path->size;
 
 	/* setup whether the access is block access or file access */
-	f = pxd_dev->file[0]; /* always decide based on the first entry in list */
-	if (!f) {
-		printk(KERN_ERR"fd file[fd=%p] invalid", f);
-		err = -EINVAL;
-		goto out_file_failed;
-	}
-	inode = f->f_inode;
-	if (!inode) {
-		printk(KERN_ERR"fd file[fd=%p] inode %p invalid", f, inode);
-		err = -EINVAL;
-		goto out_file_failed;
-	}
-
-	printk(KERN_WARNING"device %lld, inode %lu\n", pxd_dev->dev_id, inode->i_ino);
-	if (S_ISBLK(inode->i_mode)) {
-		pxd_dev->block_device = true;
-		printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
-					pxd_dev->dev_id, i, inode->i_ino);
-	} else {
-		pxd_dev->block_device = false;
-		if (S_ISREG(inode->i_mode)) {
-			printk(KERN_INFO"device[%lld] is a regular file - inode %lu\n",
-					pxd_dev->dev_id, inode->i_ino);
-		} else {
-			printk(KERN_INFO"device[%lld] inode %lu unknown device %#x\n",
-				pxd_dev->dev_id, inode->i_ino, inode->i_mode);
-		}
-	}
+	initFile(pxd_dev, false);
 
 	spin_unlock(&pxd_dev->dlock);
 
@@ -2236,61 +2188,6 @@ static ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute 
 	return count;
 }
 
-static ssize_t pxd_mirror_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
-{
-	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	int i;
-	char *cp = buf;
-	int cnt=0;
-
-	for (i=0; i<pxd_dev->nfd; i++) {
-		int c=sprintf(cp, "device[%d]: %p\n", i, pxd_dev->file[i]);
-		cp+=c;
-		cnt+=c;
-	}
-
-	return cnt;
-}
-
-// debug interface to configure mirror to a pxd_device
-static ssize_t pxd_mirror_store(struct device *dev, struct device_attribute *attr,
-		const char *buf, size_t count)
-{
-        struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	uint64_t mirror;
-	struct pxd_device *mirror_dev;
-	struct pxd_context *ctx = pxd_dev->ctx;
-        struct list_head *cur;
-
-	sscanf(buf, "%lld", &mirror);
-
-	/* ensure the mirror device is not attached, if so throw a failure message */
-	mirror_dev = NULL;
-	spin_lock(&ctx->lock);
-	list_for_each(cur, &ctx->list) {
-		struct pxd_device *pxd = container_of(cur, struct pxd_device, node);
-
-		if (pxd->dev_id == mirror) {
-			/* configure this pxd as a mirror */
-			mirror_dev = pxd;
-			break;
-		}
-	}
-	spin_unlock(&ctx->lock);
-
-	if (mirror_dev) {
-		printk(KERN_ERR"Mirror device %lld already attached... mirror should be setup before target device is attached\n",
-				mirror);
-		return count;
-	}
-
-	pxd_dev->mirror = mirror;
-
-	printk(KERN_INFO"Configuring device %lld as mirror for %lld\n", pxd_dev->dev_id, mirror);
-	return count;
-}
-
 static ssize_t pxd_replicate_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
@@ -2317,7 +2214,7 @@ static ssize_t pxd_replicate_store(struct device *dev, struct device_attribute *
 	struct file *f;
 	struct inode *inode;
 
-	if (pxd_dev->nfd >= MAX_FD_PER_PXD) {
+	if (pxd_dev->nfd >= MAX_PXD_BACKING_DEVS) {
 		printk(KERN_ERR"Maximum replicate volumes configured for device %lld\n", pxd_dev->dev_id);
 		goto hack_out;
 	}
@@ -2369,7 +2266,6 @@ static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
-static DEVICE_ATTR(mirror, S_IRUGO|S_IWUSR, pxd_mirror_show, pxd_mirror_store);
 static DEVICE_ATTR(replicate, S_IRUGO|S_IWUSR, pxd_replicate_show, pxd_replicate_store);
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 
@@ -2382,7 +2278,6 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_active.attr,
 	&dev_attr_sync.attr,
 	&dev_attr_congested.attr,
-	&dev_attr_mirror.attr,
 	&dev_attr_replicate.attr,
 	&dev_attr_writesegment.attr,
 	NULL
