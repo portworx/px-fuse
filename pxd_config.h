@@ -17,17 +17,7 @@
 // as default.
 //
 
-// uses blk-mq request model for >=4.12+ kernels if enabled.
-// This path is good
-//#define USE_REQUEST_QUEUE
-
-//#define USE_DIO -- experimental do not enable
-
 #define MAX_THREADS (nr_cpu_ids)
 #define STATIC
-
-//#define DMTHINPOOL /* This configures HACK code path to identify backing volume for dmthin pool only */
-//
-//
 
 #endif /* _PXD_CONFIG_H_ */
