@@ -90,7 +90,6 @@ struct pxd_add_out {
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing. */
 	int32_t discard_size; /**< block device discard size in bytes */
 	loff_t offset; /**< offset within the backing device */
-	bool block_device; /**< is backing volume a raw block device */
 };
 
 /**

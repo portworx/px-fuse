@@ -600,29 +600,25 @@ out:
 static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio, bool shouldClose)
 {
 	int ret;
-	//unsigned long startTime = jiffies;
+	unsigned long startTime = jiffies;
 
 	if (shouldClose) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		bio_io_error(bio);
 		return;
 	}
-#if 0
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(tc->pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &tc->pxd_dev->disk->part0);
 #else
 	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &tc->pxd_dev->disk->part0);
 #endif
-#endif
 
 	ret = do_bio_filebacked(tc, bio);
 
-#if 0
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(tc->pxd_dev->disk->queue, bio_op(bio), &tc->pxd_dev->disk->part0, startTime);
 #else
 	generic_end_io_acct(bio_data_dir(bio), &tc->pxd_dev->disk->part0, startTime);
-#endif
 #endif
 	atomic_inc(&tc->pxd_dev->ncomplete);
 	pxd_printk("Completed a request direction %p/%d\n", bio, bio_data_dir(bio));
@@ -1461,7 +1457,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	pxd_dev->ctx = ctx;
 	pxd_dev->size = add->size;
 	pxd_dev->offset = add->offset;
-	pxd_dev->block_device = add->block_device;
+	pxd_dev->block_device = true; // always default to considering as block device
 	pxd_dev->nfd = 0; // will take slow path, if additional info not provided.
 
 	err = initBackingFsPath(pxd_dev);
