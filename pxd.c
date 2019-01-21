@@ -69,6 +69,15 @@ struct node_cpu_map {
 // A one-time built, static lookup table to distribute requests to cpu within same numa node
 static struct node_cpu_map *node_cpu_map;
 
+// A private global bio mempool for punting requests bypassing vfs
+static struct bio_set pxd_bio_set;
+#define PXD_MIN_POOL_PAGES (128)
+struct pxd_io_tracker {
+	unsigned long start;
+	struct bio *orig;
+	struct bio clone;
+};
+
 static inline int getnextcpu(int node, int pos) {
 	const struct node_cpu_map *map = &node_cpu_map[node];
 	if (map->ncpu == 0) { return 0; }
@@ -139,6 +148,7 @@ struct pxd_device {
 	atomic_t sync_active; // currently active?
 	atomic_t nsync; // number of forced syncs completed
 	atomic_t ncount; // total active requests
+	atomic_t nswitch; // total number of requests through bio switch path
 	atomic_t nslowPath; // total requests through slow path
 	atomic_t ncomplete; // total completed requests
 	atomic_t ncongested; // total number of times queue congested
@@ -176,6 +186,102 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req);
 /***********************/
 
 /* Common functions */
+static unsigned getsectors(struct bio *bio) {
+	unsigned nbytes = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+
+	switch (bio_op(bio)) {
+	case REQ_OP_DISCARD:
+	case REQ_OP_SECURE_ERASE:
+	case REQ_OP_WRITE_ZEROES:
+		return 0;
+	case REQ_OP_WRITE_SAME:
+		return 1;
+	default:
+		break;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bio_for_each_segment(bvec, bio, i) {
+		nbytes += bvec.bv_len;
+	}
+#else
+	bio_for_each_segment(bvec, bio, i) {
+		nbytes += bvec->bv_len;
+	}
+#endif
+
+	return nbytes/SECTOR_SIZE;
+}
+
+static void pxd_complete_io(struct bio* bio) {
+	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
+	struct pxd_device *pxd_dev = bio->bi_private;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
+#else
+	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+        if (bio->bi_status) { /* non-zero indicates failure */
+                bio_io_error(iot->orig);
+        } else {
+                bio_endio(iot->orig);
+        }
+#else
+        bio_endio(iot->orig, bio->bi_status);
+#endif
+
+	atomic_inc(&pxd_dev->ncomplete);
+	atomic_dec(&pxd_dev->ncount);
+
+	bio_put(bio);
+
+	/* free up from any prior congestion wait */
+	spin_lock_irq(&pxd_dev->dlock);
+	if (atomic_read(&pxd_dev->ncount) < pxd_dev->disk->queue->nr_congestion_off) {
+		wake_up(&pxd_dev->congestion_wait);
+	}
+	spin_unlock_irq(&pxd_dev->dlock);
+}
+
+static 
+int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
+	struct address_space *mapping = pxd_dev->file[0]->f_mapping;
+	struct inode *inode = mapping->host;
+	struct block_device *bdi = I_BDEV(inode);
+	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, &pxd_bio_set);
+	struct pxd_io_tracker* iot = container_of(clone_bio, struct pxd_io_tracker, clone);
+
+	if (!clone_bio) {
+		return -ENOMEM;
+	}
+
+	iot->orig = bio;
+	iot->start = jiffies;
+	bio_set_dev(clone_bio, bdi);
+	clone_bio->bi_private = pxd_dev;
+	clone_bio->bi_end_io = pxd_complete_io;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &pxd_dev->disk->part0);
+#else
+	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
+#endif
+
+	submit_bio(clone_bio);
+	atomic_inc(&pxd_dev->ncount);
+	atomic_inc(&pxd_dev->nswitch);
+
+	return 0;
+}
+
 static int _pxd_flush(struct pxd_device *pxd_dev) {
 	int ret = 0;
 	int index;
@@ -309,40 +415,6 @@ static int _pxd_write(struct file *file, struct bio_vec *bvec, loff_t *pos)
                         (unsigned long long)*pos, bvec->bv_len);
 	if (bw >= 0) bw = -EIO;
 	return bw;
-}
-
-static inline unsigned getsectors(struct bio *bio) {
-	unsigned nbytes = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	struct bio_vec bvec;
-	struct bvec_iter i;
-#else
-	struct bio_vec *bvec;
-	int i;
-#endif
-
-	switch (bio_op(bio)) {
-	case REQ_OP_DISCARD:
-	case REQ_OP_SECURE_ERASE:
-	case REQ_OP_WRITE_ZEROES:
-		return 0;
-	case REQ_OP_WRITE_SAME:
-		return 1;
-	default:
-		break;
-	}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	bio_for_each_segment(bvec, bio, i) {
-		nbytes += bvec.bv_len;
-	}
-#else
-	bio_for_each_segment(bvec, bio, i) {
-		nbytes += bvec->bv_len;
-	}
-#endif
-
-	return nbytes/SECTOR_SIZE;
 }
 
 static int do_pxd_send(struct pxd_device *pxd_dev, struct bio *bio, loff_t pos) {
@@ -836,6 +908,13 @@ void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 	}
 
+	if (pxd_dev->block_device) { /* switch bio to target device bypassing vfs */
+		if (pxd_switch_bio(pxd_dev, bio)) {
+			BIO_ENDIO(bio, -ENOMEM);
+		}
+		return BLK_QC_RETVAL;
+	}
+
 	/* keep writes on same cpu, but allow reads to spread but within same numa node */
 	if (rw == READ) {
 		int node = cpu_to_node(cpu);
@@ -941,6 +1020,7 @@ static int initBackingFsPath(struct pxd_device *pxd_dev) {
 	atomic_set(&pxd_dev->nsync, 0);
 
 	atomic_set(&pxd_dev->ncount,0);
+	atomic_set(&pxd_dev->nswitch,0);
 	atomic_set(&pxd_dev->nslowPath,0);
 	atomic_set(&pxd_dev->ncomplete,0);
 	atomic_set(&pxd_dev->write_counter,0);
@@ -1755,8 +1835,9 @@ static ssize_t pxd_active_show(struct device *dev,
 	int ncount;
 	int available=PAGE_SIZE-1;
 
-	ncount=snprintf(cp, available, "nactive: %u/%u, slowpath: %u\n",
-                atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncomplete), atomic_read(&pxd_dev->nslowPath));
+	ncount=snprintf(cp, available, "nactive: %u/%u, switched: %u, slowpath: %u\n",
+                atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncomplete),
+		atomic_read(&pxd_dev->nswitch), atomic_read(&pxd_dev->nslowPath));
 
 	return ncount;
 }
@@ -2318,6 +2399,12 @@ int pxd_init(void)
 		map->cpu[map->ncpu++] = i;
 	}
 
+	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone), 0)) {
+		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
+		kfree(node_cpu_map);
+		goto out_sysfs;
+	}
+
 	return 0;
 
 out_sysfs:
@@ -2342,6 +2429,7 @@ void pxd_exit(void)
 {
 	int i;
 
+	bioset_exit(&pxd_bio_set);
 	if (node_cpu_map) kfree(node_cpu_map);
 
 	pxd_sysfs_exit();
