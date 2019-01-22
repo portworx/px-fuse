@@ -24,7 +24,6 @@
 #include <linux/version.h>
 #include <linux/blkdev.h>
 
-#include "pxd_config.h"
 #include "pxd_compat.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)

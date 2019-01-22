@@ -15,10 +15,10 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-#include "pxd_config.h"
-
 #include "fuse_i.h"
 #include "pxd.h"
+
+#define MAX_THREADS (nr_cpu_ids)
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -805,10 +805,10 @@ static inline unsigned int get_op_flags(struct bio *bio)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-STATIC blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio)
+blk_qc_t pxd_make_request_orig(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-STATIC void pxd_make_request_orig(struct request_queue *q, struct bio *bio)
+void pxd_make_request_orig(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
