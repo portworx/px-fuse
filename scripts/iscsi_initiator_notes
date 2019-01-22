@@ -1,0 +1,23 @@
+[lns@PDC1-SM1 ~]$ sudo yum install -y iscsi-initiator-utils
+
+After installing the necessary iscsi initiator tools, discover the iscsi targets.
+
+[lns@PDC1-SM1 ~]$ sudo iscsiadm -m discovery -t sendtargets -p 127.0.0.1
+127.0.0.1:3260,1 iqn.2018-12.com.example.test:high
+[lns@PDC1-SM1 ~]$
+
+Login to the iscsi target to attach a virtual local disk for iscsi.
+[lns@PDC1-SM1 ~]$ sudo iscsiadm -m node -T iqn.2018-12.com.example.test:high --login
+Logging in to [iface: default, target: iqn.2018-12.com.example.test:high, portal: 127.0.0.1,3260] (multiple)
+Login to [iface: default, target: iqn.2018-12.com.example.test:high, portal: 127.0.0.1,3260] successful.
+[lns@PDC1-SM1 ~]$
+
+Find the last attached device on the node, from dmesg.
+[lns@PDC1-SM1 ~]$ sudo grep "Attached SCSI" /var/log/messages | tail -n1
+Dec  5 03:49:21 PDC1-SM1 kernel: sd 11:0:0:1: [sdi] Attached SCSI disk
+
+[lns@PDC1-SM1 ~]$ sudo blkid /dev/sdi
+/dev/sdi: UUID="565c6057-9a24-4ecb-a6ab-bab18d911610" TYPE="ext4"
+[lns@PDC1-SM1 ~]$ 
+
+Now use the /dev/sdi volume as a local volume for all operations.

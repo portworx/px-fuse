@@ -1,0 +1,83 @@
+Notes for scsi target setup.
+============================
+sudo yum install -y scsi-target-utils
+
+EnvironmentFile=/etc/sysconfig/tgtd
+ExecReload=/usr/sbin/tgt-admin --update ALL -c $TGTD_CONFIG
+
+[lns@PDC1-SM1 px-fuse]$ sudo cat /etc/sysconfig/tgtd
+# options for tgtd
+TGTD_OPTS=""
+
+# configuration file
+TGTD_CONFIG=/etc/tgt/tgtd.conf
+[lns@PDC1-SM1 px-fuse]$
+
+[lns@PDC1-SM1 px-fuse]$ sudo cat /etc/tgt/tgtd.conf
+# The default config file
+include /etc/tgt/targets.conf
+
+# Config files from other packages etc.
+include /etc/tgt/conf.d/*.conf
+[lns@PDC1-SM1 px-fuse]$
+
+Attach the volume to be exported remotely.
+
+[lns@PDC1-SM1 ~]$ pxctl v l
+ID                      NAME    SIZE    HA      SHARED  ENCRYPTED       IO_PRIORITY     STATUS                 HA-STATE SNAP-ENABLED
+59931351547130400       high    50 GiB  1       no      no              HIGH            up - attached on 70.0.0.16      Up              no
+386873647750956592      vol1    50 GiB  1       no      no              LOW             up - detached          Detached no
+[lns@PDC1-SM1 ~]$
+
+
+Add a new config file in the path for each pxdevice as below.
+[lns@PDC1-SM1 ~]$ sudo cat /etc/tgt/conf.d/59931351547130400.conf
+<target iqn.2018-12.com.example.test:high>
+        <backing-store /dev/pxd/pxd59931351547130400>
+                block-size 4096
+        </backing-store>
+</target>
+
+Restart the iscsi target service to expose the volume remotely using iscsi.
+[lns@PDC1-SM1 ~]$ sudo systemctl restart tgtd
+
+Confirm the volume is exported successfully through iscsi.
+[lns@PDC1-SM1 ~]$ sudo tgtadm --mode target --op show
+Target 1: iqn.2018-12.com.example.test:high
+    System information:
+        Driver: iscsi
+        State: ready
+    I_T nexus information:
+    LUN information:
+        LUN: 0
+            Type: controller
+            SCSI ID: IET     00010000
+            SCSI SN: beaf10
+            Size: 0 MB, Block size: 1
+            Online: Yes
+            Removable media: No
+            Prevent removal: No
+            Readonly: No
+            SWP: No
+            Thin-provisioning: No
+            Backing store type: null
+            Backing store path: None
+            Backing store flags:
+        LUN: 1
+            Type: disk
+            SCSI ID: IET     00010001
+            SCSI SN: beaf11
+            Size: 53687 MB, Block size: 4096
+            Online: Yes
+            Removable media: No
+            Prevent removal: No
+            Readonly: No
+            SWP: No
+            Thin-provisioning: No
+            Backing store type: rdwr
+            Backing store path: /dev/pxd/pxd59931351547130400
+            Backing store flags:
+    Account information:
+    ACL information:
+        ALL
+[lns@PDC1-SM1 ~]$ 
