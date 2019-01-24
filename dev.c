@@ -420,6 +420,7 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 {
 	uint8_t wsize = sizeof(uint64_t);
 	struct req_iterator breq_iter;
+	struct fuse_req *first = req;
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 #else
@@ -429,6 +430,7 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 	size_t i, len;
 	uint64_t *q;
 
+retry:
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		kaddr = kmap_atomic(BVEC(bvec).bv_page);
 		p = kaddr + BVEC(bvec).bv_offset;
@@ -448,7 +450,14 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 		}
 		kunmap_atomic(kaddr);
 	}
-	req->in.h.opcode = PXD_DISCARD;
+	req = list_next_entry(req, merged);
+	if (req && (req != first)) {
+#ifndef HAVE_BVEC_ITER
+		*bvec = NULL;
+#endif
+		goto retry;
+	}
+	first->in.h.opcode = PXD_DISCARD;
 }
 
 /*
@@ -470,13 +479,17 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	ssize_t remain = iter->count;
 
 	if (!fc->signaled) {
+
+		/* If requests are not queued yet, do not attempt to pick up those now.
+		 * Wait for a few requests arrive so that those could be merged.
+		 */
 		return -EAGAIN;
 	}
 	INIT_LIST_HEAD(&tmp);
 
 	spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
-        pxd_reset_active_background(fc);
+		pxd_reset_active_background(fc);
 		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
 			goto err_unlock;
@@ -513,13 +526,15 @@ retry:
 	list_splice_tail(&tmp, &fc->processing);
 
 	if (!request_pending(fc)) {
-        pxd_reset_active_background(fc);
-    }
+		pxd_reset_active_background(fc);
+	}
 	spin_unlock(&fc->lock);
 
 	entry = first;
 	while (1) {
 		req = list_entry(entry, struct fuse_req, list);
+
+		/* Check if a write request is writing zeroes */
 		if ((req->in.h.opcode == PXD_WRITE) && req->misc.pxd_rdwr_in.size &&
 			!(req->misc.pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
 			fuse_convert_zero_writes(req);
@@ -542,7 +557,7 @@ retry:
 	if (remain && fc->signaled && request_pending(fc)) {
 		INIT_LIST_HEAD(&tmp);
 		spin_lock(&fc->lock);
-		if (request_pending(fc)) {
+		if (fc->signaled && request_pending(fc)) {
 			goto retry;
 		}
 		spin_unlock(&fc->lock);
