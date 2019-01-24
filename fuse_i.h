@@ -257,9 +257,6 @@ struct fuse_req {
 	/** hash table entry */
 	struct hlist_node hash_entry;
 
-	/** refcount */
-	atomic_t count;
-
 	/*
 	 * The following bitfields are either set once before the
 	 * request is queued or setting/clearing them is protected by
@@ -702,11 +699,6 @@ struct fuse_req *fuse_get_req(struct fuse_conn *fc, unsigned npages);
 struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
 					     unsigned npages);
 
-/*
- * Increment reference count on request
- */
-void __fuse_get_request(struct fuse_req *req);
-
 /**
  * Get a request, may fail with -ENOMEM,
  * useful for callers who doesn't use req->pages[]
@@ -715,12 +707,6 @@ static inline struct fuse_req *fuse_get_req_nopages(struct fuse_conn *fc)
 {
 	return fuse_get_req(fc, 0);
 }
-
-/**
- * Decrement reference count of a request.  If count goes to zero free
- * the request.
- */
-void fuse_put_request(struct fuse_req *req);
 
 /**
  * Send a request to head of pending queue.
