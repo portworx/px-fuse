@@ -145,13 +145,14 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 	struct fuse_req *req;
 	int err;
 
-	err = -ENOTCONN;
-	if (!fc->connected && !fc->allow_disconnected)
+	if (!fc->connected && !fc->allow_disconnected) {
+		 err = -ENOTCONN;
 		goto out;
+	}
 
 	req = fuse_request_alloc(npages);
-	err = -ENOMEM;
 	if (!req) {
+		err = -ENOMEM;
 		goto out;
 	}
 
@@ -174,7 +175,7 @@ struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
 	return __fuse_get_req(fc, npages, true);
 }
 
-void fuse_put_request(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_put_request(struct fuse_req *req)
 {
 	if (atomic_dec_and_test(&req->count))
 		fuse_request_free(req);
@@ -195,7 +196,7 @@ static u64 fuse_get_unique(struct fuse_conn *fc)
 {
 	fc->reqctr++;
 	/* zero is special */
-	if (fc->reqctr == 0)
+	if (unlikely(fc->reqctr == 0))
 		fc->reqctr = 1;
 
 	return fc->reqctr;
@@ -207,7 +208,6 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 	if (hlist_unhashed(&req->hash_entry))
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
-	req->state = FUSE_REQ_PENDING;
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
@@ -218,17 +218,15 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
 
 void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 {
-	spin_lock(&fc->lock);
-	req->background = 0;
-	req->isreply = 1;
-	req->in.h.unique = fuse_get_unique(fc);
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
+	req->state = FUSE_REQ_PENDING;
+	spin_lock(&fc->lock);
+	req->in.h.unique = fuse_get_unique(fc);
 	list_add(&req->list, &fc->pending);
 	if (hlist_unhashed(&req->hash_entry))
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
-	req->state = FUSE_REQ_PENDING;
 	spin_unlock(&fc->lock);
 
 	fuse_conn_wakeup(fc);
@@ -242,20 +240,19 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
  * the 'end' callback is called if given, else the reference to the
  * request is released
  *
- * Called with fc->lock, unlocks it
+ * If called with fc->lock, unlocks it
  */
-static void request_end(struct fuse_conn *fc, struct fuse_req *req)
+static void request_end(struct fuse_conn *fc, struct fuse_req *req,
+                        bool lock)
 __releases(fc->lock)
 {
-	void (*end) (struct fuse_conn *, struct fuse_req *) = req->end;
-	req->end = NULL;
+	if (likely(lock)) {
+		spin_lock(&fc->lock);
+	}
 	if (!hlist_unhashed(&req->hash_entry))
 		hlist_del_init(&req->hash_entry);
 	list_del(&req->list);
-	req->state = FUSE_REQ_FINISHED;
 	if (req->background) {
-		req->background = 0;
-
 		if (fc->num_background == fc->congestion_threshold &&
 		    fc->connected && fc->bdi_initialized) {
 			clear_bdi_congested(&fc->bdi, BLK_RW_SYNC);
@@ -265,9 +262,10 @@ __releases(fc->lock)
 		fc->active_background--;
 	}
 	spin_unlock(&fc->lock);
-	if (end)
-		end(fc, req);
-	fuse_put_request(fc, req);
+	req->state = FUSE_REQ_FINISHED;
+	if (req->end)
+		req->end(fc, req);
+	fuse_put_request(req);
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
@@ -285,14 +283,14 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 	queue_request(fc, req);
 }
 
-static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
-
+	req->state = FUSE_REQ_PENDING;
 	spin_lock(&fc->lock);
 	if (fc->connected || fc->allow_disconnected) {
-		if (!fc->connected) {
+		if (unlikely(!fc->connected)) {
 			printk(KERN_INFO "%s: Request on disconnected FC", __func__);
 		}
 		fuse_request_send_nowait_locked(fc, req);
@@ -301,14 +299,8 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		fuse_conn_wakeup(fc);
 	} else {
 		req->out.h.error = -ENOTCONN;
-		request_end(fc, req);
+		request_end(fc, req, false);
 	}
-}
-
-void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
-{
-	req->isreply = 1;
-	fuse_request_send_nowait(fc, req);
 }
 
 static int request_pending(struct fuse_conn *fc)
@@ -340,15 +332,13 @@ __acquires(fc->lock)
 ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 	struct request *breq = req->rq;
-	size_t copied = 0;
-	size_t len;
+	size_t copied, len;
 
-	len = sizeof(req->in.h);
-	if (copy_to_iter(&req->in.h, len, iter) != len) {
+	copied = sizeof(req->in.h);
+	if (copy_to_iter(&req->in.h, copied, iter) != copied) {
 		printk(KERN_ERR "%s: copy header error\n", __func__);
 		return -EFAULT;
 	}
-	copied += len;
 
 	len = req->in.args[0].size;
 	if (copy_to_iter((void *)req->in.args[0].value, len, iter) != len) {
@@ -392,7 +382,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	struct list_head *entry, *first, *last, tmp, *next;
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
-	bool no_reply = false;
 
 	INIT_LIST_HEAD(&tmp);
 
@@ -432,46 +421,32 @@ retry:
 
 	list_cut_position(&tmp, &fc->pending, last);
 	list_splice_tail(&tmp, &fc->processing);
-
 	spin_unlock(&fc->lock);
 
 	entry = first;
 	err = 0;
 	while (1) {
 		req = list_entry(entry, struct fuse_req, list);
+		next = entry->next;
 		copied_this_time = fuse_copy_req_read(req, iter);
-		if (copied_this_time > 0) {
+		if (likely(copied_this_time > 0)) {
 			copied += copied_this_time;
 		} else {
 			err = copied_this_time;
-			goto err_reqs;
+			req->out.h.error = -EIO;
+			request_end(fc, req, true);
 		}
-
-		no_reply = no_reply || !req->isreply;
 		if (entry == last)
 			break;
-		entry = entry->next;
+		entry = next;
 	}
-
-	if (unlikely(no_reply)) {
-		entry = first;
-		while (1) {
-			req = list_entry(entry, struct fuse_req, list);
-			next = entry->next;
-			if (!req->isreply) {
-				spin_lock(&fc->lock);
-				request_end(fc, req);
-			}
-			if (entry == last)
-				break;
-			entry = next;
-		}
+	if (!copied) {
+		copied = err;
 	}
 
 	/* Check if more requests could be picked up */
 	if (remain && request_pending(fc)) {
 		INIT_LIST_HEAD(&tmp);
-		no_reply = false;
 		spin_lock(&fc->lock);
 		if (request_pending(fc)) {
 			goto retry;
@@ -482,20 +457,6 @@ retry:
 
  err_unlock:
 	spin_unlock(&fc->lock);
-	return err;
-
- err_reqs:
-	entry = first;
-	while (1) {
-		req = list_entry(entry, struct fuse_req, list);
-		next = entry->next;
-		req->out.h.error = -EIO;
-		spin_lock(&fc->lock);
-		request_end(fc, req);
-		if (entry == last)
-			break;
-		entry = next;
-	}
 	return err;
 }
 
@@ -770,8 +731,8 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	if (oh.error <= -1000 || oh.error > 0)
 		return -EINVAL;
 
-	spin_lock(&fc->lock);
 	err = -ENOENT;
+	spin_lock(&fc->lock);
 	if (!fc->connected)
 		goto err_unlock;
 
@@ -779,10 +740,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	if (!req)
 		goto err_unlock;
 
-	req->state = FUSE_REQ_WRITING;
 	list_del_init(&req->list);
 	spin_unlock(&fc->lock);
-
+	req->state = FUSE_REQ_WRITING;
 	req->out.h = oh;
 
 	if (req->bio_pages && req->out.numargs && iter->count > 0) {
@@ -808,8 +768,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 			}
 		}
 	}
-	spin_lock(&fc->lock);
-	request_end(fc, req);
+	request_end(fc, req, true);
 	return nbytes;
 
  err_unlock:
@@ -880,7 +839,7 @@ __acquires(fc->lock)
 		struct fuse_req *req;
 		req = list_entry(head->next, struct fuse_req, list);
 		req->out.h.error = -ECONNABORTED;
-		request_end(fc, req);
+		request_end(fc, req, false);
 		spin_lock(&fc->lock);
 	}
 }
