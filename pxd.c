@@ -433,7 +433,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	req->bio = bio;
 	req->queue = q;
 
-	fuse_request_send_background(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
 }
 
@@ -482,7 +482,7 @@ static void pxd_rq_fn(struct request_queue *q)
 
 		req->rq = rq;
 		req->queue = q;
-		fuse_request_send_background(&pxd_dev->ctx->fc, req);
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -998,7 +998,6 @@ static int pxd_send_init(struct fuse_conn *fc)
 	req->in.args[1].size = sizeof(struct pxd_dev_id) * ctx->num_devices;
 	req->in.args[1].value = NULL;
 	req->in.argpages = 1;
-	req->out.numargs = 0;
 	req->end = pxd_process_init_reply;
 
 	fuse_request_send_oob(fc, req);
