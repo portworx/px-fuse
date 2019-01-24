@@ -380,7 +380,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	int err;
 	struct fuse_req *req;
 	struct list_head *entry, *first, *last, tmp, *next;
-	ssize_t copied, copied_this_time;
+	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
 
 	INIT_LIST_HEAD(&tmp);
@@ -399,6 +399,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 			goto err_unlock;
 	}
 
+retry:
 	entry = fc->pending.next;
 	first = fc->pending.next;
 	last = &fc->pending;
@@ -414,7 +415,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 		}
 	}
 
-	err = -EINVAL;
+	err = copied ? copied : -EINVAL;
 	if (last == &fc->pending)
 		goto err_unlock;
 
@@ -423,7 +424,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	spin_unlock(&fc->lock);
 
 	entry = first;
-	copied = 0;
+	err = 0;
 	while (1) {
 		req = list_entry(entry, struct fuse_req, list);
 		next = entry->next;
@@ -441,6 +442,16 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	}
 	if (!copied) {
 		copied = err;
+	}
+
+	/* Check if more requests could be picked up */
+	if (remain && request_pending(fc)) {
+		INIT_LIST_HEAD(&tmp);
+		spin_lock(&fc->lock);
+		if (request_pending(fc)) {
+			goto retry;
+		}
+		spin_unlock(&fc->lock);
 	}
 	return copied;
 
