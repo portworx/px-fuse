@@ -70,7 +70,11 @@ struct node_cpu_map {
 static struct node_cpu_map *node_cpu_map;
 
 // A private global bio mempool for punting requests bypassing vfs
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 static struct bio_set pxd_bio_set;
+#endif
+static struct bio_set* ppxd_bio_set;
+
 #define PXD_MIN_POOL_PAGES (128)
 struct pxd_io_tracker {
 	unsigned long start;
@@ -257,7 +261,7 @@ int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
 	struct address_space *mapping = pxd_dev->file[0]->f_mapping;
 	struct inode *inode = mapping->host;
 	struct block_device *bdi = I_BDEV(inode);
-	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, &pxd_bio_set);
+	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
 	struct pxd_io_tracker* iot = container_of(clone_bio, struct pxd_io_tracker, clone);
 
 	if (!clone_bio) {
@@ -2399,9 +2403,18 @@ int pxd_init(void)
 		map->cpu[map->ncpu++] = i;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone), 0)) {
 		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
 		kfree(node_cpu_map);
+		goto out_sysfs;
+	}
+	ppxd_bio_set = &pxd_bio_set;
+#else
+	ppxd_bio_set = bioset_create(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone), 0);
+#endif
+	if (!ppxd_bio_set) {
+		printk(KERN_ERR "pxd: bioset init failed");
 		goto out_sysfs;
 	}
 
@@ -2429,7 +2442,13 @@ void pxd_exit(void)
 {
 	int i;
 
-	bioset_exit(&pxd_bio_set);
+	if (ppxd_bio_set) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+		bioset_exit(ppxd_bio_set);
+#else
+		bioset_free(ppxd_bio_set);
+#endif
+	}
 	if (node_cpu_map) kfree(node_cpu_map);
 
 	pxd_sysfs_exit();
