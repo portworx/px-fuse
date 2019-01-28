@@ -413,6 +413,8 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 	return copied;
 }
 
+extern uint32_t pxd_detect_zero_writes;
+
 /* Check if the request is writing zeroes and if so, convert it as a discard
  * request.
  */
@@ -514,6 +516,7 @@ retry:
 			remain -= req->in.h.len;
 			entry = entry->next;
 		} else {
+			remain = 0;
 			break;
 		}
 	}
@@ -535,7 +538,8 @@ retry:
 		req = list_entry(entry, struct fuse_req, list);
 
 		/* Check if a write request is writing zeroes */
-		if ((req->in.h.opcode == PXD_WRITE) && req->misc.pxd_rdwr_in.size &&
+		if (pxd_detect_zero_writes && (req->in.h.opcode == PXD_WRITE) &&
+			req->misc.pxd_rdwr_in.size &&
 			!(req->misc.pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
 			fuse_convert_zero_writes(req);
 		}

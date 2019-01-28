@@ -27,7 +27,7 @@
 //#define pxd_printk(args...) printk(KERN_ERR args)
 
 #ifndef SECTOR_SIZE
-#define SECTOR_SIZE 512
+define SECTOR_SIZE 512
 #endif
 #define SEGMENT_SIZE (1024 * 1024)
 
@@ -64,10 +64,14 @@ uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
 uint32_t pxd_fc_timeout = 1 * HZ;
 uint32_t pxd_accumulate = 1;
+uint32_t pxd_detect_zero_writes = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_accumulate, uint, 0644);
+module_param(pxd_num_contexts_exported, uint, 0644);
+module_param(pxd_num_contexts, uint, 0644);
+module_param(pxd_detect_zero_writes, uint, 0644);
 
 struct pxd_device {
 	uint64_t dev_id;
