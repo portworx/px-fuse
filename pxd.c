@@ -27,7 +27,7 @@
 //#define pxd_printk(args...) printk(KERN_ERR args)
 
 #ifndef SECTOR_SIZE
-define SECTOR_SIZE 512
+#define SECTOR_SIZE 512
 #endif
 #define SEGMENT_SIZE (1024 * 1024)
 
@@ -62,16 +62,14 @@ struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+uint32_t pxd_detect_zero_writes = 0;
 uint32_t pxd_fc_timeout = 1 * HZ;
 uint32_t pxd_accumulate = 1;
-uint32_t pxd_detect_zero_writes = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
-module_param(pxd_accumulate, uint, 0644);
-module_param(pxd_num_contexts_exported, uint, 0644);
-module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+module_param(pxd_accumulate, uint, 0644);
 
 struct pxd_device {
 	uint64_t dev_id;
@@ -481,8 +479,6 @@ static void pxd_rq_fn(struct request_queue *q)
 
 		pxd_dev->ctx->last_enqueued = jiffies;
 
-		req->rq = rq;
-		req->queue = q;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
@@ -493,6 +489,8 @@ static void pxd_rq_fn(struct request_queue *q)
 			    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
+		req->rq = rq;
+		req->queue = q;
 		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}

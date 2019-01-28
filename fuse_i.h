@@ -406,6 +406,7 @@ struct fuse_conn {
 	/** Number of background requests currently queued for userspace */
 	unsigned active_background;
 
+    /* Total size of pending requests */
     uint64_t pending_total;
 
 	/** hash table of pending requests */
