@@ -60,9 +60,11 @@ struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+uint32_t pxd_detect_zero_writes = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
+module_param(pxd_detect_zero_writes, uint, 0644);
 
 struct pxd_device {
 	uint64_t dev_id;
