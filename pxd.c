@@ -269,6 +269,9 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	req->in.numargs = 1;
+	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	req->bio_pages = true;
 	req->in.h.pid = current->pid;
 	req->misc.pxd_rdwr_in.minor = minor;
@@ -289,14 +292,9 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_READ;
-	req->in.numargs = 1;
-	req->in.argpages = 0;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
 	req->out.numargs = 1;
 	req->out.argpages = 1;
 	req->out.args[0].size = size;
-	req->out.args[0].value = NULL;
 	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -306,11 +304,6 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
-	req->in.numargs = 1;
-	req->in.argpages = 0;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -320,11 +313,6 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_DISCARD;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->in.argpages = 0;
-	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -334,11 +322,6 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE_SAME;
-	req->in.numargs = 1;
-	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->in.argpages = 0;
-	req->out.numargs = 0;
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -449,11 +432,10 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 		    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
-	req->misc.pxd_rdwr_in.chksum = 0;
 	req->bio = bio;
 	req->queue = q;
 
-	fuse_request_send_background(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
 }
 
@@ -490,10 +472,6 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		req->num_pages = 0;
-		req->misc.pxd_rdwr_in.chksum = 0;
-		req->rq = rq;
-		req->queue = q;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
@@ -504,7 +482,9 @@ static void pxd_rq_fn(struct request_queue *q)
 			    REQCTR(&pxd_dev->ctx->fc));
 #endif
 
-		fuse_request_send_background(&pxd_dev->ctx->fc, req);
+		req->rq = rq;
+		req->queue = q;
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -976,7 +956,6 @@ static void pxd_process_init_reply(struct fuse_conn *fc,
 	if (req->out.h.error != 0)
 		fc->connected = 0;
 	fc->pend_open = 0;
-	fuse_put_request(fc, req);
 }
 
 static int pxd_send_init(struct fuse_conn *fc)
@@ -1021,7 +1000,6 @@ static int pxd_send_init(struct fuse_conn *fc)
 	req->in.args[1].size = sizeof(struct pxd_dev_id) * ctx->num_devices;
 	req->in.args[1].value = NULL;
 	req->in.argpages = 1;
-	req->out.numargs = 0;
 	req->end = pxd_process_init_reply;
 
 	fuse_request_send_oob(fc, req);
@@ -1036,7 +1014,7 @@ err_free_pages:
 		if (req->pages[i])
 			put_page(req->pages[i]);
 	}
-	fuse_put_request(fc, req);
+	fuse_request_free(req);
 err:
 	return rc;
 }
