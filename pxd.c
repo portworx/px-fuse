@@ -1441,6 +1441,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
+#if 0 /* A bug needs fixing for discard path */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
 	queue_flag_clear_unlocked(QUEUE_FLAG_NOMERGES, q);
@@ -1465,6 +1466,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
+#endif
 #endif
 
 	/* Enable flush support. */
