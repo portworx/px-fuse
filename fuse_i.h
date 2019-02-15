@@ -340,6 +340,9 @@ struct fuse_req {
 
 	/** Associate request queue */
 	struct request_queue *queue;
+
+    /* Optional list of requests merged together */
+    struct list_head merged;
 };
 
 /**
@@ -402,6 +405,9 @@ struct fuse_conn {
 
 	/** Number of background requests currently queued for userspace */
 	unsigned active_background;
+
+    /* Total size of pending requests */
+    uint64_t pending_total;
 
 	/** hash table of pending requests */
 	struct hlist_head *hash;
@@ -558,6 +564,12 @@ struct fuse_conn {
 
 	/* Alow operations on disconnected fuse conenction. */
 	int allow_disconnected;
+
+	/* Accumulate requests before signaling */
+	unsigned accumulate;
+
+    /* Set when requests are queued */
+    bool signaled;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
@@ -718,6 +730,11 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
  */
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
 
+/**
+ * Signal requests ready for pickup when timer fires.
+ */
+void fuse_timer_wakeup(struct fuse_conn *fc);
+
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);
 
@@ -832,5 +849,7 @@ int fuse_do_setattr(struct inode *inode, struct iattr *attr,
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
+
+void pxd_reset_active_background(struct fuse_conn *fc);
 
 #endif /* _FS_FUSE_I_H */

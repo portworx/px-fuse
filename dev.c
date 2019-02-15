@@ -71,6 +71,7 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(pages, 0, sizeof(*pages) * npages);
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
+	INIT_LIST_HEAD(&req->merged);
 	INIT_HLIST_NODE(&req->hash_entry);
 	req->pages = pages;
 	req->page_descs = page_descs;
@@ -215,6 +216,7 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 	if (hlist_unhashed(&req->hash_entry))
 		hlist_add_head(&req->hash_entry,
 			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
+	fc->signaled = true;
 	spin_unlock(&fc->lock);
 
 	fuse_conn_wakeup(fc);
@@ -234,6 +236,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
                         bool lock)
 __releases(fc->lock)
 {
+    struct fuse_req *first, *next;
 	if (likely(lock)) {
 		spin_lock(&fc->lock);
 	}
@@ -247,28 +250,82 @@ __releases(fc->lock)
 			clear_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 		}
 		fc->num_background--;
-		fc->active_background--;
 	}
 	spin_unlock(&fc->lock);
 	req->state = FUSE_REQ_FINISHED;
 	if (req->end)
 		req->end(fc, req);
+
+    /* Process requests merged with this request */
+    list_for_each_entry_safe(first, next, &req->merged, merged) {
+	    first->state = FUSE_REQ_FINISHED;
+        if (first->end) {
+            first->end(fc, first);
+        }
+        fuse_request_free(first);
+    }
 	fuse_request_free(req);
 }
 
-static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
+static inline bool fuse_request_mergeable(struct fuse_req *req,
+                                          enum pxd_opcode op)
+{
+    return ((op == PXD_WRITE) && req->misc.pxd_rdwr_in.size) ||
+           (op == PXD_READ) || (op == PXD_DISCARD);
+}
+
+uint64_t pxd_accumulate_size = (128 * 1024);
+
+static inline bool fuse_request_queue(struct fuse_conn *fc,
+									  struct fuse_req *req)
+{
+	fc->active_background++;
+	fc->pending_total += req->misc.pxd_rdwr_in.size;
+	return (fc->active_background >= fc->accumulate) ||
+		   (fc->pending_total >= pxd_accumulate_size) ||
+		   (((req->misc.pxd_rdwr_in.size == 0) ||
+			 (req->misc.pxd_rdwr_in.flags & PXD_FLAGS_FLUSH)) &&
+			(req->in.h.opcode == PXD_WRITE));
+}
+
+static bool fuse_request_send_nowait_locked(struct fuse_conn *fc,
 					    struct fuse_req *req)
 {
+	enum pxd_opcode op = req->in.h.opcode;
+	struct fuse_req *prev;
+	bool wakeup;
+
+	/* Check if the request could be merged with another request */
+	if (fuse_request_mergeable(req, op) && !list_empty(&fc->pending)) {
+		prev = list_last_entry(&fc->pending, struct fuse_req, list);
+		if ((prev->in.h.opcode == op) && prev->misc.pxd_rdwr_in.size &&
+			((prev->misc.pxd_rdwr_in.offset + prev->misc.pxd_rdwr_in.size) ==
+			 req->misc.pxd_rdwr_in.offset) &&
+			(req->misc.pxd_rdwr_in.flags == prev->misc.pxd_rdwr_in.flags) &&
+			((prev->misc.pxd_rdwr_in.size + req->misc.pxd_rdwr_in.size) <=
+			 PXD_MAX_IO)) {
+			prev->misc.pxd_rdwr_in.size += req->misc.pxd_rdwr_in.size;
+			list_add_tail(&req->merged, &prev->merged);
+			return fuse_request_queue(fc, req);
+		}
+	}
 	BUG_ON(!req->background);
 	fc->num_background++;
 	if (fc->num_background == fc->congestion_threshold &&
-	    fc->bdi_initialized) {
+		fc->bdi_initialized) {
 		set_bdi_congested(&fc->bdi, BLK_RW_SYNC);
 		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
 	}
-	fc->active_background++;
+	wakeup = fuse_request_queue(fc, req);
 	req->in.h.unique = fuse_get_unique(fc);
 	queue_request(fc, req);
+	return wakeup;
+}
+
+void fuse_timer_wakeup(struct fuse_conn *fc)
+{
+	fc->signaled = true;
+	fuse_conn_wakeup(fc);
 }
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
@@ -281,10 +338,13 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		if (unlikely(!fc->connected)) {
 			printk(KERN_INFO "%s: Request on disconnected FC", __func__);
 		}
-		fuse_request_send_nowait_locked(fc, req);
-		spin_unlock(&fc->lock);
-
-		fuse_conn_wakeup(fc);
+		if (fuse_request_send_nowait_locked(fc, req)) {
+			fc->signaled = true;
+			spin_unlock(&fc->lock);
+			fuse_conn_wakeup(fc);
+		} else {
+			spin_unlock(&fc->lock);
+		}
 	} else {
 		req->out.h.error = -ENOTCONN;
 		request_end(fc, req, false);
@@ -362,6 +422,7 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 {
 	uint8_t wsize = sizeof(uint64_t);
 	struct req_iterator breq_iter;
+	struct fuse_req *first = req;
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 #else
@@ -371,6 +432,7 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 	size_t i, len;
 	uint64_t *q;
 
+retry:
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		kaddr = kmap_atomic(BVEC(bvec).bv_page);
 		p = kaddr + BVEC(bvec).bv_offset;
@@ -390,7 +452,14 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 		}
 		kunmap_atomic(kaddr);
 	}
-	req->in.h.opcode = PXD_DISCARD;
+	req = list_next_entry(req, merged);
+	if (req && (req != first)) {
+#ifndef HAVE_BVEC_ITER
+		*bvec = NULL;
+#endif
+		goto retry;
+	}
+	first->in.h.opcode = PXD_DISCARD;
 }
 
 /*
@@ -411,10 +480,18 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
 
+	if (!fc->signaled) {
+
+		/* If requests are not queued yet, do not attempt to pick up those now.
+		 * Wait for a few requests arrive so that those could be merged.
+		 */
+		return -EAGAIN;
+	}
 	INIT_LIST_HEAD(&tmp);
 
 	spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
+		pxd_reset_active_background(fc);
 		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
 			goto err_unlock;
@@ -450,10 +527,13 @@ retry:
 
 	list_cut_position(&tmp, &fc->pending, last);
 	list_splice_tail(&tmp, &fc->processing);
+
+	if (!request_pending(fc)) {
+		pxd_reset_active_background(fc);
+	}
 	spin_unlock(&fc->lock);
 
 	entry = first;
-	err = 0;
 	while (1) {
 		req = list_entry(entry, struct fuse_req, list);
 
@@ -476,18 +556,18 @@ retry:
 			break;
 		entry = next;
 	}
-	if (!copied) {
-		copied = err;
-	}
 
 	/* Check if more requests could be picked up */
-	if (remain && request_pending(fc)) {
+	if (remain && fc->signaled && request_pending(fc)) {
 		INIT_LIST_HEAD(&tmp);
 		spin_lock(&fc->lock);
-		if (request_pending(fc)) {
+		if (fc->signaled && request_pending(fc)) {
 			goto retry;
 		}
 		spin_unlock(&fc->lock);
+	}
+	if (!copied) {
+		copied = err;
 	}
 	return copied;
 
@@ -602,7 +682,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 {
 	struct pxd_read_data_out read_data;
 	size_t len = sizeof(read_data);
-	struct fuse_req *req;
+	struct fuse_req *req, *first;
 	struct iovec iov[IOV_BUF_SIZE];
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
@@ -644,6 +724,9 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
+    first = req;
+
+more:
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		copied = 0;
 		len = BVEC(bvec).bv_len;
@@ -681,7 +764,13 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 			}
 		}
 	}
-
+    req = list_next_entry(req, merged);
+    if (req && (req != first)) {
+#ifndef HAVE_BVEC_ITER
+        bvec = NULL;
+#endif
+        goto more;
+    }
 	return 0;
 }
 
@@ -738,7 +827,7 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 {
 	int err;
-	struct fuse_req *req;
+	struct fuse_req *req, *next;
 	struct fuse_out_header oh;
 	size_t len;
 	size_t nbytes = iter->count;
@@ -791,6 +880,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		struct req_iterator breq_iter;
 		if (breq->nr_phys_segments && req->in.h.opcode == PXD_READ) {
 			int i = 0;
+			next = req;
+
+more:
 			rq_for_each_segment(bvec, breq, breq_iter) {
 				len = BVEC(bvec).bv_len;
 				if (copy_page_from_iter(BVEC(bvec).bv_page,
@@ -801,6 +893,16 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 					return -EFAULT;
 				}
 				i++;
+			}
+			next = list_next_entry(next, merged);
+			if (next && (next != req)) {
+				next->state = FUSE_REQ_WRITING;
+				breq = next->rq;
+#ifndef HAVE_BVEC_ITER
+				bvec = NULL;
+#endif
+				i = 0;
+				goto more;
 			}
 		}
 	}
@@ -1006,9 +1108,10 @@ void fuse_restart_requests(struct fuse_conn *fc)
 	list_for_each_entry(req, &fc->processing, list)
 		req->state = FUSE_REQ_PENDING;
 	list_splice_init(&fc->processing, &fc->pending);
-	wake_up(&fc->waitq);
-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
+	fc->active_background++;
+	fc->signaled = true;
 	spin_unlock(&fc->lock);
+	fuse_conn_wakeup(fc);
 }
 
 static int fuse_dev_fasync(int fd, struct file *file, int on)
