@@ -200,6 +200,7 @@ static unsigned getsectors(struct bio *bio) {
 	int i;
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	switch (bio_op(bio)) {
 	case REQ_OP_DISCARD:
 	case REQ_OP_SECURE_ERASE:
@@ -210,6 +211,7 @@ static unsigned getsectors(struct bio *bio) {
 	default:
 		break;
 	}
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
@@ -234,13 +236,13 @@ static void pxd_complete_io(struct bio* bio) {
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-        if (bio->bi_status) { /* non-zero indicates failure */
+        if (bio->bi_error) { /* non-zero indicates failure */
                 bio_io_error(iot->orig);
         } else {
                 bio_endio(iot->orig);
         }
 #else
-        bio_endio(iot->orig, bio->bi_status);
+        bio_endio(iot->orig, bio->bi_error);
 #endif
 
 	atomic_inc(&pxd_dev->ncomplete);
@@ -270,7 +272,7 @@ int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
 
 	iot->orig = bio;
 	iot->start = jiffies;
-	bio_set_dev(clone_bio, bdi);
+	BIO_SET_DEV(clone_bio, bdi);
 	clone_bio->bi_private = pxd_dev;
 	clone_bio->bi_end_io = pxd_complete_io;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
@@ -279,7 +281,7 @@ int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
 	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
 #endif
 
-	submit_bio(clone_bio);
+	SUBMIT_BIO(clone_bio);
 	atomic_inc(&pxd_dev->ncount);
 	atomic_inc(&pxd_dev->nswitch);
 
@@ -819,6 +821,7 @@ void pxd_make_request_orig(struct request_queue *q, struct bio *bio)
         struct pxd_device *pxd_dev = q->queuedata;
         struct fuse_req *req;
         unsigned int flags;
+		uint64_t offset;
 
         flags = bio->bi_flags;
 
@@ -835,11 +838,13 @@ void pxd_make_request_orig(struct request_queue *q, struct bio *bio)
                 return BLK_QC_RETVAL;
         }
 
+		// compute offset typecasted as for discards it overflows
+        offset = ((uint64_t) BIO_SECTOR(bio)) * ((uint64_t) SECTOR_SIZE);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-        pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+        pxd_request(req, BIO_SIZE(bio), offset,
                 pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc));
 #else
-        pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+        pxd_request(req, BIO_SIZE(bio), offset,
                     pxd_dev->minor, bio->bi_rw, false,
                     REQCTR(&pxd_dev->ctx->fc));
 #endif
@@ -1441,7 +1446,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
-#if 0 /* A bug needs fixing for discard path */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, q);
 	queue_flag_clear_unlocked(QUEUE_FLAG_NOMERGES, q);
@@ -1466,7 +1470,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
-#endif
 #endif
 
 	/* Enable flush support. */
@@ -2413,7 +2416,7 @@ int pxd_init(void)
 	}
 	ppxd_bio_set = &pxd_bio_set;
 #else
-	ppxd_bio_set = bioset_create(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone), 0);
+	ppxd_bio_set = BIOSET_CREATE(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone));
 #endif
 	if (!ppxd_bio_set) {
 		printk(KERN_ERR "pxd: bioset init failed");
