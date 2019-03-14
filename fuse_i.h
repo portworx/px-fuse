@@ -328,11 +328,13 @@ struct fuse_req {
 		/** AIO control block */
 		struct fuse_io_priv *io;
 
+#ifdef USE_REQUESTQ_MODEL
 		/** Associated request structrure. */
 		struct request *rq;
-
+#else
 		/** Associated bio structrure. */
  		struct bio *bio;
+#endif
 	};
 
 	/** Request completion callback */

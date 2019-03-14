@@ -230,13 +230,39 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
+#ifdef USE_REQUESTQ_MODEL
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+#else
+	struct bio *bio = req->bio;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+	bio->bi_status = req->out.h.error;
+	bio_endio(bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	bio->bi_error = req->out.h.error;
+	bio_endio(bio);
+#else
+	bio_endio(bio, req->out.h.error);
+#endif
+#endif
 	pxd_request_complete(fc, req);
 }
 
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
+#ifdef USE_REQUESTQ_MODEL
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+#else
+	struct bio *bio = req->bio;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+	bio->bi_status = req->out.h.error;
+	bio_endio(bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	bio->bi_error = req->out.h.error;
+	bio_endio(bio);
+#else
+	bio_endio(bio, req->out.h.error);
+#endif
+#endif
 	pxd_request_complete(fc, req);
 }
 
@@ -439,6 +465,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	return BLK_QC_RETVAL;
 }
 
+#ifdef USE_REQUESTQ_MODEL
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -488,6 +515,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
+#endif
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
@@ -511,16 +539,16 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->private_data = pxd_dev;
 
 	/* Bypass queue if queue_depth is zero. */
-	if (add->queue_depth == 0) {
-		q = blk_alloc_queue(GFP_KERNEL);
-		if (!q)
-			goto out_disk;
-		blk_queue_make_request(q, pxd_make_request);
-	} else {
-		q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
-		if (!q)
-			goto out_disk;
-	}
+#ifndef USE_REQUESTQ_MODEL
+	q = blk_alloc_queue(GFP_KERNEL);
+	if (!q)
+		goto out_disk;
+	blk_queue_make_request(q, pxd_make_request);
+#else
+	q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
+	if (!q)
+		goto out_disk;
+#endif
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
