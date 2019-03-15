@@ -1053,9 +1053,16 @@ const struct file_operations fuse_dev_operations = {
 int fuse_dev_init(void)
 {
 	int err = -ENOMEM;
+
+#ifdef CONFIG_HARDENED_USERCOPY
+	fuse_req_cachep = kmem_cache_create_usercopy("pxd_fuse_request",
+					    sizeof(struct fuse_req),
+					    0, 0, 0, sizeof(struct fuse_req), NULL);
+#else
 	fuse_req_cachep = kmem_cache_create("pxd_fuse_request",
 					    sizeof(struct fuse_req),
 					    0, 0, NULL);
+#endif
 	if (!fuse_req_cachep)
 		goto out;
 
