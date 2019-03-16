@@ -362,18 +362,28 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
+		pxd_printk("REQ_OP_WRITE_SAME: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 		pxd_write_same_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_WRITE:
+		pxd_printk("REQ_OP_WRITE: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 		pxd_write_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_READ:
+		pxd_printk("REQ_OP_READ: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 		pxd_read_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_DISCARD:
+		pxd_printk("REQ_OP_DISCARD: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_FLUSH:
+		pxd_printk("REQ_OP_FLUSH: size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
+				size, off, minor, REQ_FUA);
 		pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
 		break;
 	}
@@ -390,17 +400,30 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	case REQ_WRITE:
 		/* FALLTHROUGH */
 	case (REQ_WRITE | REQ_WRITE_SAME):
-		if (flags & REQ_WRITE_SAME)
+		if (flags & REQ_WRITE_SAME) {
+			pxd_printk("REQ_OP_WRITE_SAME: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 			pxd_write_same_request(req, size, off, minor, flags, qfn);
-		else
+		} else if (flags & (REQ_FUA|REQ_FLUSH)) {
+			pxd_printk("REQ_OP_FLUSH: size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
+				size, off, minor, flags);
+			pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
+		} else {
+			pxd_printk("REQ_OP_WRITE: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 			pxd_write_request(req, size, off, minor, flags, qfn);
+		}
 		break;
 	case 0:
+		pxd_printk("REQ_OP_READ: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 		pxd_read_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
 	case REQ_WRITE | REQ_DISCARD:
+		pxd_printk("REQ_DISCARD: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				size, off, minor, flags);
 		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
 	}
@@ -443,7 +466,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, flags, get_op_flags(bio));
 
-	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
+	req = pxd_fuse_req(pxd_dev, 0);
 	if (IS_ERR(req)) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
