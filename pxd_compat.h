@@ -29,12 +29,56 @@
 
 #ifdef HAVE_BVEC_ITER
 #define BIO_SECTOR(bio) bio->bi_iter.bi_sector
-#define BIO_SIZE(bio) bio->bi_iter.bi_size
 #define BVEC(bvec) (bvec)
 #else
 #define BIO_SECTOR(bio) bio->bi_sector
-#define BIO_SIZE(bio) bio->bi_size
 #define BVEC(bvec) (*(bvec))
+#endif
+
+static inline
+int compute_bio_rq_size(struct bio *breq) {
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+#else
+	struct bio_vec *bvec = NULL;
+#endif
+
+#if defined(HAVE_BVEC_ITER)
+	struct bvec_iter bvec_iter;
+#else
+	int bvec_iter;
+#endif
+
+	int total_size = 0;
+	bio_for_each_segment(bvec, breq, bvec_iter) {
+		total_size += BVEC(bvec).bv_len;
+	}
+
+	return total_size;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#define BIO_OP(bio)   bio_op(bio)
+#define SUBMIT_BIO(bio) submit_bio(bio)
+#else
+// only supports read or write
+#define BIO_OP(bio)   (bio->bi_rw & 1)
+#define SUBMIT_BIO(bio)  submit_bio(BIO_OP(bio), bio)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#else
+#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
+#else
+#define BIO_SET_DEV(bio, bdev)  \
+	do { \
+		(bio)->bi_bdev = (bdev); \
+	} while (0)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)

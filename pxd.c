@@ -214,7 +214,7 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 #ifdef USE_REQUESTQ_MODEL
 	pxd_update_stats(req, 0, blk_rq_bytes(req->rq) / SECTOR_SIZE);
 #else
-	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	pxd_update_stats(req, 0, compute_bio_rq_size(req->bio)/SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 #endif
 	pxd_request_complete(fc, req);
@@ -230,7 +230,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 #ifdef USE_REQUESTQ_MODEL
         pxd_update_stats(req, 1, blk_rq_bytes(req->rq) / SECTOR_SIZE);
 #else
-	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	pxd_update_stats(req, 0, compute_bio_rq_size(req->bio)/SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
 #endif
 	pxd_request_complete(fc, req);
@@ -377,6 +377,11 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 				req->in.h.unique, size, off, minor, (unsigned int)REQ_FUA);
 		pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
 		break;
+	default:
+		dbg_printk("[%llu] REQ_OP_UNKNOWN(%#x): size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
+                                req->in.h.unique, op, size, off, minor, flags);
+		BUG();
+		break;
 	}
 }
 
@@ -417,6 +422,10 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 				req->in.h.unique, size, off, minor, flags);
 		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
+	default:
+		dbg_printk("[%llu] REQ_OP_UNKNOWN(%#x): size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
+                                req->in.h.unique, flags, size, off, minor, flags);
+		BUG();
 	}
 }
 #endif
@@ -449,14 +458,19 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
 	unsigned int flags;
+	int total_size;
 
 	flags = bio->bi_flags;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	blk_queue_split(q, &bio);
+
+	total_size = compute_bio_rq_size(bio);
+
+	printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
+			BIO_SECTOR(bio) * SECTOR_SIZE, total_size,
 			bio->bi_vcnt, flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev, 0);
@@ -466,10 +480,10 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+	pxd_request(req, total_size, BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc));
 #else
-	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+	pxd_request(req, total_size, BIO_SECTOR(bio) * SECTOR_SIZE,
 		    pxd_dev->minor, bio->bi_rw, false,
 		    REQCTR(&pxd_dev->ctx->fc));
 #endif
@@ -573,6 +587,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	blk_queue_io_min(q, PXD_LBS);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
+	blk_queue_physical_block_size(q, PXD_LBS);
+	//blk_queue_flag_set(QUEUE_FLAG_NOMERGES, q);
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
