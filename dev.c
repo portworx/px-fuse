@@ -1054,7 +1054,7 @@ int fuse_dev_init(void)
 {
 	int err = -ENOMEM;
 
-#ifdef CONFIG_HARDENED_USERCOPY
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,16,0)
 	fuse_req_cachep = kmem_cache_create_usercopy("pxd_fuse_request",
 					    sizeof(struct fuse_req),
 					    0, 0, 0, sizeof(struct fuse_req), NULL);
