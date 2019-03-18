@@ -323,10 +323,8 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 #ifdef USE_REQUESTQ_MODEL
 	struct request *breq = req->rq;
-	int nsegs = breq->nr_phys_segments;
 #else
 	struct bio *breq = req->bio;
-	int nsegs = bio_phys_segments(req->queue, breq);
 #endif
 	size_t copied, len;
 
@@ -350,6 +348,11 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 			if (copy_page_to_iter(req->pages[i],
 					      req->page_descs[i].offset,
 					      len, iter) != len) {
+#ifdef USE_REQUESTQ_MODEL
+				int nsegs = breq->nr_phys_segments;
+#else
+				int nsegs = bio_phys_segments(req->queue, breq);
+#endif
 				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
 				       __func__, i, nsegs);
 				return -EFAULT;
