@@ -1,6 +1,9 @@
 #ifndef GDFS_PXD_COMPAT_H
 #define GDFS_PXD_COMPAT_H
 
+#define dbg_printk(args...)
+//#define dbg_printk(args...) printk(KERN_INFO args)
+
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,17,0)
 #include <linux/timekeeping.h>
@@ -34,7 +37,12 @@
 #define BVEC(bvec) (*(bvec))
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+#define BIO_ENDIO(bio, err) do {                \
+    bio->bi_status = err;                       \
+    bio_endio(bio);                             \
+} while (0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 #define BIO_ENDIO(bio, err) do { 		\
 	if (err != 0) { 			\
 		bio_io_error((bio)); 		\

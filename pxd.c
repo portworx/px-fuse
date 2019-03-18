@@ -203,16 +203,20 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
-			__func__, req, req->in.h.unique,
+	pxd_printk("%s: receive reply to %p(%lld, opcode: %u) at %lld err %d\n",
+			__func__, req, req->in.h.unique, req->in.h.opcode,
 			req->misc.pxd_rdwr_in.offset, req->out.h.error);
 }
 
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
 {
 	trace_pxd_reply(REQCTR(fc), req->in.h.unique, 0u);
+#ifdef USE_REQUESTQ_MODEL
+	pxd_update_stats(req, 0, blk_rq_bytes(req->rq) / SECTOR_SIZE);
+#else
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
+#endif
 	pxd_request_complete(fc, req);
 }
 
@@ -223,8 +227,12 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 #else
 	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
 #endif
+#ifdef USE_REQUESTQ_MODEL
+        pxd_update_stats(req, 1, blk_rq_bytes(req->rq) / SECTOR_SIZE);
+#else
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
+#endif
 	pxd_request_complete(fc, req);
 }
 
@@ -233,16 +241,7 @@ static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 #ifdef USE_REQUESTQ_MODEL
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 #else
-	struct bio *bio = req->bio;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-	bio->bi_status = req->out.h.error;
-	bio_endio(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-	bio->bi_error = req->out.h.error;
-	bio_endio(bio);
-#else
-	bio_endio(bio, req->out.h.error);
-#endif
+	BIO_ENDIO(req->bio, req->out.h.error);
 #endif
 	pxd_request_complete(fc, req);
 }
@@ -252,16 +251,7 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 #ifdef USE_REQUESTQ_MODEL
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 #else
-	struct bio *bio = req->bio;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-	bio->bi_status = req->out.h.error;
-	bio_endio(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-	bio->bi_error = req->out.h.error;
-	bio_endio(bio);
-#else
-	bio_endio(bio, req->out.h.error);
-#endif
+	BIO_ENDIO(req->bio, req->out.h.error);
 #endif
 	pxd_request_complete(fc, req);
 }
@@ -306,6 +296,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	req->misc.pxd_rdwr_in.flags =
 		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
+		((flags & REQ_PREFLUSH) ? PXD_FLAGS_FLUSH : 0) |
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #else
 	req->misc.pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
@@ -362,28 +353,28 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
-		pxd_printk("REQ_OP_WRITE_SAME: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+		dbg_printk("[%llu] REQ_OP_WRITE_SAME: size=%d, off=%lld, minor=%d, flags=%#x\n",
+			req->in.h.unique, size, off, minor, flags);
 		pxd_write_same_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_WRITE:
-		pxd_printk("REQ_OP_WRITE: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+		dbg_printk("[%llu] REQ_OP_WRITE: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 		pxd_write_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_READ:
-		pxd_printk("REQ_OP_READ: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+		dbg_printk("[%llu] REQ_OP_READ: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 		pxd_read_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_DISCARD:
-		pxd_printk("REQ_OP_DISCARD: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+		dbg_printk("[%llu] REQ_OP_DISCARD: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_OP_FLUSH:
-		pxd_printk("REQ_OP_FLUSH: size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
-				size, off, minor, REQ_FUA);
+		dbg_printk("[%llu] REQ_OP_FLUSH: size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, (unsigned int)REQ_FUA);
 		pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
 		break;
 	}
@@ -401,29 +392,29 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		/* FALLTHROUGH */
 	case (REQ_WRITE | REQ_WRITE_SAME):
 		if (flags & REQ_WRITE_SAME) {
-			pxd_printk("REQ_OP_WRITE_SAME: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+			dbg_printk("[%llu] REQ_OP_WRITE_SAME: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 			pxd_write_same_request(req, size, off, minor, flags, qfn);
 		} else if (flags & (REQ_FUA|REQ_FLUSH)) {
-			pxd_printk("REQ_OP_FLUSH: size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+			dbg_printk("[%llu] REQ_OP_FLUSH: size=%d(0), off=%lld(0), minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 			pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
 		} else {
-			pxd_printk("REQ_OP_WRITE: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+			dbg_printk("[%llu] REQ_OP_WRITE: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 			pxd_write_request(req, size, off, minor, flags, qfn);
 		}
 		break;
 	case 0:
-		pxd_printk("REQ_OP_READ: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+		dbg_printk("[%llu] REQ_OP_READ: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 		pxd_read_request(req, size, off, minor, flags, qfn);
 		break;
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
 	case REQ_WRITE | REQ_DISCARD:
-		pxd_printk("REQ_DISCARD: size=%d, off=%lld, minor=%d, flags=%#x\n",
-				size, off, minor, flags);
+		dbg_printk("[%llu] REQ_DISCARD: size=%d, off=%lld, minor=%d, flags=%#x\n",
+				req->in.h.unique, size, off, minor, flags);
 		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
 	}
@@ -444,6 +435,8 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #endif
 	return op_flags;
 }
+
+#ifndef USE_REQUESTQ_MODEL
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
@@ -488,7 +481,8 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	return BLK_QC_RETVAL;
 }
 
-#ifdef USE_REQUESTQ_MODEL
+#else /* USE_REQUESTQ_MODEL */
+
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -575,6 +569,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
+	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
 	blk_queue_io_min(q, PXD_LBS);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);

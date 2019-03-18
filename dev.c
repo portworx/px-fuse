@@ -211,6 +211,7 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 	req->state = FUSE_REQ_PENDING;
 	spin_lock(&fc->lock);
 	req->in.h.unique = fuse_get_unique(fc);
+	dbg_printk("request: %d, unique %llu\n", req->in.h.opcode, req->in.h.unique);
 	list_add(&req->list, &fc->pending);
 	if (hlist_unhashed(&req->hash_entry))
 		hlist_add_head(&req->hash_entry,
@@ -268,6 +269,7 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 	}
 	fc->active_background++;
 	req->in.h.unique = fuse_get_unique(fc);
+	dbg_printk("request: %d, unique %llu\n", req->in.h.opcode, req->in.h.unique);
 	queue_request(fc, req);
 }
 
@@ -321,8 +323,10 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 #ifdef USE_REQUESTQ_MODEL
 	struct request *breq = req->rq;
+	int nsegs = breq->nr_phys_segments;
 #else
 	struct bio *breq = req->bio;
+	int nsegs = bio_phys_segments(req->queue, breq);
 #endif
 	size_t copied, len;
 
@@ -346,13 +350,8 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 			if (copy_page_to_iter(req->pages[i],
 					      req->page_descs[i].offset,
 					      len, iter) != len) {
-#ifdef USE_REQUESTQ_MODEL
 				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
-				       __func__, i, breq->nr_phys_segments);
-#else
-				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
-				       __func__, i, bio_phys_segments(req->queue, breq));
-#endif
+				       __func__, i, nsegs);
 				return -EFAULT;
 			}
 			copied += len;
@@ -663,6 +662,9 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
+	dbg_printk("px-storage read data for request: %llu, opcode %d\n",
+		read_data.unique, req->in.h.opcode);
+
 	ret = copy_in_read_data_iovec(iter, &read_data, iov, &data_iter);
 	if (ret)
 		return ret;
@@ -672,9 +674,16 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
+
 #ifdef USE_REQUESTQ_MODEL
+	dbg_printk("rq_for_each_segment data copy for rq %p, nbios %d, nbytes %u, nsegs  %d\n",
+		req->rq, blk_rq_count_bios(req->rq),
+		blk_rq_bytes(req->rq), blk_rq_nr_phys_segments(req->rq));
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 #else
+	/* some debugs */
+	dbg_printk("bio_for_each_segment data copy for bio %p, nsegments %d\n",
+		req->bio, bio_segments(req->bio));
 	bio_for_each_segment(bvec, req->bio, bvec_iter) {
 #endif
 		copied = 0;
@@ -692,6 +701,10 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 			size_t copy_this = copy_page_to_iter(BVEC(bvec).bv_page,
 				BVEC(bvec).bv_offset + copied,
 				len - copied, &data_iter);
+
+			dbg_printk("copy_page_to_iter(page=%p,off:%lu,length:%lu,copied:%lu)\n",
+				BVEC(bvec).bv_page, BVEC(bvec).bv_offset + copied,
+				len - copied, copy_this);
 			if (copy_this != len - copied) {
 				if (!iter->count)
 					return 0;
@@ -705,6 +718,11 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
+
+				dbg_printk("partial:copy_page_to_iter(page=%p,off:%lu,length:%lu,copied:%lu)\n",
+					BVEC(bvec).bv_page, BVEC(bvec).bv_offset + copied+copy_this,
+					len, copied);
+
 				if (copied != len) {
 					printk(KERN_ERR "%s: copy failed new iovec\n",
 						__func__);
@@ -775,6 +793,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	size_t len;
 	size_t nbytes = iter->count;
 
+	dbg_printk("fuse_dev_do_write iov_iter:%p,properties: type %x,count=%ld,offset=%ld,iov:%p\n",
+		iter, iter->type, iov_iter_count(iter), iter->iov_offset, iter->iov);
+
 	if (iter->count < sizeof(struct fuse_out_header))
 		return -EINVAL;
 
@@ -842,16 +863,14 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 			bio_for_each_segment(bvec, breq, bvec_iter) {
 #endif
 				len = BVEC(bvec).bv_len;
+				dbg_printk("[Req: %p/%llu/%d] Page: %p, offset: %u, length: %lu\n",
+					breq, oh.unique, i, 
+					BVEC(bvec).bv_page, BVEC(bvec).bv_offset, len);
 				if (copy_page_from_iter(BVEC(bvec).bv_page,
 							BVEC(bvec).bv_offset,
 							len, iter) != len) {
-#ifdef USE_REQUESTQ_MODEL
 					printk(KERN_ERR "%s: copy page %d of %d error\n",
-					       __func__, i, breq->nr_phys_segments);
-#else
-					printk(KERN_ERR "%s: copy page %d of %d error\n",
-					       __func__, i, bio_phys_segments(req->queue, req->bio));
-#endif
+					       __func__, i, nsegs);
 					return -EFAULT;
 				}
 				i++;
