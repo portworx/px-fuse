@@ -466,7 +466,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 	total_size = compute_bio_rq_size(bio);
 
-	printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
