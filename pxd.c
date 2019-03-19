@@ -411,10 +411,10 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #ifndef USE_REQUESTQ_MODEL
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-void pxd_make_request(struct request_queue *q, struct bio *bio)
+static void pxd_make_request(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
