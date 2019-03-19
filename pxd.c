@@ -666,7 +666,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (!disk)
 		return;
 
-	disableFastPath(pxd_dev);
+	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
@@ -715,9 +715,15 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	pxd_dev->ctx = ctx;
 	pxd_dev->connected = true;
 
-	err = pxd_init_disk(pxd_dev, add);
+	err = pxd_fastpath_init(pxd_dev, 0 /* later: should be offset */);
 	if (err)
 		goto out_id;
+
+	err = pxd_init_disk(pxd_dev, add);
+	if (err) {
+		pxd_fastpath_cleanup(pxd_dev);
+		goto out_id;
+	}
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
@@ -786,7 +792,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
-	disableFastPath(pxd_dev);
+	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->removing = true;
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */

@@ -6,6 +6,10 @@
 
 #define STATIC // temporary hack to compile until final patch completes
 
+// forward decl
+static void enableFastPath(struct pxd_device *pxd_dev, bool force);
+static void disableFastPath(struct pxd_device *pxd_dev);
+
 struct file* getFile(struct pxd_device *pxd_dev, int index) {
 	if (index < pxd_dev->fp.nfd) {
 		return pxd_dev->fp.file[index];
@@ -490,8 +494,7 @@ static int pxd_io_thread(void *data) {
  * shall get called last when new device is added/updated or when fuse connection is lost
  * and re-estabilished.
  */
-static
-void enableFastPath(struct pxd_device *pxd_dev, bool force) {
+static void enableFastPath(struct pxd_device *pxd_dev, bool force) {
 	struct file *f;
 	struct inode *inode;
 	int i;
@@ -555,7 +558,7 @@ out_file_failed:
 		pxd_dev->dev_id);
 }
 
-void disableFastPath(struct pxd_device *pxd_dev) {
+static void disableFastPath(struct pxd_device *pxd_dev) {
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
@@ -644,4 +647,5 @@ fail:
 }
 
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev) {
+	disableFastPath(pxd_dev);
 }
