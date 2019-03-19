@@ -780,6 +780,73 @@ out:
 	return err;
 }
 
+ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path)
+{
+	bool found = false;
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	int err;
+	struct pxd_device *pxd_dev;
+	int i;
+	struct file* f;
+
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		if ((pxd_dev->dev_id == update_path->dev_id) && !pxd_dev->removing) {
+			spin_lock(&pxd_dev->lock);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	if (!found) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	for (i=0; i<update_path->size; i++) {
+		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
+			// If previous paths are same.. then skip anymore config.
+			printk(KERN_INFO"pxd%llu already configured for path %s\n",
+				pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
+			continue;
+		}
+
+		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
+
+		f = filp_open(update_path->devpath[i], O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+		if (IS_ERR_OR_NULL(f)) {
+			printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
+				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
+			goto out_file_failed;
+		}
+
+		pxd_dev->fp.file[i] = f;
+		strcpy(pxd_dev->fp.device_path[i], update_path->devpath[i]);
+	}
+	pxd_dev->fp.nfd = update_path->size;
+
+	/* setup whether the access is block access or file access */
+	enableFastPath(pxd_dev, false);
+
+	spin_unlock(&pxd_dev->lock);
+
+	printk(KERN_INFO"Success attaching path to device %llu [nfd:%d]\n",
+		pxd_dev->dev_id, pxd_dev->fp.nfd);
+	return 0;
+
+out_file_failed:
+	for (i=0; i<pxd_dev->fp.nfd; i++) {
+		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
+	}
+	pxd_dev->fp.nfd = 0;
+	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
+	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
+out:
+	if (found) spin_unlock(&pxd_dev->lock);
+	return err;
+}
+
 static struct bus_type pxd_bus_type = {
 	.name		= "pxd",
 };

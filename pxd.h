@@ -19,7 +19,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 8				/**< driver version */
+#define PXD_VERSION 9				/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -46,6 +46,7 @@ enum pxd_opcode {
 	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
+	PXD_UPDATE_PATH,    /**< update backing file/device path for a virtual vol */
 	PXD_LAST,
 };
 
@@ -92,6 +93,7 @@ struct pxd_add_out {
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
+	loff_t offset; /**< starting offset within the backing file/device */
 };
 
 /**
@@ -118,6 +120,16 @@ struct pxd_read_data_out {
 struct pxd_update_size_out {
 	uint64_t dev_id;
 	size_t size;
+};
+
+/**
+ * PXD_UPDATE_PATH request from user space
+ */
+struct pxd_update_path_out {
+	uint64_t dev_id;
+	size_t size; // count of paths below
+
+	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN];
 };
 
 /**

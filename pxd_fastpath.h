@@ -91,4 +91,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 #define BLK_QC_RETVAL
 #endif
 
+void enableFastPath(struct pxd_device *pxd_dev, bool force);
+
 #endif /* _PXD_FASTPATH_H_ */

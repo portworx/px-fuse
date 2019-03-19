@@ -72,7 +72,6 @@ void fastpath_cleanup(void) {
 }
 
 // forward decl
-static void enableFastPath(struct pxd_device *pxd_dev, bool force);
 static void disableFastPath(struct pxd_device *pxd_dev);
 
 struct file* getFile(struct pxd_device *pxd_dev, int index) {
@@ -619,7 +618,7 @@ static int pxd_io_thread(void *data) {
  * shall get called last when new device is added/updated or when fuse connection is lost
  * and re-estabilished.
  */
-static void enableFastPath(struct pxd_device *pxd_dev, bool force) {
+void enableFastPath(struct pxd_device *pxd_dev, bool force) {
 	struct file *f;
 	struct inode *inode;
 	int i;

@@ -834,5 +834,6 @@ int fuse_do_setattr(struct inode *inode, struct iattr *attr,
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
+ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path);
 
 #endif /* _FS_FUSE_I_H */
