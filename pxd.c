@@ -641,8 +641,9 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	pxd_dev->minor = new_minor;
 	pxd_dev->ctx = ctx;
 	pxd_dev->connected = true;
+	pxd_dev->size = add->size;
 
-	err = pxd_fastpath_init(pxd_dev, 0 /* later: should be offset */);
+	err = pxd_fastpath_init(pxd_dev, add->offset);
 	if (err)
 		goto out_id;
 
