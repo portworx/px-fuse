@@ -856,16 +856,110 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxd_active_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	char *cp = buf;
+	int ncount;
+	int available=PAGE_SIZE-1;
+
+	ncount=snprintf(cp, available, "nactive: %u/%u, switched: %u, slowpath: %u\n",
+                atomic_read(&pxd_dev->fp.ncount), atomic_read(&pxd_dev->fp.ncomplete),
+		atomic_read(&pxd_dev->fp.nswitch), atomic_read(&pxd_dev->fp.nslowPath));
+
+	return ncount;
+}
+
+static ssize_t pxd_sync_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "sync: %u/%u %s\n",
+			atomic_read(&pxd_dev->fp.nsync_active),
+			atomic_read(&pxd_dev->fp.nsync),
+			(pxd_dev->fp.bg_flush_enabled ? "(enabled)" : "(disabled)"));
+}
+
+static ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int enable = 0;
+
+	sscanf(buf, "%d", &enable);
+
+	if (enable) {
+		pxd_dev->fp.bg_flush_enabled = 1;
+	} else {
+		pxd_dev->fp.bg_flush_enabled = 0;
+	}
+
+	return count;
+}
+
+static ssize_t pxd_wrsegment_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "write segment size(bytes): %d\n", pxd_dev->fp.n_flush_wrsegs * PXD_LBS);
+}
+
+static ssize_t pxd_wrsegment_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int nbytes, nsegs;
+
+	sscanf(buf, "%d", &nbytes);
+
+	nsegs = nbytes/PXD_LBS; // num of write segments
+	if (nsegs < MAX_WRITESEGS_FOR_FLUSH) {
+		nsegs = MAX_WRITESEGS_FOR_FLUSH;
+	}
+
+	pxd_dev->fp.n_flush_wrsegs = nsegs;
+	return count;
+}
+
+static ssize_t pxd_congestion_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	struct request_queue *q = pxd_dev->disk->queue;
+
+	bool congested = atomic_read(&pxd_dev->fp.ncount) >= q->nr_congestion_on;
+	return sprintf(buf, "congested: %d/%d\n", congested, atomic_read(&pxd_dev->fp.ncongested));
+}
+
+static ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	// debug interface to force wakeup of congestion wait threads
+	wake_up(&pxd_dev->fp.congestion_wait);
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
+static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
+static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
+static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
+static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
 	&dev_attr_major.attr,
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
+	&dev_attr_active.attr,
+	&dev_attr_sync.attr,
+	&dev_attr_congested.attr,
+	&dev_attr_writesegment.attr,
 	NULL
 };
 
