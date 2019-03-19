@@ -60,8 +60,8 @@ struct pxd_fastpath_extension {
 };
 
 // global initialization during module init for fastpath
-// void fastpath_init();
-// void fastpath_cleanup();
+void fastpath_init(void);
+void fastpath_cleanup(void);
 
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev, loff_t offset);
