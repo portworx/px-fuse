@@ -559,7 +559,11 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 
 	flags = bio->bi_flags;
 
-	// blk_queue_split(q, &bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+	blk_queue_split(q, &bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	blk_queue_split(q, &bio, q->bio_split);
+#endif
 
 	total_size = compute_bio_rq_size(bio);
 
