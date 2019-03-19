@@ -23,6 +23,13 @@ struct node_cpu_map {
 	int ncpu;
 };
 
+// Added metadata for each bio
+struct pxd_io_tracker {
+	unsigned long start; // start time
+	struct bio *orig;    // original request bio
+	struct bio clone;    // cloned bio
+};
+
 struct pxd_device;
 struct thread_context {
 	struct pxd_device  *pxd_dev;
@@ -60,16 +67,11 @@ struct pxd_fastpath_extension {
 };
 
 // global initialization during module init for fastpath
-void fastpath_init(void);
+int fastpath_init(void);
 void fastpath_cleanup(void);
 
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev, loff_t offset);
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
-
-// shall get called last when new device is added/updated or when fuse connection is lost
-// and re-estabilished.
-void enableFastPath(struct pxd_device *pxd_dev, bool force);
-void disableFastPath(struct pxd_device *pxd_dev, bool force);
 
 #endif /* _PXD_FASTPATH_H_ */

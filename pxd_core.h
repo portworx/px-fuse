@@ -34,6 +34,7 @@ struct pxd_device {
 	bool removing;
 	struct pxd_fastpath_extension fp;
 	struct pxd_context *ctx;
+	bool connected;
 };
 
 #define pxd_printk(args...)
