@@ -15,6 +15,8 @@
 
 #define MAX_THREADS (nr_cpu_ids)
 
+struct pxd_device;
+struct pxd_context;
 
 // A one-time built, static lookup table to distribute requests to cpu within
 // same numa node
@@ -23,7 +25,13 @@ struct node_cpu_map {
 	int ncpu;
 };
 
-struct pxd_device;
+// Added metadata for each bio
+struct pxd_io_tracker {
+	unsigned long start; // start time
+	struct bio *orig;    // original request bio
+	struct bio clone;    // cloned bio
+};
+
 struct thread_context {
 	struct pxd_device  *pxd_dev;
 	struct task_struct *pxd_thread;
@@ -59,6 +67,9 @@ struct pxd_fastpath_extension {
 	atomic_t index[MAX_NUMNODES];
 };
 
+// helpers
+struct file* getFile(struct pxd_device *pxd_dev, int index);
+
 // global initialization during module init for fastpath
 // void fastpath_init();
 // void fastpath_cleanup();
@@ -71,5 +82,8 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
 // and re-estabilished.
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
 void disableFastPath(struct pxd_device *pxd_dev, bool force);
+
+
+void pxdctx_set_connected(struct pxd_context *ctx, bool enable);
 
 #endif /* _PXD_FASTPATH_H_ */

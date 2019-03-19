@@ -63,22 +63,6 @@ static struct bio_set pxd_bio_set;
 #define PXD_MIN_POOL_PAGES (128)
 static struct bio_set* ppxd_bio_set;
 
-// Added metadata for each bio
-struct pxd_io_tracker {
-	unsigned long start; // start time
-	struct bio *orig;    // original request bio
-	struct bio clone;    // cloned bio
-};
-
-static inline
-struct file* getFile(struct pxd_device *pxd_dev, int index) {
-	if (index < pxd_dev->fp.nfd) {
-		return pxd_dev->fp.file[index];
-	}
-
-	return NULL;
-}
-
 static int fastpath_init(void) {
 	int i;
 
@@ -728,6 +712,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	pxd_dev->major = pxd_major;
 	pxd_dev->minor = new_minor;
 	pxd_dev->ctx = ctx;
+	pxd_dev->connected = true;
 
 	err = pxd_init_disk(pxd_dev, add);
 	if (err)
@@ -1173,6 +1158,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	fc->allow_disconnected = 1;
 	file->private_data = fc;
 
+	pxdctx_set_connected(ctx, true);
 	fuse_restart_requests(fc);
 
 	rc = pxd_send_init(fc);
@@ -1234,6 +1220,7 @@ static void pxd_timeout(unsigned long args)
 
 	fc->connected = true;
 	fc->allow_disconnected = 0;
+	pxdctx_set_connected(ctx, false);
 	fuse_abort_conn(fc);
 	printk(KERN_INFO "PXD_TIMEOUT (%s:%llu): Aborting all requests...",
 		ctx->name, ctx->unique);
