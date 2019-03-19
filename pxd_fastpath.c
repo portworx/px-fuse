@@ -357,8 +357,8 @@ static void pxd_complete_io(struct bio* bio) {
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
-	blk_status_t status = bio->bi_status;
-	bio_endio(iot->orig, status);
+	iot->orig->bi_status = bio->bi_status;
+	bio_endio(iot->orig);
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
