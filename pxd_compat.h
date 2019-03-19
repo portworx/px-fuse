@@ -50,11 +50,20 @@ int compute_bio_rq_size(struct bio *breq) {
 #endif
 
 	int total_size = 0;
+
+	if (!bio_has_data(breq))
+		return bio_cur_bytes(breq);
+
 	bio_for_each_segment(bvec, breq, bvec_iter) {
 		total_size += BVEC(bvec).bv_len;
 	}
 
 	return total_size;
+}
+
+static inline
+sector_t getsectors(struct bio *breq) {
+	return compute_bio_rq_size(breq) >> 9;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
