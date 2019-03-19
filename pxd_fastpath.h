@@ -72,13 +72,22 @@ struct file* getFile(struct pxd_device *pxd_dev, int index);
 int getnextcpu(int node, int pos);
 
 // global initialization during module init for fastpath
-int fastpath_init();
-void fastpath_cleanup();
+int fastpath_init(void);
+void fastpath_cleanup(void);
 
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev, loff_t offset);
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
 
 void pxdctx_set_connected(struct pxd_context *ctx, bool enable);
+
+// IO entry point
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio);
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+#else
+void pxd_make_request(struct request_queue *q, struct bio *bio);
+#define BLK_QC_RETVAL
+#endif
 
 #endif /* _PXD_FASTPATH_H_ */

@@ -52,4 +52,12 @@ struct pxd_device {
 #define MAX_DISCARD_SIZE (4*SEGMENT_SIZE)
 #define MAX_WRITESEGS_FOR_FLUSH ((4*SEGMENT_SIZE)/PXD_LBS)
 
+// slow path make request io entry point
+struct request_queue;
+struct bio;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
+#else
+void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
+#endif
 #endif /* _PXD_CORE_H_ */

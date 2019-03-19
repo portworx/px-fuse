@@ -43,77 +43,6 @@ module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
-/* fast path extensions start */
-
-// A one-time built, static lookup table to distribute requests to cpu
-// within same numa node
-static struct node_cpu_map *node_cpu_map;
-
-static inline
-int getnextcpu(int node, int pos) {
-	const struct node_cpu_map *map = &node_cpu_map[node];
-	if (map->ncpu == 0) { return 0; }
-	return map->cpu[(pos) % map->ncpu];
-}
-
-// A private global bio mempool for punting requests bypassing vfs
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
-static struct bio_set pxd_bio_set;
-#endif
-#define PXD_MIN_POOL_PAGES (128)
-static struct bio_set* ppxd_bio_set;
-
-static int fastpath_init(void) {
-	int i;
-
-	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", nr_cpu_ids, NR_CPUS, nr_node_ids, MAX_NUMNODES);
-	node_cpu_map = kzalloc(sizeof(struct node_cpu_map) * nr_node_ids, GFP_KERNEL);
-	if (!node_cpu_map) {
-		printk(KERN_ERR "pxd: failed to initialize node_cpu_map: -ENOMEM\n");
-		return -ENOMEM;
-	}
-
-	for (i=0;i<nr_cpu_ids;i++) {
-		struct node_cpu_map *map=&node_cpu_map[cpu_to_node(i)];
-		map->cpu[map->ncpu++] = i;
-	}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
-	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES,
-			offsetof(struct pxd_io_tracker, clone), 0)) {
-		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
-		kfree(node_cpu_map);
-		return -ENOMEM;
-	}
-	ppxd_bio_set = &pxd_bio_set;
-#else
-	ppxd_bio_set = BIOSET_CREATE(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone));
-#endif
-
-	if (!ppxd_bio_set) {
-		printk(KERN_ERR "pxd: bioset init failed");
-		kfree(node_cpu_map);
-		return -ENOMEM;
-	}
-
-	return 0;
-}
-
-static void fastpath_cleanup(void) {
-	if (ppxd_bio_set) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
-		bioset_exit(ppxd_bio_set);
-#else
-		bioset_free(ppxd_bio_set);
-#endif
-	}
-
-	if (node_cpu_map) kfree(node_cpu_map);
-	ppxd_bio_set = NULL;
-	node_cpu_map = NULL;
-}
-
-/* fast path extensions end */
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
@@ -482,11 +411,9 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #ifndef USE_REQUESTQ_MODEL
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL BLK_QC_T_NONE
+blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #else
-static void pxd_make_request(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL
+void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;

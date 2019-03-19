@@ -776,3 +776,84 @@ fail:
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev) {
 	disableFastPath(pxd_dev);
 }
+
+/* fast path make request function, io entry point */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+#else
+void pxd_make_request(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL
+#endif
+{
+	struct pxd_device *pxd_dev = q->queuedata;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	unsigned int rw = bio_op(bio);
+#else
+	unsigned int rw = bio_rw(bio);
+#endif
+	int cpu = smp_processor_id();
+	int thread = cpu % MAX_THREADS;
+
+	struct thread_context *tc;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+	if (!pxd_dev) {
+#else
+	if (rw == READA) rw = READ;
+	if (!pxd_dev || (rw!=READ && rw != WRITE)) {
+#endif
+		printk(KERN_ERR"pxd basic sanity fail, pxd_device %p (%llu), rw %#x\n",
+				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
+	if (!pxd_dev->connected) {
+		printk(KERN_ERR"px is disconnected, failing IO.\n");
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
+	if (!pxd_dev->fp.nfd) {
+		pxd_printk("px has no backing path yet, should take slow path IO.\n");
+		atomic_inc(&pxd_dev->fp.nslowPath);
+		return pxd_make_request_slowpath(q, bio);
+	}
+
+	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
+
+	{ /* add congestion handling */
+		spin_lock_irq(&pxd_dev->lock);
+		if (atomic_read(&pxd_dev->fp.ncount) >= q->nr_congestion_on) {
+			pxd_printk("Hit congestion... wait until clear\n");
+			atomic_inc(&pxd_dev->fp.ncongested);
+			wait_event_lock_irq(pxd_dev->fp.congestion_wait,
+				atomic_read(&pxd_dev->fp.ncount) < q->nr_congestion_off,
+				pxd_dev->lock);
+			pxd_printk("congestion cleared\n");
+		}
+
+		spin_unlock_irq(&pxd_dev->lock);
+
+	}
+
+	if (pxd_dev->fp.block_device) { /* switch bio to target device bypassing vfs */
+		if (pxd_switch_bio(pxd_dev, bio)) {
+			BIO_ENDIO(bio, -ENOMEM);
+		}
+		return BLK_QC_RETVAL;
+	}
+
+	/* keep writes on same cpu, but allow reads to spread but within same numa node */
+	if (rw == READ) {
+		int node = cpu_to_node(cpu);
+		thread = getnextcpu(node, atomic_add_return(1, &pxd_dev->fp.index[node]));
+	}
+	tc = &pxd_dev->fp.tc[thread];
+
+	pxd_add_bio(tc, bio);
+	wake_up(&tc->pxd_event);
+	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
+	return BLK_QC_RETVAL;
+}
