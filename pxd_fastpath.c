@@ -4,8 +4,6 @@
 #include "pxd_core.h"
 #include "pxd_compat.h"
 
-#define STATIC // temporary hack to compile until final patch completes
-
 // A one-time built, static lookup table to distribute requests to cpu
 // within same numa node
 static struct node_cpu_map *node_cpu_map;
@@ -568,7 +566,7 @@ static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio, bo
 #endif
 }
 
-STATIC void pxd_add_bio(struct thread_context *tc, struct bio *bio) {
+static void pxd_add_bio(struct thread_context *tc, struct bio *bio) {
 	atomic_inc(&tc->pxd_dev->fp.ncount);
 
 	spin_lock_irq(&tc->lock);
