@@ -31,6 +31,9 @@
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
+#define MAX_PXD_BACKING_DEVS (3)
+#define MAX_PXD_DEVPATH_LEN  (128)
+
 /** fuse opcodes */
 enum pxd_opcode {
 	PXD_INIT = 8192,	/**< send on device open from kernel */
