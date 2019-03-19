@@ -50,6 +50,10 @@ int compute_bio_rq_size(struct bio *breq) {
 #endif
 
 	int total_size = 0;
+
+	if (!bio_has_data(breq))
+		return bio_cur_bytes(breq);
+
 	bio_for_each_segment(bvec, breq, bvec_iter) {
 		total_size += BVEC(bvec).bv_len;
 	}
