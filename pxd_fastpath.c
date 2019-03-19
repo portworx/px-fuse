@@ -6,6 +6,73 @@
 
 #define STATIC // temporary hack to compile until final patch completes
 
+// A one-time built, static lookup table to distribute requests to cpu
+// within same numa node
+static struct node_cpu_map *node_cpu_map;
+
+int getnextcpu(int node, int pos) {
+	const struct node_cpu_map *map = &node_cpu_map[node];
+	if (map->ncpu == 0) { return 0; }
+	return map->cpu[(pos) % map->ncpu];
+}
+
+// A private global bio mempool for punting requests bypassing vfs
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+static struct bio_set pxd_bio_set;
+#endif
+#define PXD_MIN_POOL_PAGES (128)
+static struct bio_set* ppxd_bio_set;
+
+int fastpath_init(void) {
+	int i;
+
+	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", nr_cpu_ids, NR_CPUS, nr_node_ids, MAX_NUMNODES);
+	node_cpu_map = kzalloc(sizeof(struct node_cpu_map) * nr_node_ids, GFP_KERNEL);
+	if (!node_cpu_map) {
+		printk(KERN_ERR "pxd: failed to initialize node_cpu_map: -ENOMEM\n");
+		return -ENOMEM;
+	}
+
+	for (i=0;i<nr_cpu_ids;i++) {
+		struct node_cpu_map *map=&node_cpu_map[cpu_to_node(i)];
+		map->cpu[map->ncpu++] = i;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES,
+			offsetof(struct pxd_io_tracker, clone), 0)) {
+		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
+		kfree(node_cpu_map);
+		return -ENOMEM;
+	}
+	ppxd_bio_set = &pxd_bio_set;
+#else
+	ppxd_bio_set = BIOSET_CREATE(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone));
+#endif
+
+	if (!ppxd_bio_set) {
+		printk(KERN_ERR "pxd: bioset init failed");
+		kfree(node_cpu_map);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+void fastpath_cleanup(void) {
+	if (ppxd_bio_set) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+		bioset_exit(ppxd_bio_set);
+#else
+		bioset_free(ppxd_bio_set);
+#endif
+	}
+
+	if (node_cpu_map) kfree(node_cpu_map);
+	ppxd_bio_set = NULL;
+	node_cpu_map = NULL;
+}
+
 // forward decl
 static void enableFastPath(struct pxd_device *pxd_dev, bool force);
 static void disableFastPath(struct pxd_device *pxd_dev);
@@ -280,6 +347,66 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t p
 	return 0;
 }
 
+static void pxd_complete_io(struct bio* bio) {
+	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
+	struct pxd_device *pxd_dev = bio->bi_private;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
+#else
+	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+        if (bio->bi_error) { /* non-zero indicates failure */
+                bio_io_error(iot->orig);
+        } else {
+                bio_endio(iot->orig);
+        }
+#else
+        bio_endio(iot->orig, bio->bi_error);
+#endif
+
+	atomic_inc(&pxd_dev->fp.ncomplete);
+	atomic_dec(&pxd_dev->fp.ncount);
+
+	bio_put(bio);
+
+	/* free up from any prior congestion wait */
+	spin_lock_irq(&pxd_dev->lock);
+	if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->disk->queue->nr_congestion_off) {
+		wake_up(&pxd_dev->fp.congestion_wait);
+	}
+	spin_unlock_irq(&pxd_dev->lock);
+}
+
+static int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
+	struct address_space *mapping = pxd_dev->fp.file[0]->f_mapping;
+	struct inode *inode = mapping->host;
+	struct block_device *bdi = I_BDEV(inode);
+	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
+	struct pxd_io_tracker* iot = container_of(clone_bio, struct pxd_io_tracker, clone);
+
+	if (!clone_bio) {
+		return -ENOMEM;
+	}
+
+	iot->orig = bio;
+	iot->start = jiffies;
+	BIO_SET_DEV(clone_bio, bdi);
+	clone_bio->bi_private = pxd_dev;
+	clone_bio->bi_end_io = pxd_complete_io;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &pxd_dev->disk->part0);
+#else
+	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
+#endif
+
+	SUBMIT_BIO(clone_bio);
+	atomic_inc(&pxd_dev->fp.ncount);
+	atomic_inc(&pxd_dev->fp.nswitch);
+
+	return 0;
+}
 
 static void _pxd_setup(struct pxd_device *pxd_dev, bool enable) {
 	if (!enable) {

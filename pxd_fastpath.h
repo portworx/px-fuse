@@ -69,10 +69,11 @@ struct pxd_fastpath_extension {
 
 // helpers
 struct file* getFile(struct pxd_device *pxd_dev, int index);
+int getnextcpu(int node, int pos);
 
 // global initialization during module init for fastpath
-// void fastpath_init();
-// void fastpath_cleanup();
+int fastpath_init();
+void fastpath_cleanup();
 
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev, loff_t offset);
