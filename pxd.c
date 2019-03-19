@@ -2,7 +2,6 @@
 #include <linux/blkdev.h>
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
-#include <linux/miscdevice.h>
 #include "fuse_i.h"
 #include "pxd.h"
 
@@ -14,7 +13,7 @@
 #undef CREATE_TRACE_POINTS
 
 #include "pxd_compat.h"
-#include "pxd_fastpath.h"
+#include "pxd_core.h"
 
 /** enables time tracing */
 //#define GD_TIME_LOG
@@ -23,21 +22,6 @@
 #else
 #define KTIME_GET_TS(t)
 #endif
-
-#define pxd_printk(args...)
-//#define pxd_printk(args...) printk(KERN_ERR args)
-
-#ifndef SECTOR_SIZE
-#define SECTOR_SIZE 512
-#endif
-#ifndef SECTOR_SHIFT
-#define SECTOR_SHIFT (9)
-#endif
-
-#define SEGMENT_SIZE (1024 * 1024)
-#define MAX_DISCARD_SIZE (4*SEGMENT_SIZE)
-#define MAX_WRITESEGS_FOR_FLUSH ((4*SEGMENT_SIZE)/PXD_LBS)
-
 
 #define PXD_TIMER_SECS_MIN 30
 #define PXD_TIMER_SECS_MAX 600
@@ -49,21 +33,6 @@ extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
-struct pxd_context {
-	spinlock_t lock;
-	struct list_head list;
-	size_t num_devices;
-	struct fuse_conn fc;
-	struct file_operations fops;
-	char name[256];
-	int id;
-	struct miscdevice miscdev;
-	struct list_head pending_requests;
-	struct timer_list timer;
-	bool init_sent;
-	uint64_t unique;
-};
-
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -73,22 +42,6 @@ uint32_t pxd_detect_zero_writes = 0;
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
-
-struct pxd_device {
-	uint64_t dev_id;
-	int major;
-	int minor;
-	struct gendisk *disk;
-	struct device dev;
-	size_t size;
-	spinlock_t lock;
-	spinlock_t qlock;
-	struct list_head node;
-	int open_count;
-	bool removing;
-	struct pxd_fastpath_extension fp;
-	struct pxd_context *ctx;
-};
 
 /* fast path extensions start */
 

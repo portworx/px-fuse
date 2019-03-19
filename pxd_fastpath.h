@@ -65,6 +65,11 @@ struct pxd_fastpath_extension {
 
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev, loff_t offset);
-void pxd_fastpath_cleanup(struct pxd_device *pxd_dev, loff_t offset);
+void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
+
+// shall get called last when new device is added/updated or when fuse connection is lost
+// and re-estabilished.
+void enableFastPath(struct pxd_device *pxd_dev, bool force);
+void disableFastPath(struct pxd_device *pxd_dev, bool force);
 
 #endif /* _PXD_FASTPATH_H_ */

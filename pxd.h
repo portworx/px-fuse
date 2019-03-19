@@ -1,6 +1,7 @@
 #ifndef PXD_H_
 #define PXD_H_
 
+#include <linux/kernel.h>
 #include <linux/version.h>
 #ifdef __PXKERNEL__
 #include <linux/types.h>

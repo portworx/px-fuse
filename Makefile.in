@@ -1,4 +1,4 @@
-px-objs = pxd.o dev.o iov_iter.o px_version.o
+px-objs = pxd.o dev.o iov_iter.o px_version.o pxd_fastpath.o
 obj-m = px.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__
