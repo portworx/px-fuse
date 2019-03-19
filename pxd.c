@@ -666,6 +666,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (!disk)
 		return;
 
+	disableFastPath(pxd_dev);
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
@@ -785,6 +786,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
+	disableFastPath(pxd_dev);
 	pxd_dev->removing = true;
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */

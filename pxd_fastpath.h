@@ -81,7 +81,7 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
 // shall get called last when new device is added/updated or when fuse connection is lost
 // and re-estabilished.
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
-void disableFastPath(struct pxd_device *pxd_dev, bool force);
+void disableFastPath(struct pxd_device *pxd_dev);
 
 
 void pxdctx_set_connected(struct pxd_context *ctx, bool enable);

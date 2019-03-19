@@ -554,7 +554,23 @@ out_file_failed:
 		pxd_dev->dev_id);
 }
 
-void disableFastPath(struct pxd_device *pxd_dev, bool force) {
+void disableFastPath(struct pxd_device *pxd_dev) {
+	int i;
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+
+	for (i=0; i<fp->nfd; i++) {
+		filp_close(fp->file[i], NULL);
+	}
+	fp->nfd=0;
+
+	if (fp->tc) {
+		for (i=0; i<MAX_THREADS; i++) {
+			struct thread_context *tc = &fp->tc[i];
+			if (tc->pxd_thread) kthread_stop(tc->pxd_thread);
+		}
+		if (fp->tc) kfree(fp->tc);
+	}
+	fp->tc = NULL;
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev, loff_t offset) {
