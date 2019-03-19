@@ -539,7 +539,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	q = blk_alloc_queue(GFP_KERNEL);
 	if (!q)
 		goto out_disk;
-	blk_queue_make_request(q, pxd_make_request);
+	blk_queue_make_request(q, pxd_make_request_fastpath);
 #else
 	q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 	if (!q)
