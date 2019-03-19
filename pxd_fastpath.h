@@ -32,6 +32,7 @@ struct pxd_io_tracker {
 	struct bio clone;    // cloned bio
 };
 
+struct pxd_device;
 struct thread_context {
 	struct pxd_device  *pxd_dev;
 	struct task_struct *pxd_thread;
