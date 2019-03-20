@@ -14,6 +14,7 @@
 
 #include "pxd_compat.h"
 #include "pxd_core.h"
+#include "pxdmm.h"
 
 /** enables time tracing */
 //#define GD_TIME_LOG
@@ -1358,6 +1359,13 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 
+	err = pxdmm_init();
+	if (err) {
+		printk(KERN_ERR "pxdmm: initialization failed: %d\n", err);
+		fastpath_cleanup();
+		goto out_blkdev;
+	}
+
 	printk(KERN_INFO "pxd: driver loaded version %s\n", gitversion);
 
 	return 0;
@@ -1381,6 +1389,7 @@ void pxd_exit(void)
 {
 	int i;
 
+	pxdmm_exit();
 	fastpath_cleanup();
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
