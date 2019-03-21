@@ -7,6 +7,8 @@ void pxdmm_exit(void);
 #define NREQUESTS (256)
 #define MAXDATASIZE (1<<20)
 
+#define CMDR_SIZE (8<<20)
+
 
 // ioctl
 struct pxdmm_mbox {
@@ -31,7 +33,7 @@ struct pxdmm_cmdresp {
 
 static inline
 loff_t pxdmm_dataoffset(uint32_t io_index) {
-	return io_index * MAXDATASIZE;
+	return CMDR_SIZE + (io_index * MAXDATASIZE);
 }
 
 #endif /* _PXDMM_H_ */
