@@ -23,6 +23,7 @@
 #include <linux/bio.h>
 #include <linux/miscdevice.h>
 #include <linux/gfp.h>
+#include <linux/string.h>
 
 #include "pxd_compat.h"
 #include "pxdmm.h"
@@ -76,6 +77,9 @@ struct pxdmm_dev {
 
 	// will be valid only if open
 	struct inode *inode;
+	struct task_struct *task;
+	loff_t vm_start;
+	loff_t vm_end;
 
 	// memory maps
 	void *base;
@@ -222,20 +226,30 @@ static const struct vm_operations_struct pxdmm_vma_ops = {
 	.fault = pxdmm_vma_fault,
 };
 
+static void pxdmm_map(struct pxdmm_dev* udev, int dbi);
+static void pxdmm_unmap(struct pxdmm_dev* udev, int dbi);
+
 static
 int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 	struct pxdmm_dev *udev = container_of(info, struct pxdmm_dev, info);
 
 	printk("uio_mmap called for address space %p [%#lx, %#lx]\n",
 			vma->vm_mm, vma->vm_start, vma->vm_end);
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_MIXEDMAP;
 	vma->vm_ops = &pxdmm_vma_ops;
 
 	vma->vm_private_data = udev;
+	udev->vm_start = vma->vm_start;
+	udev->vm_end = vma->vm_end;
 
 	/* Ensure the mmap is exactly the right size */
 	if (vma_pages(vma) != (udev->totalWindowLength >> PAGE_SHIFT))
 		return -EINVAL;
+
+	printk("mapping dbi 0\n");
+	pxdmm_map(udev, 0);
+	printk("mapping dbi 1\n");
+	pxdmm_map(udev, 1);
 
 	return 0;
 }
@@ -251,6 +265,7 @@ int uio_open(struct uio_info* info, struct inode *inode) {
 
 	printk("uio_open called for inode %p -- passed excl check\n", inode);
 	udev->inode = inode;
+	udev->task = current;
 
 	pr_debug("open\n");
 
@@ -263,6 +278,8 @@ int uio_release(struct uio_info* info, struct inode *inode) {
 
 	printk("uio_release called for inode %p\n", inode);
 	clear_bit(PXDMM_DEV_OPEN, &udev->flags);
+	udev->task = NULL;
+	udev->inode = NULL;
 
 	pr_debug("close\n");
 	return 0;
@@ -383,20 +400,59 @@ static struct miscdevice ctldev = {
 
 static struct pxdmm_dev *udev;
 
-void pxdmm_debug_toggle(void) {
+static
+void pxdmm_unmap(struct pxdmm_dev* udev, int dbi) {
 	loff_t offset;
 	struct address_space *as = udev->inode->i_mapping;
 	const uint32_t dataBufferLength = MAXDATASIZE;
 
-	offset = pxdmm_dataoffset(0);
-	printk("pxdmm_debug_toggle: unmapping dbi %d, offset %llu\n",
-			0, offset);
+	offset = pxdmm_dataoffset(dbi);
+	printk("pxdmm_unmap: unmapping dbi %d, offset %llu\n",
+			dbi, offset);
     unmap_mapping_range(as, offset, dataBufferLength, 1);
+}
 
-	offset = pxdmm_dataoffset(1);
-	printk("pxdmm_debug_toggle: unmapping dbi %d, offset %llu\n",
-			0, offset);
-    unmap_mapping_range(as, offset, dataBufferLength, 1);
+static void pxdmm_map(struct pxdmm_dev* udev, int dbi) {
+	struct mm_struct *mm = udev->task->mm;
+	struct vm_area_struct *vma;
+	loff_t offset;
+	int err;
+	struct page* page;
+
+	offset = pxdmm_dataoffset(dbi) + udev->vm_start;
+	printk("Finding vma at offset %#llx for vm_start: %#llx:%#llx, dbi %d\n",
+			offset, udev->vm_start, udev->vm_end, dbi);
+	vma = find_vma(mm, offset);
+	if (!vma) {
+		printk("Cannot find vma for process %s\n", udev->task->comm);
+		return;
+	}
+	printk("pxdmm_map: found vma %#lx, %#lx\n", vma->vm_start, vma->vm_end);
+
+	if (dbi & 1) {
+		page = bpage;
+	} else {
+		page = apage;
+	}
+
+#if 0
+	err = vm_insert_page(vma, offset, page);
+	if (err) {
+		printk("vm_insert_page(vma=%p[%#lx:%#lx], offset=%#llx, page=%p) failed with error: %d\n",
+				vma, vma->vm_start, vma->vm_end, offset, apage, err);
+		return;
+	}
+#else
+	{
+	unsigned long pfn = page_to_pfn(page);
+	err = remap_pfn_range(vma, offset,  pfn, PAGE_SIZE, vma->vm_page_prot);
+	if (err) {
+		printk("remap_pfn_range(vma=%p, offset=%#llx, pfn=%lx, size=%ld) failed %d\n",
+				vma, offset, pfn, PAGE_SIZE, err);
+		return;
+	}
+	}
+#endif
 }
 
 
@@ -405,20 +461,35 @@ struct pxdmm_dev* to_pxdmm_dev(struct uio_info *info) {
 	return container_of(info, struct pxdmm_dev, info);
 }
 
-static ssize_t pxdmm_debug_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+static ssize_t pxdmm_do_unmap(struct device *dev,
+                     struct device_attribute *attr, const char *buf, size_t count)
 {
-	extern void pxdmm_debug_toggle(void);
+	long dbi;
+	kstrtol(buf, 0, &dbi);
+	pxdmm_unmap(udev, (int) dbi);
 
-	pxdmm_debug_toggle();
-
-	return sprintf(buf, "pxdmm toggled\n");
+	printk("pxdmm unmapped for dbi %d\n", (int) dbi);
+	return count;
 }
 
-static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxdmm_debug_show, NULL);
+static ssize_t pxdmm_do_map(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count) {
+	long dbi;
+	kstrtol(buf, 0, &dbi);
+
+	pxdmm_map(udev, (int) dbi);
+
+	printk("pxdmm mapped for dbi %d\n", (int) dbi);
+
+	return count;
+}
+
+static DEVICE_ATTR(map, S_IRUGO|S_IWUSR, NULL, pxdmm_do_map);
+static DEVICE_ATTR(unmap, S_IRUGO|S_IWUSR, NULL, pxdmm_do_unmap);
 
 static struct attribute *pxdmm_attrs[] = {
-	&dev_attr_debug.attr,
+	&dev_attr_map.attr,
+	&dev_attr_unmap.attr,
 	NULL
 };
 
