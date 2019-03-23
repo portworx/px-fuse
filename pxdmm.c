@@ -257,10 +257,12 @@ int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 	if (vma_pages(vma) != (udev->totalWindowLength >> PAGE_SHIFT))
 		return -EINVAL;
 
+#if 0
 	printk("mapping dbi 0\n");
 	pxdmm_map(udev, vma, 0);
 	printk("mapping dbi 1\n");
 	pxdmm_map(udev, vma, 1);
+#endif
 
 	return 0;
 }
