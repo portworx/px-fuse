@@ -21,12 +21,35 @@
 #include <linux/mm.h>
 #include <linux/mm_types.h>
 #include <linux/bio.h>
+#include <linux/miscdevice.h>
+#include <linux/gfp.h>
 
 #include "pxd_compat.h"
 #include "pxdmm.h"
 
 #define DRIVER_VERSION "0.1"
 #define STATIC /* a temporary hack until all gets used */
+#define DBGMODE
+
+static struct page *apage, *bpage;
+#define PATTERN1 0xDEADBEEF
+#define PATTERN2 0xBAADBABE
+
+static inline
+void fillpage (struct page *pg, unsigned int pattern) {
+	void *kaddr = kmap_atomic(pg);
+	int nwords = PAGE_SIZE/4;
+	unsigned int *p = kaddr;
+
+	while (nwords) {
+		*p++ = pattern;
+		nwords--;
+	}
+
+	//memset(kaddr, pattern, PAGE_SIZE);
+
+	kunmap_atomic(kaddr);
+}
 
 struct reqhandle {
 	struct bio *bio;
@@ -106,18 +129,40 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 	unsigned long offset;
 	void *addr;
 	struct reqhandle *handle;
+	uint32_t dbi;
 
 	//int mi = pxdmm_find_mem_index(vmf->vma);
 	int mi = pxdmm_find_mem_index(vma);
 	if (mi < 0)
 		return VM_FAULT_SIGBUS;
 
+	printk("vmf: pxdmm_vma_fault pgoff: %#lx/%#lx fault addr:%p [%lx:%lx]\n",
+			vmf->pgoff, vmf->max_pgoff, vmf->virtual_address, vma->vm_start, vma->vm_end);
+
 	offset = (vmf->pgoff - mi) << PAGE_SHIFT;
 	if (offset < CMDR_SIZE) {
 		addr = (void*) (unsigned long)info->mem[mi].addr + offset;
 		page = vmalloc_to_page(addr);
 	} else {
-		uint32_t dbi;
+		dbi = (offset - CMDR_SIZE) / MAXDATASIZE;
+		// find the request that has data buffer index
+		handle = getRequestHandle(udev, dbi);
+
+		printk("vmf: in data region... dbi %u, handle %p, flags %#lx, bio %p\n",
+				dbi, handle, (handle ? handle->flags : -1), (handle ? handle->bio : NULL));
+
+#ifdef DBGMODE
+{
+		if (dbi & 1) {
+			/* odd page map bpage */
+			page = bpage;
+		} else {
+			/* even page map apage */
+			page = apage;
+		}
+}
+#else
+{
 		loff_t bufferOffset;
 		unsigned int currOffset;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -129,9 +174,7 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 #endif
 	struct bio* breq;
 
-		dbi = (offset - CMDR_SIZE) / MAXDATASIZE;
-		// find the request that has data buffer index
-		handle = getRequestHandle(udev, dbi);
+
 		if (!handle || !(handle->flags & PXDMM_REQUEST_ACTIVE)) return VM_FAULT_SIGBUS;
 
 		breq = handle->bio;
@@ -162,6 +205,8 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 			currOffset += pageSize;
 		}
 #endif
+}
+#endif /* DBGMODE */
 	}
 
 	if (!page) {
@@ -181,6 +226,8 @@ static
 int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 	struct pxdmm_dev *udev = container_of(info, struct pxdmm_dev, info);
 
+	printk("uio_mmap called for address space %p [%#lx, %#lx]\n",
+			vma->vm_mm, vma->vm_start, vma->vm_end);
 	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 	vma->vm_ops = &pxdmm_vma_ops;
 
@@ -197,10 +244,12 @@ static
 int uio_open(struct uio_info* info, struct inode *inode) {
 	struct pxdmm_dev *udev = container_of(info, struct pxdmm_dev, info);
 
+	printk("uio_open called for inode %p\n", inode);
 	/* O_EXCL not supported for char devs, so fake it? */
 	if (test_and_set_bit(PXDMM_DEV_OPEN, &udev->flags))
 		return -EBUSY;
 
+	printk("uio_open called for inode %p -- passed excl check\n", inode);
 	udev->inode = inode;
 
 	pr_debug("open\n");
@@ -212,6 +261,7 @@ static
 int uio_release(struct uio_info* info, struct inode *inode) {
 	struct pxdmm_dev *udev = container_of(info, struct pxdmm_dev, info);
 
+	printk("uio_release called for inode %p\n", inode);
 	clear_bit(PXDMM_DEV_OPEN, &udev->flags);
 
 	pr_debug("close\n");
@@ -220,6 +270,7 @@ int uio_release(struct uio_info* info, struct inode *inode) {
 
 static
 int uio_irqcontrol(struct uio_info *info, s32 irq_on) {
+	printk("uio_irqcontrol called\n");
 	return 0;
 }
 
@@ -282,6 +333,7 @@ int pxdmm_unmap_bio(struct inode* inode, uint32_t io_index) {
 /* map/unmap logic ends */
 
 /* parent device */
+#if 0
 static void pxdmm_root_dev_release(struct device *dev)
 {
 }
@@ -290,14 +342,94 @@ static struct device pxdmm_root_dev = {
 	.init_name =    "pxdmm",
 	.release =      pxdmm_root_dev_release,
 };
+#endif
+static struct device *pxdmm_root_dev;
 
+#if 0
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
+const struct file_operations ctldev_fops = {
+    .owner      = THIS_MODULE,
+    .llseek     = no_llseek,
+    .read       = do_sync_read,
+    .aio_read   = fuse_dev_read,
+    .splice_read    = fuse_dev_splice_read,
+    .write      = do_sync_write,
+    .aio_write  = fuse_dev_write,
+    .splice_write   = fuse_dev_splice_write,
+    .poll       = fuse_dev_poll,
+    .release    = fuse_dev_release,
+    .fasync     = fuse_dev_fasync,
+};
+#else
+const struct file_operations ctldev_fops = {
+    .owner      = THIS_MODULE,
+    .llseek     = no_llseek,
+    .read_iter  = fuse_dev_read_iter,
+    .splice_read    = fuse_dev_splice_read,
+    .write_iter = fuse_dev_write_iter,
+    .splice_write   = fuse_dev_splice_write,
+    .poll       = fuse_dev_poll,
+    .release    = fuse_dev_release,
+    .fasync     = fuse_dev_fasync,
+};
+#endif
+#endif
+const struct file_operations ctldev_fops = { .owner = THIS_MODULE};
+
+static struct miscdevice ctldev = {
+	.minor		= MISC_DYNAMIC_MINOR,
+	.name		= "pxdmm-control",
+};
 
 static struct pxdmm_dev *udev;
+
+void pxdmm_debug_toggle(void) {
+	loff_t offset;
+	struct address_space *as = udev->inode->i_mapping;
+	const uint32_t dataBufferLength = MAXDATASIZE;
+
+	offset = pxdmm_dataoffset(0);
+	printk("pxdmm_debug_toggle: unmapping dbi %d, offset %llu\n",
+			0, offset);
+    unmap_mapping_range(as, offset, dataBufferLength, 1);
+
+	offset = pxdmm_dataoffset(1);
+	printk("pxdmm_debug_toggle: unmapping dbi %d, offset %llu\n",
+			0, offset);
+    unmap_mapping_range(as, offset, dataBufferLength, 1);
+}
+
 
 static inline
 struct pxdmm_dev* to_pxdmm_dev(struct uio_info *info) {
 	return container_of(info, struct pxdmm_dev, info);
 }
+
+static ssize_t pxdmm_debug_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	extern void pxdmm_debug_toggle(void);
+
+	pxdmm_debug_toggle();
+
+	return sprintf(buf, "pxdmm toggled\n");
+}
+
+static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxdmm_debug_show, NULL);
+
+static struct attribute *pxdmm_attrs[] = {
+	&dev_attr_debug.attr,
+	NULL
+};
+
+static struct attribute_group pxdmm_attr_group = {
+	.attrs = pxdmm_attrs,
+};
+
+static const struct attribute_group *pxdmm_attr_groups[] = {
+	&pxdmm_attr_group,
+	NULL
+};
 
 static int pxdmm_dev_init(void) {
 	int err;
@@ -355,13 +487,22 @@ static int pxdmm_dev_init(void) {
 	udev->info.mem[0].size = udev->totalWindowLength;
 	udev->info.mem[0].memtype = UIO_MEM_NONE;
 
-	err = device_register(&pxdmm_root_dev);
+	pxdmm_root_dev = root_device_register("pxdmm");
 	if (err) {
 		pxdmm_exit();
 		return err;
 	}
 
-	err = uio_register_device(&pxdmm_root_dev, &udev->info);
+	ctldev.fops = &ctldev_fops;
+	ctldev.parent = pxdmm_root_dev;
+	ctldev.groups = pxdmm_attr_groups;
+	err = misc_register(&ctldev);
+	if (err) {
+		pxdmm_exit();
+		return err;
+	}
+
+	err = uio_register_device(ctldev.this_device, &udev->info);
 	if (err) {
 		pxdmm_exit();
 		return err;
@@ -378,13 +519,25 @@ int pxdmm_init(void) {
 		return err;
 	}
 
+	apage = alloc_pages(GFP_KERNEL, get_order(PAGE_SIZE));
+	fillpage(apage, PATTERN1);
+	bpage = alloc_pages(GFP_KERNEL, get_order(PAGE_SIZE));
+	fillpage(bpage, PATTERN2);
+
+	printk("Allocated apage %p, bpage %p\n", apage, bpage);
 	return 0;
 }
 
 
 void pxdmm_exit(void) {
+	printk("Freeing apage %p, bpage %p\n", apage, bpage);
+	__free_pages(apage, get_order(PAGE_SIZE));
+	__free_pages(bpage, get_order(PAGE_SIZE));
+
 	uio_unregister_device(&udev->info);
-	device_unregister(&pxdmm_root_dev);
+
+	misc_deregister(&ctldev);
+	root_device_unregister(pxdmm_root_dev);
 
 	printk("Freeing data window @ %p\n", udev->dataWindow);
 	// vfree(dataWindow);
