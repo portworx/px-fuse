@@ -35,21 +35,32 @@
 static struct page *apage, *bpage;
 #define PATTERN1 0xDEADBEEF
 #define PATTERN2 0xBAADBABE
+#define PATTERN3 0xCAFECAFE
+#define PATTERN4 0xDEEDF00F
+#define PATTERN5 0xA5A5A5A5
+
+static unsigned long pattern[] = {PATTERN1, PATTERN2, PATTERN3, PATTERN4, PATTERN5};
+#define NPATTERNS (sizeof(pattern)/sizeof(unsigned long))
+static int patternidx = 0;
 
 static inline
-void fillpage (struct page *pg, unsigned int pattern) {
+void fillpage (struct page *pg) {
+	unsigned long _pattern = pattern[patternidx];
 	void *kaddr = kmap_atomic(pg);
 	int nwords = PAGE_SIZE/4;
 	unsigned int *p = kaddr;
 
 	while (nwords) {
-		*p++ = pattern;
+		*p++ = _pattern;
 		nwords--;
 	}
 
 	//memset(kaddr, pattern, PAGE_SIZE);
 
 	kunmap_atomic(kaddr);
+
+	printk("filled page with pattern %#lx\n", _pattern);
+	patternidx = (patternidx+1)%NPATTERNS;
 }
 
 struct reqhandle {
@@ -226,7 +237,7 @@ static const struct vm_operations_struct pxdmm_vma_ops = {
 	.fault = pxdmm_vma_fault,
 };
 
-static void pxdmm_map(struct pxdmm_dev* udev, int dbi);
+static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *,int dbi);
 static void pxdmm_unmap(struct pxdmm_dev* udev, int dbi);
 
 static
@@ -247,9 +258,9 @@ int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 		return -EINVAL;
 
 	printk("mapping dbi 0\n");
-	pxdmm_map(udev, 0);
+	pxdmm_map(udev, vma, 0);
 	printk("mapping dbi 1\n");
-	pxdmm_map(udev, 1);
+	pxdmm_map(udev, vma, 1);
 
 	return 0;
 }
@@ -412,9 +423,8 @@ void pxdmm_unmap(struct pxdmm_dev* udev, int dbi) {
     unmap_mapping_range(as, offset, dataBufferLength, 1);
 }
 
-static void pxdmm_map(struct pxdmm_dev* udev, int dbi) {
+static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, int dbi) {
 	struct mm_struct *mm = udev->task->mm;
-	struct vm_area_struct *vma;
 	loff_t offset;
 	int err;
 	struct page* page;
@@ -422,7 +432,7 @@ static void pxdmm_map(struct pxdmm_dev* udev, int dbi) {
 	offset = pxdmm_dataoffset(dbi) + udev->vm_start;
 	printk("Finding vma at offset %#llx for vm_start: %#llx:%#llx, dbi %d\n",
 			offset, udev->vm_start, udev->vm_end, dbi);
-	vma = find_vma(mm, offset);
+	if (!vma) vma = find_vma(mm, offset);
 	if (!vma) {
 		printk("Cannot find vma for process %s\n", udev->task->comm);
 		return;
@@ -434,6 +444,8 @@ static void pxdmm_map(struct pxdmm_dev* udev, int dbi) {
 	} else {
 		page = apage;
 	}
+
+	fillpage(page);
 
 #if 0
 	err = vm_insert_page(vma, offset, page);
@@ -477,7 +489,7 @@ static ssize_t pxdmm_do_map(struct device *dev, struct device_attribute *attr,
 	long dbi;
 	kstrtol(buf, 0, &dbi);
 
-	pxdmm_map(udev, (int) dbi);
+	pxdmm_map(udev, NULL, (int) dbi);
 
 	printk("pxdmm mapped for dbi %d\n", (int) dbi);
 
@@ -591,9 +603,7 @@ int pxdmm_init(void) {
 	}
 
 	apage = alloc_pages(GFP_KERNEL, get_order(PAGE_SIZE));
-	fillpage(apage, PATTERN1);
 	bpage = alloc_pages(GFP_KERNEL, get_order(PAGE_SIZE));
-	fillpage(bpage, PATTERN2);
 
 	printk("Allocated apage %p, bpage %p\n", apage, bpage);
 	return 0;
