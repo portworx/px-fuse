@@ -246,7 +246,7 @@ int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 
 	printk("uio_mmap called for address space %p [%#lx, %#lx]\n",
 			vma->vm_mm, vma->vm_start, vma->vm_end);
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_MIXEDMAP;
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 	vma->vm_ops = &pxdmm_vma_ops;
 
 	vma->vm_private_data = udev;
@@ -447,24 +447,12 @@ static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, int db
 
 	fillpage(page);
 
-#if 0
 	err = vm_insert_page(vma, offset, page);
 	if (err) {
 		printk("vm_insert_page(vma=%p[%#lx:%#lx], offset=%#llx, page=%p) failed with error: %d\n",
 				vma, vma->vm_start, vma->vm_end, offset, apage, err);
 		return;
 	}
-#else
-	{
-	unsigned long pfn = page_to_pfn(page);
-	err = remap_pfn_range(vma, offset,  pfn, PAGE_SIZE, vma->vm_page_prot);
-	if (err) {
-		printk("remap_pfn_range(vma=%p, offset=%#llx, pfn=%lx, size=%ld) failed %d\n",
-				vma, offset, pfn, PAGE_SIZE, err);
-		return;
-	}
-	}
-#endif
 }
 
 
