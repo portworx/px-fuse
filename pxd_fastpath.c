@@ -3,6 +3,7 @@
 #include "pxd.h"
 #include "pxd_core.h"
 #include "pxd_compat.h"
+#include "pxdmm.h"
 
 // A one-time built, static lookup table to distribute requests to cpu
 // within same numa node
@@ -814,7 +815,11 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	if (!pxd_dev->fp.nfd) {
 		pxd_printk("px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
+	#ifdef PXDMM
+		return pxdmm_make_request_slowpath(q, bio);
+	#else
 		return pxd_make_request_slowpath(q, bio);
+	#endif
 	}
 
 	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);

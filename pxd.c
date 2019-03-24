@@ -34,6 +34,8 @@ extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
+#define STATIC
+
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -220,7 +222,7 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	pxd_request_complete(fc, req);
 }
 
-static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
+STATIC struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 {
 	int eintr = 0;
 	struct fuse_req *req = NULL;
@@ -351,7 +353,7 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 
 #else
 
-static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
+STATIC void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
@@ -409,7 +411,41 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-#ifndef USE_REQUESTQ_MODEL
+#ifdef PXDMM
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+blk_qc_t pxdmm_make_request_slowpath(struct request_queue *q, struct bio *bio)
+#else
+void pxdmm_make_request_slowpath(struct request_queue *q, struct bio *bio)
+#endif
+{
+	struct pxd_device *pxd_dev = q->queuedata;
+	unsigned int flags;
+	int total_size;
+
+	flags = bio->bi_flags;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+	blk_queue_split(q, &bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+	blk_queue_split(q, &bio, q->bio_split);
+#endif
+
+	total_size = compute_bio_rq_size(bio);
+
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%x op_flags 0x%x\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			BIO_SECTOR(bio) * SECTOR_SIZE, total_size,
+			bio->bi_vcnt, flags, get_op_flags(bio));
+
+	pxdmm_add_request(pxd_dev, q, bio);
+
+	return BLK_QC_RETVAL;
+}
+
+#elif defined(USE_REQUESTQ_MODEL)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)

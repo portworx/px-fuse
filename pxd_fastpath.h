@@ -41,6 +41,9 @@ struct thread_context {
 	struct bio_list  bio_list;
 };
 
+#define MAX_PXD_BACKING_DEVS (3)
+#define MAX_PXD_DEVPATH_LEN  (128)
+
 struct pxd_fastpath_extension {
 	// Extended information
 	bool   block_device;
