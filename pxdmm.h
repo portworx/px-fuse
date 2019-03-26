@@ -1,7 +1,7 @@
 #ifndef _PXDMM_H_
 #define _PXDMM_H_
 
-#define NREQUESTS (3)
+#define NREQUESTS (256)
 #define MAXDATASIZE (1<<20)
 #define CMDR_SIZE (8<<20)
 
