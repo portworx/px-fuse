@@ -842,12 +842,14 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	handle->starttime = jiffies;
 
 	if (handle->flags) {
-		printk("NOTE: Request handle flags has unexpected active state set index %u, (%#lx)\n",
+		printk(KERN_ERR"Request handle flags has unexpected active state set index %u, (%#lx)\n",
 				cmd->io_index, handle->flags);
+		BUG();
 	}
+
 	handle->flags = PXDMM_REQUEST_ACTIVE;
 
-	// Need to fill in the data mapping
+	// fill in the data mapping
 	err = pxdmm_map_bio(udev, cmd->io_index, bio);
 	if (err) {
 		printk("Mapping BIO has failed on index %u, error %d\n",
