@@ -997,7 +997,7 @@ int pxdmm_queue_completer(void *arg) {
 	while (!kthread_should_stop()) {
 		wait_event_interruptible_timeout(udev->waitQ,
 				respQEmpty(udev->mbox) == false || kthread_should_stop(),
-				HZ/100); // for now, look for every second.
+				HZ/1000); // once every millisec
 
 		if (pxdmm_complete_request(udev)) {
 			printk("pxdmm_queue_completer() failed.. exiting thread\n");
