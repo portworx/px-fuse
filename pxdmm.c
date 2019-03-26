@@ -247,6 +247,8 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 
 		breq = handle->bio;
 
+		if (!bio_has_data(breq)) return VM_FAULT_SIGBUS;
+
 		// then map all the bio pages into the 1MB data window.
 		// Fetch all the mapped BIO for this request.
 		bufferOffset = offset - CMDR_SIZE - (dbi * MAXDATASIZE);
@@ -254,7 +256,7 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 		bio_for_each_segment(bvec, breq, bvec_iter) {
-			unsigned int pageSize = bvec.bv_len + bvec.bv_offset;
+			unsigned int pageSize = roundup(bvec.bv_len + bvec.bv_offset, PAGE_SIZE);
 			if (bufferOffset >= currOffset && bufferOffset < (currOffset + pageSize)) {
 				page = bvec.bv_page;
 				break;
@@ -264,7 +266,7 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 		}
 #else
 		bio_for_each_segment(bvec, breq, bvec_iter) {
-			unsigned int pageSize = bvec->bv_len + bvec->bv_offset;
+			unsigned int pageSize = roundup(bvec->bv_len + bvec->bv_offset, PAGE_SIZE);
 			if (bufferOffset >= currOffset && bufferOffset < (currOffset + pageSize)) {
 				page = bvec->bv_page;
 				break;
@@ -291,7 +293,7 @@ static const struct vm_operations_struct pxdmm_vma_ops = {
 };
 
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *,int dbi);
-static void pxdmm_unmap(struct pxdmm_dev* udev, int dbi);
+static void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata);
 
 static
 int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
@@ -389,9 +391,6 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 		return -EINVAL;
 	}
 
-	// HACK HACK HACK
-	return 0;
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
 		struct page *pg = bvec.bv_page;
@@ -406,7 +405,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 			return err;
 		}
 		offset += length;
-		flush_dcache_page(pg);
+		if (bio_data_dir(bio) == WRITE) flush_dcache_page(pg);
 	}
 #else
 	bio_for_each_segment(bvec, bio, i) {
@@ -422,7 +421,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 			return err;
 		}
 		offset += length;
-		flush_dcache_page(pg);
+		if (bio_data_dir(bio) == WRITE) flush_dcache_page(pg);
 	}
 #endif
 
@@ -473,20 +472,19 @@ static struct miscdevice ctldev = {
 static struct pxdmm_dev *udev;
 
 static
-void pxdmm_unmap(struct pxdmm_dev* udev, int dbi) {
+void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata) {
 	loff_t offset;
 	struct address_space *as = udev->inode->i_mapping;
 	const uint32_t dataBufferLength = MAXDATASIZE;
 
-	(void) as;
-	(void) dataBufferLength;
+	if (!hasdata) {
+		return;
+	}
 	offset = pxdmm_dataoffset(dbi);
 	printk("pxdmm_unmap: unmapping dbi %d, offset %llu\n",
 			dbi, offset);
-	// HACK HACK HACK
-	return;
 
-    //unmap_mapping_range(as, offset, dataBufferLength, 1);
+    unmap_mapping_range(as, offset, dataBufferLength, 1);
 }
 
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, int dbi) {
@@ -538,7 +536,7 @@ static ssize_t pxdmm_do_unmap(struct device *dev,
 {
 	long dbi;
 	kstrtol(buf, 0, &dbi);
-	pxdmm_unmap(udev, (int) dbi);
+	pxdmm_unmap(udev, (int) dbi, true);
 
 	printk("pxdmm unmapped for dbi %d\n", (int) dbi);
 	return count;
@@ -921,17 +919,16 @@ struct bio* __pxdmm_complete_request(volatile struct pxdmm_cmdresp* resp, int *s
 		//BUG();
 		return NULL;
 	}
-	spin_lock_irqsave(&udev->lock, f);
 
 	// BUG condition
 	if (!(handle->flags & PXDMM_REQUEST_ACTIVE)) {
-		printk("pxdmm response handling for index %u not active (flags: %#lx)\n",
+		printk(KERN_ERR"pxdmm response handling for index %u not active (flags: %#lx)\n",
 				resp->io_index, handle->flags);
 		goto out;
 	}
 
 	// unmap the data buffer from window
-	pxdmm_unmap(udev, resp->io_index);
+	pxdmm_unmap(udev, resp->io_index, bio_has_data(handle->bio));
 
 	/* bio already completed... free up handle and return NULL */
 	if (!(handle->flags & PXDMM_REQUEST_TIMEDOUT)) {
@@ -943,6 +940,7 @@ out:
 	handle->flags = 0;
 	handle->magichead = handle->magictail = ~0UL;
 	// free up the io index
+	spin_lock_irqsave(&udev->lock, f);
 	bitmap_clear(udev->io_index, resp->io_index, 1);
 	atomic_dec(&udev->active);
 	spin_unlock_irqrestore(&udev->lock, f);
@@ -964,7 +962,7 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 
 	while (!respQEmpty(udev->mbox)) {
 		volatile struct pxdmm_cmdresp *resp = getRespQTail(udev->mbox);
-		flush_dcache_page(vmalloc_to_page(resp));
+		//flush_dcache_page(vmalloc_to_page(resp));
 		memcpy(&top, (struct pxdmm_cmdresp*) resp, sizeof(top));
 		// increment response tail.
 		printk("[%d] respQTail %p, mbox %p, respOffset %llu, resp Head/Tail %llu:%llu bitmap[%#lx]\n",
@@ -999,9 +997,8 @@ int pxdmm_queue_completer(void *arg) {
 				respQEmpty(udev->mbox) == false || kthread_should_stop(),
 				HZ/100); // for now, look for every second.
 
-		printk("pxdmm completer wokeup..\n");
 		if (pxdmm_complete_request(udev)) {
-			printk("pxdmm_complete_request() failed.. exiting thread\n");
+			printk("pxdmm_queue_completer() failed.. exiting thread\n");
 			break;
 		}
 	}
