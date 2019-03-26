@@ -710,6 +710,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 
 	add_disk(pxd_dev->disk);
 
+	pxdmm_init_dev(pxd_dev);
+
 	return pxd_dev->minor;
 
 out_disk:

@@ -5,6 +5,8 @@
 
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
+struct pxdmm_dev;
+
 struct pxd_context {
 	spinlock_t lock;
 	struct list_head list;
@@ -35,6 +37,8 @@ struct pxd_device {
 	struct pxd_fastpath_extension fp;
 	struct pxd_context *ctx;
 	bool connected;
+
+	struct pxdmm_dev *mmdev;
 };
 
 #define pxd_printk(args...)

@@ -24,6 +24,7 @@
 #include <linux/miscdevice.h>
 #include <linux/gfp.h>
 #include <linux/string.h>
+#include <linux/wait.h>
 
 #include "pxd_compat.h"
 #include "pxd_core.h"
@@ -31,7 +32,7 @@
 
 #define DRIVER_VERSION "0.1"
 #define STATIC /* a temporary hack until all gets used */
-#define DBGMODE
+//#define DBGMODE
 
 static struct page *apage, *bpage;
 #define PATTERN1 0xDEADBEEF
@@ -84,7 +85,7 @@ bool sanitize(struct reqhandle* handle) {
 	return (handle->magichead == MAGICHEAD && handle->magictail == MAGICTAIL);
 }
 
-
+static int pxdmm_queue_completer(void *arg);
 struct pxdmm_dev {
 	unsigned long magichead;
 	struct device dev;
@@ -117,6 +118,12 @@ struct pxdmm_dev {
 
 	uint64_t totalWindowLength;
 	unsigned long magictail;
+
+	wait_queue_head_t waitQ;
+	struct task_struct *thread;
+
+	wait_queue_head_t serializeQ;
+	atomic_t active;
 };
 
 static inline
@@ -131,6 +138,30 @@ struct reqhandle* getRequestHandle(struct pxdmm_dev* udev, int dbi) {
 	BUG_ON(dbi >= NREQUESTS);
 
 	return &udev->requests[dbi];
+}
+
+static inline
+void pxdmm_init_cmdresp(struct pxdmm_cmdresp *c,
+		uint32_t minor,
+		uint32_t cmd,
+		uint32_t cmd_flags,
+		int hasdata,
+		unsigned long dev_id,
+		loff_t offset,
+		loff_t length,
+		uint32_t status,
+		uintptr_t dev,
+		uint32_t io_index) {
+	c->minor = minor;
+	c->cmd = cmd;
+	c->cmd_flags = cmd_flags;
+	c->hasdata = hasdata;
+	c->dev_id = dev_id;
+	c->offset = offset;
+	c->length = length;
+	c->status = status;
+	c->dev = dev;
+	c->io_index = io_index;
 }
 
 static
@@ -171,13 +202,15 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 	if (mi < 0)
 		return VM_FAULT_SIGBUS;
 
-	printk("vmf: pxdmm_vma_fault pgoff: %#lx/%#lx fault addr:%p [%lx:%lx]\n",
-			vmf->pgoff, vmf->max_pgoff, vmf->virtual_address, vma->vm_start, vma->vm_end);
+	printk("vmf: pxdmm_vma_fault [vma pgoff %ld] pgoff: %#lx/%#lx fault addr:%p [%lx:%lx]\n",
+			vma->vm_pgoff, vmf->pgoff, vmf->max_pgoff, vmf->virtual_address, vma->vm_start, vma->vm_end);
 
 	offset = (vmf->pgoff - mi) << PAGE_SHIFT;
 	if (offset < CMDR_SIZE) {
 		addr = (void*) (unsigned long)info->mem[mi].addr + offset;
 		page = vmalloc_to_page(addr);
+		printk("vmf: cmd register window fault.. base %p, offset %lx, vaddr %p page %p\n",
+				(void*) info->mem[mi].addr, offset, addr, page);
 	} else {
 		dbi = (offset - CMDR_SIZE) / MAXDATASIZE;
 		// find the request that has data buffer index
@@ -266,7 +299,7 @@ int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 
 	printk("uio_mmap called for address space %p [%#lx, %#lx]\n",
 			vma->vm_mm, vma->vm_start, vma->vm_end);
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_MIXEDMAP;
 	vma->vm_ops = &pxdmm_vma_ops;
 
 	vma->vm_private_data = udev;
@@ -329,7 +362,7 @@ int uio_irqcontrol(struct uio_info *info, s32 irq_on) {
 
 static
 int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
-	struct mm_struct *mm = udev->task->mm;
+	struct mm_struct *mm;
 	loff_t offset = pxdmm_dataoffset(io_index) + udev->vm_start;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct bio_vec bvec;
@@ -341,6 +374,14 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 	struct vm_area_struct *vma;
 	int err;
 
+	if (!udev || !udev->task) {
+		printk("No user process to handle IO\n");
+		return -EIO;
+	}
+
+	mm = udev->task->mm;
+	printk("Inside pxdmm_map_bio(dev %p,io_index: %u, bio %p/%d segments)\n",
+			udev, io_index, bio, bio_segments(bio));
 	if (!bio_has_data(bio)) return 0;
 
 	vma = find_vma(mm, offset);
@@ -348,63 +389,49 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 		return -EINVAL;
 	}
 
+	// HACK HACK HACK
+	return 0;
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
 		struct page *pg = bvec.bv_page;
-		loff_t length = roundup(bvec.bv_len, PAGE_SIZE);
+		loff_t length = roundup(bvec.bv_offset + bvec.bv_len, PAGE_SIZE);
 
+		printk("for bio: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
+				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {
-			printk("vm_insert_page(vma=%p[%#lx:%#lx], offset=%#llx, page=%p) failed with error: %d\n",
-				vma, vma->vm_start, vma->vm_end, offset, pg, err);
+			printk("vm_insert_page(vma=%p[%#lx:%#lx], offset=%p, page=%p) failed with error: %d\n",
+				vma, vma->vm_start, vma->vm_end, (void*) offset, pg, err);
 			return err;
 		}
 		offset += length;
+		flush_dcache_page(pg);
 	}
 #else
 	bio_for_each_segment(bvec, bio, i) {
 		struct page *pg = bvec->bv_page;
-		loff_t length = roundup(bvec->bv_len, PAGE_SIZE);
+		loff_t length = roundup(bvec->bv_offset + bvec->bv_len, PAGE_SIZE);
 
+		printk("for bio2: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
+				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {
-			printk("vm_insert_page(vma=%p[%#lx:%#lx], offset=%#llx, page=%p) failed with error: %d\n",
-				vma, vma->vm_start, vma->vm_end, offset, pg, err);
+			printk("vm_insert_page(vma=%p[%#lx:%#lx], offset=%p, page=%p) failed with error: %d\n",
+				vma, vma->vm_start, vma->vm_end, (void*) offset, pg, err);
 			return err;
 		}
 		offset += length;
+		flush_dcache_page(pg);
 	}
 #endif
 
 	return 0;
 }
 
-STATIC
-int pxdmm_unmap_bio(struct pxdmm_dev *udev, uint32_t io_index) {
-	loff_t offset = pxdmm_dataoffset(io_index);
-	struct inode *inode = udev->inode;
-	struct address_space *as = inode->i_mapping;
-	const uint32_t dataBufferLength = MAXDATASIZE;
-
-	unmap_mapping_range(as, offset, dataBufferLength, 1);
-
-	return 0;
-}
-
-
 /* map/unmap logic ends */
 
 /* parent device */
-#if 0
-static void pxdmm_root_dev_release(struct device *dev)
-{
-}
-
-static struct device pxdmm_root_dev = {
-	.init_name =    "pxdmm",
-	.release =      pxdmm_root_dev_release,
-};
-#endif
 static struct device *pxdmm_root_dev;
 
 #if 0
@@ -451,18 +478,29 @@ void pxdmm_unmap(struct pxdmm_dev* udev, int dbi) {
 	struct address_space *as = udev->inode->i_mapping;
 	const uint32_t dataBufferLength = MAXDATASIZE;
 
+	(void) as;
+	(void) dataBufferLength;
 	offset = pxdmm_dataoffset(dbi);
 	printk("pxdmm_unmap: unmapping dbi %d, offset %llu\n",
 			dbi, offset);
-    unmap_mapping_range(as, offset, dataBufferLength, 1);
+	// HACK HACK HACK
+	return;
+
+    //unmap_mapping_range(as, offset, dataBufferLength, 1);
 }
 
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, int dbi) {
-	struct mm_struct *mm = udev->task->mm;
+	struct mm_struct *mm;
 	loff_t offset;
 	int err;
 	struct page* page;
 
+	if (!udev || !udev->task) {
+		printk("No user process to handle IO\n");
+		return;
+	}
+
+	mm = udev->task->mm;
 	offset = pxdmm_dataoffset(dbi) + udev->vm_start;
 	printk("Finding vma at offset %#llx for vm_start: %#llx:%#llx, dbi %d\n",
 			offset, udev->vm_start, udev->vm_end, dbi);
@@ -576,6 +614,18 @@ static int pxdmm_dev_init(void) {
 	printk("base: %p, total: %llu, end: %p\n", udev->base, udev->totalWindowLength, 
 			(void*)((uintptr_t)udev->base+udev->totalWindowLength));
 
+	pxdmm_mbox_init(udev->mbox,
+			(uint64_t) NREQUESTS,
+			(uint64_t) ((uintptr_t) udev->cmdQ - (uintptr_t) udev->base),
+			(uint64_t) ((uintptr_t) udev->respQ - (uintptr_t) udev->base),
+			(uint64_t) CMDR_SIZE);
+
+	printk("mbox init complete... nreqs %llu, cmdOffset %llu, respOffset %llu, dataOffset %llu\n",
+			udev->mbox->queueSize,
+			udev->mbox->cmdOffset,
+			udev->mbox->respOffset,
+			udev->mbox->dataOffset);
+
 	// sysfs parent device.
 
 	udev->info.name = "pxdmm";
@@ -613,12 +663,23 @@ static int pxdmm_dev_init(void) {
 		return err;
 	}
 
+	spin_lock_init(&udev->lock);
+	init_waitqueue_head(&udev->waitQ);
+	init_waitqueue_head(&udev->serializeQ);
+
+	udev->thread = kthread_create(pxdmm_queue_completer, udev, "pxdmm");
+	if (IS_ERR(udev->thread)) {
+		pxd_printk("Init kthread for pxdmm failed %lu\n",
+			PTR_ERR(udev->thread));
+		pxdmm_exit();
+		return PTR_ERR(udev->thread);
+	}
+
 	// initialize magic for sanity.
 	udev->magichead = MAGICHEAD;
 	udev->magictail = MAGICTAIL;
 
-	spin_lock_init(&udev->lock);
-
+	wake_up_process(udev->thread);
 	return 0;
 }
 
@@ -639,6 +700,8 @@ int pxdmm_init(void) {
 
 
 void pxdmm_exit(void) {
+	kthread_stop(udev->thread);
+
 	printk("Freeing apage %p, bpage %p\n", apage, bpage);
 	__free_pages(apage, get_order(PAGE_SIZE));
 	__free_pages(bpage, get_order(PAGE_SIZE));
@@ -657,21 +720,47 @@ void pxdmm_exit(void) {
 	kfree(udev);
 }
 
-int pxdmm_add_request(struct pxd_device *pxd_dev,
+static
+int __pxdmm_add_request(struct pxd_device *pxd_dev,
 		struct request_queue *q, struct bio *bio) {
 
+	struct pxdmm_dev *udev = pxd_dev->mmdev;
 	int next_idx;
-	// uses global udev (pxdmm_dev)
-	struct pxdmm_cmdresp *cmd;
+	volatile struct pxdmm_cmdresp *cmd;
 	unsigned long f;
 	struct reqhandle *handle;
 	int err;
 
+	if (!udev || !sanitycheck(udev)) {
+		printk("No mm dev (or sanity check failed) %p initialized for pxd_dev\n", udev);
+		return -EINVAL;
+	}
+
 	//  lock mbox access and get next index
+	spin_lock_irqsave(&udev->lock, f);
+	while (cmdQFull(udev->mbox) || bitmap_full(udev->io_index, NREQUESTS)) {
+		printk("Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d [%#lx]\n",
+				udev->mbox->cmdHead, udev->mbox->cmdTail,
+				bitmap_full(udev->io_index, NREQUESTS),
+				udev->io_index[0]);
+		spin_unlock_irqrestore(&udev->lock, f);
+		/* congestion wait */
+		wait_event_timeout(udev->serializeQ,
+				!cmdQFull(udev->mbox) && !bitmap_full(udev->io_index, NREQUESTS),
+				HZ);
+		spin_lock_irqsave(&udev->lock, f);
+		printk("congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d [%#lx]\n",
+				udev->mbox->cmdHead, udev->mbox->cmdTail,
+				bitmap_full(udev->io_index, NREQUESTS),
+				udev->io_index[0]);
+	}
+
 	//  fill up the cmd structure
 	//  increment head and unlock mbox
-	spin_lock_irqsave(&udev->lock, f);
-	cmd = getCmdQHead(udev->mbox, (uintptr_t) udev->cmdQ);
+	cmd = getCmdQHead(udev->mbox);
+	printk("cmdQHead %p, mbox %p, cmdOffset %llu, cmd Head:Tail %llu:%llu bitmap %#lx\n",
+			cmd, udev->mbox, udev->mbox->cmdOffset, udev->mbox->cmdHead, udev->mbox->cmdTail,
+			udev->io_index[0]);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	cmd->cmd_flags = bio->bi_opf;
@@ -734,32 +823,31 @@ int pxdmm_add_request(struct pxd_device *pxd_dev,
 	if (bio_has_data(bio) && cmd->length > MAXDATASIZE) {
 		printk("Data Size (%lld bytes) greater than maximum (%d bytes)\n",
 				cmd->length, MAXDATASIZE);
-		return -E2BIG;
+		err = -E2BIG;
+		goto out;
 	}
 
-	// Todo: Find the io_index and initialize request handle for this
-	// new outstanding request.
-	//
 	next_idx = find_first_zero_bit(udev->io_index, NREQUESTS);
-	if (next_idx == NREQUESTS) {
+	if (next_idx >= NREQUESTS) {
 		// This is BUG condition
 		BUG();
 	}
 
-	set_bit(next_idx, udev->io_index);
+	bitmap_set(udev->io_index, next_idx, 1);
 	cmd->io_index = next_idx;
 
+	// Find the io_index and initialize request handle for this
+	// new outstanding request.
 	handle = getRequestHandle(udev, cmd->io_index);
 	handle->bio = bio;
 	handle->queue = q;
 	handle->starttime = jiffies;
-	if (test_and_set_bit(PXDMM_REQUEST_ACTIVE, &handle->flags)) {
-		printk("Request handle flags has unexpected active state set index %u, (%#lx)\n",
+
+	if (handle->flags) {
+		printk("NOTE: Request handle flags has unexpected active state set index %u, (%#lx)\n",
 				cmd->io_index, handle->flags);
-		clear_bit(cmd->io_index, udev->io_index);
-		err = -EBUSY;
-		goto out;
 	}
+	handle->flags = PXDMM_REQUEST_ACTIVE;
 
 	// Need to fill in the data mapping
 	err = pxdmm_map_bio(udev, cmd->io_index, bio);
@@ -767,29 +855,57 @@ int pxdmm_add_request(struct pxd_device *pxd_dev,
 		printk("Mapping BIO has failed on index %u, error %d\n",
 				cmd->io_index, err);
 		handle->flags = 0;
-		clear_bit(cmd->io_index, udev->io_index);
+		bitmap_clear(udev->io_index, cmd->io_index, 1);
 		goto out;
 	}
-
-	handle->flags = PXDMM_REQUEST_ACTIVE;
 
 	// ensure handle magics are set
 	handle->magichead = MAGICHEAD;
 	handle->magictail = MAGICTAIL;
+
+	pxdmm_cmdresp_dump("add request:", cmd);
+	flush_dcache_page(vmalloc_to_page(cmd));
 	incrCmdQHead(udev->mbox);
 
 out:
+	if (!err) atomic_inc(&udev->active);
 	spin_unlock_irqrestore(&udev->lock, f);
 
 	return err;
 }
 
-STATIC
-struct bio* __pxdmm_complete_request(struct pxdmm_cmdresp* resp, int *status) {
+int pxdmm_add_request(struct pxd_device *pxd_dev,
+		struct request_queue *q, struct bio *bio) {
+
+	struct pxdmm_dev *udev = pxd_dev->mmdev;
+	int err;
+
+	if (!udev) {
+		BIO_ENDIO(bio, -EIO);
+		return -EIO;
+	}
+
+	err = __pxdmm_add_request(pxd_dev, q, bio);
+	if (err) {
+		/* failed submission */
+		printk("Failed submission for a new request bio %p, status %d\n", bio, err);
+		BIO_ENDIO(bio, err);
+	}
+	return err;
+}
+
+struct bio* __pxdmm_complete_request(volatile struct pxdmm_cmdresp* resp, int *status) {
 	struct pxdmm_dev *udev = (struct pxdmm_dev*) resp->dev;
 	unsigned long f;
 	struct reqhandle *handle;
 	struct bio *bio = NULL;
+
+	pxdmm_cmdresp_dump("got response:", resp);
+
+	if (!udev) {
+		printk("pxdmm null device part of response..%p \n", resp);
+		return NULL;
+	}
 
 	if (!sanitycheck(udev)) {
 		printk("pxdmm device sanity checks failed..headmagic:%#lx, tailmagic:%#lx\n",
@@ -798,18 +914,22 @@ struct bio* __pxdmm_complete_request(struct pxdmm_cmdresp* resp, int *status) {
 	}
 
 	handle = getRequestHandle(udev, resp->io_index);
+	// sanitize context.
 	if (!sanitize(handle)) {
 		printk("Detected handle corruption...index %u, head %#lx, tail %#lx\n",
 				resp->io_index, handle->magichead, handle->magictail);
-		BUG();
+		//BUG();
+		return NULL;
 	}
 	spin_lock_irqsave(&udev->lock, f);
-	// sanitize context.
+
+	// BUG condition
 	if (!(handle->flags & PXDMM_REQUEST_ACTIVE)) {
 		printk("pxdmm response handling for index %u not active (flags: %#lx)\n",
 				resp->io_index, handle->flags);
 		goto out;
 	}
+
 	// unmap the data buffer from window
 	pxdmm_unmap(udev, resp->io_index);
 
@@ -821,33 +941,71 @@ struct bio* __pxdmm_complete_request(struct pxdmm_cmdresp* resp, int *status) {
 	*status = resp->status;
 out:
 	handle->flags = 0;
+	handle->magichead = handle->magictail = ~0UL;
 	// free up the io index
-	clear_bit(resp->io_index, udev->io_index);
+	bitmap_clear(udev->io_index, resp->io_index, 1);
+	atomic_dec(&udev->active);
 	spin_unlock_irqrestore(&udev->lock, f);
+
+	wake_up(&udev->serializeQ);
 
 	return bio;
 }
 
 int pxdmm_complete_request (struct pxdmm_dev *udev) {
-	struct pxdmm_cmdresp *resp;
+	struct pxdmm_cmdresp top;
 	int status;
 	struct bio *bio;
 
 	if (!sanitycheck(udev)) {
+		printk("pxdmm_dev %p sanity check failed\n", udev);
 		return -EINVAL;
 	}
 
 	while (!respQEmpty(udev->mbox)) {
-		resp = getRespQTail(udev->mbox, (uintptr_t) udev->respQ);
+		volatile struct pxdmm_cmdresp *resp = getRespQTail(udev->mbox);
+		flush_dcache_page(vmalloc_to_page(resp));
+		memcpy(&top, (struct pxdmm_cmdresp*) resp, sizeof(top));
+		// increment response tail.
+		printk("[%d] respQTail %p, mbox %p, respOffset %llu, resp Head/Tail %llu:%llu bitmap[%#lx]\n",
+			atomic_read(&udev->active), resp, udev->mbox,
+			udev->mbox->respOffset, udev->mbox->respHead, udev->mbox->respTail,
+			udev->io_index[0]);
 
-		bio = __pxdmm_complete_request(resp, &status);
+		incrRespQTail(udev->mbox);
+
+		bio = __pxdmm_complete_request(&top, &status);
+		printk("completing[%u]: cmd %d, BIO %p with status %u\n",
+					atomic_read(&udev->active), top.cmd, bio, status);
 		if (bio) {
 			BIO_ENDIO(bio, status);
 		}
-
-		// increment response tail.
-		incrRespQTail(udev->mbox);
 	}
 
+	return 0;
+}
+
+void pxdmm_init_dev(struct pxd_device *pxd_dev){
+	// assign global pxdmm_dev to all pxd_devices for now
+	pxd_dev->mmdev = udev;
+}
+
+static
+int pxdmm_queue_completer(void *arg) {
+	struct pxdmm_dev *udev = (struct pxdmm_dev *) arg;
+
+	while (!kthread_should_stop()) {
+		wait_event_interruptible_timeout(udev->waitQ,
+				respQEmpty(udev->mbox) == false || kthread_should_stop(),
+				HZ/100); // for now, look for every second.
+
+		printk("pxdmm completer wokeup..\n");
+		if (pxdmm_complete_request(udev)) {
+			printk("pxdmm_complete_request() failed.. exiting thread\n");
+			break;
+		}
+	}
+
+	printk("pxdmm_queue_completer exiting..\n");
 	return 0;
 }
