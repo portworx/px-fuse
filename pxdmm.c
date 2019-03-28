@@ -41,28 +41,43 @@ static struct page *apage, *bpage;
 #define PATTERN4 0xDEEDF00F
 #define PATTERN5 0xA5A5A5A5
 
-static unsigned long pattern[] = {PATTERN1, PATTERN2, PATTERN3, PATTERN4, PATTERN5};
+STATIC unsigned long pattern[] = {PATTERN1, PATTERN2, PATTERN3, PATTERN4, PATTERN5};
 #define NPATTERNS (sizeof(pattern)/sizeof(unsigned long))
-static int patternidx = 0;
+
+static inline
+void __fillpage(void *kaddr, unsigned int length) {
+	unsigned int *p = kaddr;
+
+	int nwords = length/4;
+	while (nwords) {
+
+	switch (nwords % 5) {
+	case 0:
+		*p++ = PATTERN1;
+		break;
+	case 1:
+		*p++ = PATTERN2;
+		break;
+	case 2:
+		*p++ = PATTERN3;
+		break;
+	case 3:
+		*p++ = PATTERN4;
+		break;
+	case 4:
+		*p++ = PATTERN5;
+		break;
+	}
+		nwords--;
+	}
+}
 
 static inline
 void fillpage (struct page *pg) {
-	unsigned long _pattern = pattern[patternidx];
 	void *kaddr = kmap_atomic(pg);
-	int nwords = PAGE_SIZE/4;
-	unsigned int *p = kaddr;
 
-	while (nwords) {
-		*p++ = _pattern;
-		nwords--;
-	}
-
-	//memset(kaddr, pattern, PAGE_SIZE);
-
+	__fillpage(kaddr, PAGE_SIZE);
 	kunmap_atomic(kaddr);
-
-	printk("filled page with pattern %#lx\n", _pattern);
-	patternidx = (patternidx+1)%NPATTERNS;
 }
 
 struct reqhandle {
@@ -363,7 +378,7 @@ int uio_irqcontrol(struct uio_info *info, s32 irq_on) {
 /* map and unmap pages from bio within the inode address mapping */
 
 static
-int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
+int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, unsigned long *csum) {
 	struct mm_struct *mm;
 	loff_t offset = pxdmm_dataoffset(io_index) + udev->vm_start;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -375,6 +390,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 #endif
 	struct vm_area_struct *vma;
 	int err;
+	unsigned long checksum = *csum;
 
 	if (!udev || !udev->task) {
 		printk("No user process to handle IO\n");
@@ -394,7 +410,9 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
 		struct page *pg = bvec.bv_page;
-		loff_t length = roundup(bvec.bv_offset + bvec.bv_len, PAGE_SIZE);
+		loff_t length = roundup(bvec.bv_len, PAGE_SIZE);
+
+		BUG_ON(bvec.bv_offset || length != bvec.bv_len);
 
 		printk("for bio: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
@@ -405,12 +423,25 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 			return err;
 		}
 		offset += length;
-		if (bio_data_dir(bio) == WRITE) flush_dcache_page(pg);
+		if (bio_data_dir(bio) == WRITE) {
+			void *buff = kmap_atomic(pg);
+			checksum = compute_checksum(checksum, buff, bvec.bv_len);
+			kunmap_atomic(buff);
+			flush_dcache_page(pg);
+		} else {
+			void *buff = kmap_atomic(pg);
+			__fillpage(buff, length);
+			checksum = compute_checksum(checksum, buff, bvec.bv_len);
+			kunmap_atomic(buff);
+			flush_dcache_page(pg);
+		}
 	}
 #else
 	bio_for_each_segment(bvec, bio, i) {
 		struct page *pg = bvec->bv_page;
-		loff_t length = roundup(bvec->bv_offset + bvec->bv_len, PAGE_SIZE);
+		loff_t length = roundup(bvec->bv_len, PAGE_SIZE);
+
+		BUG_ON(bvec->bv_offset || length != bvec->bv_len);
 
 		printk("for bio2: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
@@ -421,9 +452,22 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio) {
 			return err;
 		}
 		offset += length;
-		if (bio_data_dir(bio) == WRITE) flush_dcache_page(pg);
+		if (bio_data_dir(bio) == WRITE) {
+			void *buff = kmap_atomic(pg);
+			checksum = compute_checksum(checksum, buff, bvec->bv_len);
+			kunmap_atomic(buff);
+			flush_dcache_page(pg);
+		} else {
+			void *buff = kmap_atomic(pg);
+			__fillpage(buff, length);
+			checksum = compute_checksum(checksum, buff, bvec->bv_len);
+			kunmap_atomic(buff);
+			flush_dcache_page(pg);
+		}
 	}
 #endif
+
+	*csum = checksum;
 
 	return 0;
 }
@@ -724,7 +768,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 
 	struct pxdmm_dev *udev = pxd_dev->mmdev;
 	int next_idx;
-	volatile struct pxdmm_cmdresp *cmd;
+	VOLATILE struct pxdmm_cmdresp *cmd;
 	unsigned long f;
 	struct reqhandle *handle;
 	int err;
@@ -768,15 +812,16 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 		break;
 	case REQ_OP_WRITE:
 		cmd->cmd = PXD_WRITE;
+		if (cmd->cmd_flags & (REQ_FUA|REQ_PREFLUSH)) {
+			cmd->cmd_flags = PXD_FLAGS_FLUSH;
+		}
+
 		break;
 	case REQ_OP_READ:
 		cmd->cmd = PXD_READ;
 		break;
 	case REQ_OP_DISCARD:
 		cmd->cmd = PXD_DISCARD;
-		break;
-	case REQ_OP_FLUSH:
-		cmd->cmd = PXD_FLUSH;
 		break;
 	default:
 		BUG();
@@ -792,7 +837,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 			cmd->cmd = PXD_WRITE_SAME;
 		} else if (flags & (REQ_FUA|REQ_FLUSH)) {
 			cmd->cmd = PXD_WRITE;
-			cmd->cmd_flags = REQ_FUA;
+			cmd->cmd_flags = PXD_FLAGS_FLUSH;
 		} else {
 			cmd->cmd = PXD_WRITE;
 		}
@@ -816,6 +861,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	cmd->minor = pxd_dev->minor;
 	cmd->dev_id = pxd_dev->dev_id;
 	cmd->dev = (uintptr_t) udev;
+	cmd->checksum = 0;
 
 	cmd->length = compute_bio_rq_size(bio);
 	if (bio_has_data(bio) && cmd->length > MAXDATASIZE) {
@@ -850,7 +896,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	handle->flags = PXDMM_REQUEST_ACTIVE;
 
 	// fill in the data mapping
-	err = pxdmm_map_bio(udev, cmd->io_index, bio);
+	err = pxdmm_map_bio(udev, cmd->io_index, bio, &cmd->checksum);
 	if (err) {
 		printk("Mapping BIO has failed on index %u, error %d\n",
 				cmd->io_index, err);
@@ -894,7 +940,7 @@ int pxdmm_add_request(struct pxd_device *pxd_dev,
 	return err;
 }
 
-struct bio* __pxdmm_complete_request(volatile struct pxdmm_cmdresp* resp, int *status) {
+struct bio* __pxdmm_complete_request(VOLATILE struct pxdmm_cmdresp* resp, int *status) {
 	struct pxdmm_dev *udev = (struct pxdmm_dev*) resp->dev;
 	unsigned long f;
 	struct reqhandle *handle;
@@ -963,7 +1009,7 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 	}
 
 	while (!respQEmpty(udev->mbox)) {
-		volatile struct pxdmm_cmdresp *resp = getRespQTail(udev->mbox);
+		VOLATILE struct pxdmm_cmdresp *resp = getRespQTail(udev->mbox);
 		//flush_dcache_page(vmalloc_to_page(resp));
 		memcpy(&top, (struct pxdmm_cmdresp*) resp, sizeof(top));
 		// increment response tail.

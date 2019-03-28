@@ -1,24 +1,24 @@
 #ifndef _PXDMM_H_
 #define _PXDMM_H_
 
-#define NREQUESTS (256)
+#define NREQUESTS (3)
 #define MAXDATASIZE (1<<20)
 #define CMDR_SIZE (8<<20)
 
-#ifdef __KERNEL__
+#define VOLATILE
 
-int pxdmm_init(void);
-void pxdmm_exit(void);
+#ifdef __KERNEL__
 
 struct pxd_device;
 struct request_queue;
 struct bio;
 struct pxdmm_dev;
 
+int pxdmm_init(void);
+void pxdmm_exit(void);
 int pxdmm_add_request(struct pxd_device *pxd_dev,
 		struct request_queue *q, struct bio *bio);
 int pxdmm_complete_request(struct pxdmm_dev *udev);
-
 void pxdmm_init_dev(struct pxd_device *pxd_dev);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
@@ -46,6 +46,7 @@ struct pxdmm_cmdresp {
 	loff_t offset;
 	loff_t length;
 
+	unsigned long checksum;
 	uint32_t status;
 
 	// below 2 fields should be passed as is.
@@ -67,8 +68,8 @@ struct pxdmm_mbox {
 } __attribute__((aligned(64)));
 
 static inline
-volatile struct pxdmm_cmdresp* getCmdQBase(struct pxdmm_mbox *mbox) {
-	return (volatile struct pxdmm_cmdresp *)((char*) mbox + mbox->cmdOffset);
+VOLATILE struct pxdmm_cmdresp* getCmdQBase(struct pxdmm_mbox *mbox) {
+	return (VOLATILE struct pxdmm_cmdresp *)((char*) mbox + mbox->cmdOffset);
 }
 
 static inline
@@ -95,9 +96,9 @@ void pxdmm_mbox_dump (struct pxdmm_mbox *mbox) {
 #define ____offsetof(t, f) (uintptr_t)(&((t*)0)->f)
 
 static inline
-void pxdmm_cmdresp_dump(const char *msg, volatile struct pxdmm_cmdresp *c) {
+void pxdmm_cmdresp_dump(const char *msg, VOLATILE struct pxdmm_cmdresp *c) {
 	printf("cmdresp: %s: minor [%ld]%u, cmd: [%ld]%u, cmd_flags [%ld]%#x, hasdata: [%ld]%d, dev_id: [%ld]%ld\n"
-			"\t offset [%ld]%lu:[%ld]%lu, status [%ld]%u, mmdev [%ld]%p, io_index [%ld]%u\n",
+			"\t offset [%ld]%lu:[%ld]%lu, csum[%ld]%lu, status [%ld]%u, mmdev [%ld]%p, io_index [%ld]%u\n",
 			msg,
 			____offsetof(struct pxdmm_cmdresp, minor), c->minor,
 			____offsetof(struct pxdmm_cmdresp, cmd), c->cmd,
@@ -106,6 +107,7 @@ void pxdmm_cmdresp_dump(const char *msg, volatile struct pxdmm_cmdresp *c) {
 			____offsetof(struct pxdmm_cmdresp, dev_id), c->dev_id,
 			____offsetof(struct pxdmm_cmdresp, offset), c->offset,
 			____offsetof(struct pxdmm_cmdresp, length), c->length,
+			____offsetof(struct pxdmm_cmdresp, checksum), c->checksum,
 			____offsetof(struct pxdmm_cmdresp, status), c->status,
 			____offsetof(struct pxdmm_cmdresp, dev), (void*) c->dev,
 			____offsetof(struct pxdmm_cmdresp, io_index), c->io_index);
@@ -124,9 +126,9 @@ void pxdmm_mbox_dump (struct pxdmm_mbox *mbox) {
 
 #define  ____offsetof(t, f) (uintptr_t)(&((t*)0)->f)
 static inline
-void pxdmm_cmdresp_dump(const char *msg, volatile struct pxdmm_cmdresp *c) {
+void pxdmm_cmdresp_dump(const char *msg, VOLATILE struct pxdmm_cmdresp *c) {
 	printk("cmdresp: %s: minor [%ld]%u, cmd: [%ld]%u, cmd_flags [%ld]%#x, hasdata: [%ld]%d, dev_id: [%ld]%ld\n"
-			"\t offset [%ld]%llu:[%ld]%llu, status [%ld]%u, mmdev [%ld]%p, io_index [%ld]%u\n",
+			"\t offset [%ld]%llu:[%ld]%llu, csum[%ld]%lu, status [%ld]%u, mmdev [%ld]%p, io_index [%ld]%u\n",
 			msg,
 			____offsetof(struct pxdmm_cmdresp, minor), c->minor,
 			____offsetof(struct pxdmm_cmdresp, cmd), c->cmd,
@@ -135,6 +137,7 @@ void pxdmm_cmdresp_dump(const char *msg, volatile struct pxdmm_cmdresp *c) {
 			____offsetof(struct pxdmm_cmdresp, dev_id), c->dev_id,
 			____offsetof(struct pxdmm_cmdresp, offset), c->offset,
 			____offsetof(struct pxdmm_cmdresp, length), c->length,
+			____offsetof(struct pxdmm_cmdresp, checksum), c->checksum,
 			____offsetof(struct pxdmm_cmdresp, status), c->status,
 			____offsetof(struct pxdmm_cmdresp, dev), (void*) c->dev,
 			____offsetof(struct pxdmm_cmdresp, io_index), c->io_index);
@@ -175,14 +178,14 @@ bool cmdQEmpty(struct pxdmm_mbox *mbox) {
 }
 
 static inline
-volatile struct pxdmm_cmdresp* getCmdQHead(struct pxdmm_mbox *mbox) {
-	volatile struct pxdmm_cmdresp *cmd = getCmdQBase(mbox);
+VOLATILE struct pxdmm_cmdresp* getCmdQHead(struct pxdmm_mbox *mbox) {
+	VOLATILE struct pxdmm_cmdresp *cmd = getCmdQBase(mbox);
 	return &cmd[mbox->cmdHead];
 }
 
 static inline
-volatile struct pxdmm_cmdresp* getCmdQTail(struct pxdmm_mbox *mbox) {
-	volatile struct pxdmm_cmdresp *cmd = getCmdQBase(mbox);
+VOLATILE struct pxdmm_cmdresp* getCmdQTail(struct pxdmm_mbox *mbox) {
+	VOLATILE struct pxdmm_cmdresp *cmd = getCmdQBase(mbox);
 	return &cmd[mbox->cmdTail];
 }
 
@@ -219,14 +222,14 @@ bool respQEmpty(struct pxdmm_mbox *mbox) {
 }
 
 static inline
-volatile struct pxdmm_cmdresp* getRespQHead(struct pxdmm_mbox *mbox) {
-	volatile struct pxdmm_cmdresp *resp = getRespQBase(mbox);
+VOLATILE struct pxdmm_cmdresp* getRespQHead(struct pxdmm_mbox *mbox) {
+	VOLATILE struct pxdmm_cmdresp *resp = getRespQBase(mbox);
 	return &resp[mbox->respHead];
 }
 
 static inline
-volatile struct pxdmm_cmdresp* getRespQTail(struct pxdmm_mbox *mbox) {
-	volatile struct pxdmm_cmdresp *resp = getRespQBase(mbox);
+VOLATILE struct pxdmm_cmdresp* getRespQTail(struct pxdmm_mbox *mbox) {
+	VOLATILE struct pxdmm_cmdresp *resp = getRespQBase(mbox);
 	return &resp[mbox->respTail];
 }
 
@@ -246,5 +249,18 @@ void incrRespQTail(struct pxdmm_mbox *mbox) {
 static inline
 loff_t pxdmm_dataoffset(uint32_t io_index) {
 	return CMDR_SIZE + (io_index * MAXDATASIZE);
+}
+
+static inline
+unsigned long compute_checksum(unsigned long initial, void *_addr, unsigned int len) {
+	unsigned long *addr = _addr;
+	unsigned long csum = initial;
+
+	len /= sizeof(*addr);
+	while (len-- > 0)
+		csum ^= *addr++;
+	csum = ((csum>>1) & 0x55555555)  ^  (csum & 0x55555555);
+
+	return csum;
 }
 #endif /* _PXDMM_H_ */
