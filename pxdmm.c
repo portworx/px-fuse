@@ -47,11 +47,12 @@ STATIC unsigned long pattern[] = {PATTERN1, PATTERN2, PATTERN3, PATTERN4, PATTER
 static inline
 void __fillpage(void *kaddr, unsigned int length) {
 	unsigned int *p = kaddr;
+	uintptr_t random = (uintptr_t) p;
 
 	int nwords = length/4;
 	while (nwords) {
 
-	switch (nwords % 5) {
+	switch (random % 5) {
 	case 0:
 		*p++ = PATTERN1;
 		break;
@@ -68,6 +69,7 @@ void __fillpage(void *kaddr, unsigned int length) {
 		*p++ = PATTERN5;
 		break;
 	}
+		random++;
 		nwords--;
 	}
 }
