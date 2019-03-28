@@ -1,11 +1,12 @@
 #ifndef _PXDMM_H_
 #define _PXDMM_H_
 
-#define NREQUESTS (3)
+#define NREQUESTS (256)
 #define MAXDATASIZE (1<<20)
 #define CMDR_SIZE (8<<20)
 
 #define VOLATILE
+//#define SHOULDFLUSH
 
 #ifdef __KERNEL__
 
@@ -162,7 +163,7 @@ void pxdmm_mbox_init(struct pxdmm_mbox *mbox,
 static inline
 bool cmdQFull(struct pxdmm_mbox *mbox) {
 	uint64_t nextHead;
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(mbox));
 #endif
 	nextHead = (mbox->cmdHead + 1) % NREQUESTS;
@@ -171,7 +172,7 @@ bool cmdQFull(struct pxdmm_mbox *mbox) {
 
 static inline
 bool cmdQEmpty(struct pxdmm_mbox *mbox) {
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(mbox));
 #endif
 	return (mbox->cmdHead == mbox->cmdTail);
@@ -192,7 +193,7 @@ VOLATILE struct pxdmm_cmdresp* getCmdQTail(struct pxdmm_mbox *mbox) {
 static inline
 void incrCmdQHead(struct pxdmm_mbox *mbox) {
 	mbox->cmdHead = (mbox->cmdHead + 1) % NREQUESTS;
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(mbox));
 #endif
 }
@@ -206,7 +207,7 @@ void incrCmdQTail(struct pxdmm_mbox *mbox) {
 static inline
 bool respQFull(struct pxdmm_mbox *mbox) {
 	uint64_t nextHead;
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(mbox));
 #endif
 	nextHead = (mbox->respHead + 1) % NREQUESTS;
@@ -215,7 +216,7 @@ bool respQFull(struct pxdmm_mbox *mbox) {
 
 static inline
 bool respQEmpty(struct pxdmm_mbox *mbox) {
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(mbox));
 #endif
 	return (mbox->respHead == mbox->respTail);
@@ -241,7 +242,7 @@ void incrRespQHead(struct pxdmm_mbox *mbox) {
 static inline
 void incrRespQTail(struct pxdmm_mbox *mbox) {
 	mbox->respTail = (mbox->respTail + 1) % NREQUESTS;
-#ifdef __KERNEL__
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(mbox));
 #endif
 }

@@ -427,13 +427,17 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, un
 			void *buff = kmap_atomic(pg);
 			checksum = compute_checksum(checksum, buff, bvec.bv_len);
 			kunmap_atomic(buff);
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 			flush_dcache_page(pg);
+#endif
 		} else {
 			void *buff = kmap_atomic(pg);
 			__fillpage(buff, length);
 			checksum = compute_checksum(checksum, buff, bvec.bv_len);
 			kunmap_atomic(buff);
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 			flush_dcache_page(pg);
+#endif
 		}
 	}
 #else
@@ -456,13 +460,17 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, un
 			void *buff = kmap_atomic(pg);
 			checksum = compute_checksum(checksum, buff, bvec->bv_len);
 			kunmap_atomic(buff);
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 			flush_dcache_page(pg);
+#endif
 		} else {
 			void *buff = kmap_atomic(pg);
 			__fillpage(buff, length);
 			checksum = compute_checksum(checksum, buff, bvec->bv_len);
 			kunmap_atomic(buff);
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 			flush_dcache_page(pg);
+#endif
 		}
 	}
 #endif
@@ -910,7 +918,9 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	handle->magictail = MAGICTAIL;
 
 	pxdmm_cmdresp_dump("add request:", cmd);
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
 	flush_dcache_page(vmalloc_to_page(cmd));
+#endif
 	incrCmdQHead(udev->mbox);
 
 out:
@@ -1010,7 +1020,9 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 
 	while (!respQEmpty(udev->mbox)) {
 		VOLATILE struct pxdmm_cmdresp *resp = getRespQTail(udev->mbox);
-		//flush_dcache_page(vmalloc_to_page(resp));
+#if defined(__KERNEL__) && defined(SHOULDFLUSH)
+		flush_dcache_page(vmalloc_to_page(resp));
+#endif
 		memcpy(&top, (struct pxdmm_cmdresp*) resp, sizeof(top));
 		// increment response tail.
 		printk("[%d] respQTail %p, mbox %p, respOffset %llu, resp Head/Tail %llu:%llu bitmap[%#lx]\n",
