@@ -64,6 +64,7 @@ int getBackingFileHandle(unsigned long dev_id) {
 				perror("backing file open error");
 				exit(1);
 			}
+			//assert (ftruncate(fd, 2 << 30) == 0); // 2 GB file
 			bkFd[i].fd = fd;
 			bkFd[i].dev_id = dev_id;
 			return fd;
@@ -182,7 +183,7 @@ int pxdmm_read_request (struct pxdmm_mbox *mbox, struct pxdmm_cmdresp *req) {
 }
 
 int pxdmm_process_request (struct pxdmm_cmdresp *req) {
-#if 0
+#if 1
 	int fd;
 	
 	fd = getBackingFileHandle(req->dev_id);
@@ -192,25 +193,24 @@ int pxdmm_process_request (struct pxdmm_cmdresp *req) {
 
 	switch (req->cmd) {
 	case PXD_WRITE:
-		if (req->cmd_flags & PXD_FLAGS_FLUSH) {
-			fsync(fd);
-		} else {
-			if (lseek(fd, req->offset, SEEK_SET) != req->offset) {
-				perror("file offset set fail");
+		if (lseek(fd, req->offset, SEEK_SET) != req->offset) {
+			perror("file offset set fail");
+			exit(1);
+		}
+
+		while (progress != req->length) {
+			ssize_t rc = write(fd, databuff, pending);
+			if (rc < 0) {
+				perror("write failed");
 				exit(1);
 			}
 
-			while (progress != pending) {
-				ssize_t rc = write(fd, databuff, pending);
-				if (rc < 0) {
-					perror("write failed");
-					exit(1);
-				}
-
-				pending -= rc;
-				progress += rc;
-				databuff += rc;
-			}
+			pending -= rc;
+			progress += rc;
+			databuff += rc;
+		}
+		if (req->cmd_flags & PXD_FLAGS_FLUSH) {
+			fsync(fd);
 		}
 		break;
 	case PXD_READ:
@@ -219,11 +219,15 @@ int pxdmm_process_request (struct pxdmm_cmdresp *req) {
 			exit(1);
 		}
 
-		while (progress != pending) {
+		while (progress != req->length) {
 			ssize_t rc = read(fd, databuff, pending);
 			if (rc < 0) {
 				perror("read failed");
 				exit(1);
+			}
+			if (rc == 0) {
+				memset(databuff, 0, pending);
+				break; // end of file
 			}
 			pending -= rc;
 			progress += rc;
