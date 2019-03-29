@@ -35,44 +35,6 @@
 //#define DBGMODE
 
 static struct page *apage, *bpage;
-#define PATTERN1 0xDEADBEEF
-#define PATTERN2 0xBAADBABE
-#define PATTERN3 0xCAFECAFE
-#define PATTERN4 0xDEEDF00F
-#define PATTERN5 0xA5A5A5A5
-
-STATIC unsigned long pattern[] = {PATTERN1, PATTERN2, PATTERN3, PATTERN4, PATTERN5};
-#define NPATTERNS (sizeof(pattern)/sizeof(unsigned long))
-
-static inline
-void __fillpage(void *kaddr, unsigned int length) {
-	unsigned int *p = kaddr;
-	uintptr_t random = ((uintptr_t) &p >> 12); // hi order on stack addr for randomness
-
-	int nwords = length/4;
-	while (nwords) {
-
-	switch (random % 5) {
-	case 0:
-		*p++ = PATTERN1;
-		break;
-	case 1:
-		*p++ = PATTERN2;
-		break;
-	case 2:
-		*p++ = PATTERN3;
-		break;
-	case 3:
-		*p++ = PATTERN4;
-		break;
-	case 4:
-		*p++ = PATTERN5;
-		break;
-	}
-		random++;
-		nwords--;
-	}
-}
 
 static inline
 void fillpage (struct page *pg) {
