@@ -277,7 +277,7 @@ void __fillpage(void *kaddr, unsigned int length) {
 	unsigned int *p = kaddr;
 	uintptr_t random = ((uintptr_t) &p >> 12); // hi order on stack addr for randomness
 
-	int nwords = length/4;
+	int nwords = length/sizeof(unsigned int);
 	while (nwords) {
 
 		switch (random % 5) {
