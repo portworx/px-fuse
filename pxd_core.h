@@ -63,4 +63,12 @@ blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 #else
 void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 #endif
+/** Device identification passed from kernel on initialization */
+struct pxd_dev_id {
+	uint32_t local_minor; 	/**< minor number assigned by kernel */
+	uint32_t pad;
+	uint64_t dev_id;	/**< global device id */
+	uint64_t size;		/**< device size known by kernel in bytes */
+};
+
 #endif /* _PXD_CORE_H_ */

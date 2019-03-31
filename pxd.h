@@ -55,14 +55,6 @@ enum pxd_opcode {
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
 
-/** Device identification passed from kernel on initialization */
-struct pxd_dev_id {
-	uint32_t local_minor; 	/**< minor number assigned by kernel */
-	uint32_t pad;
-	uint64_t dev_id;	/**< global device id */
-	uint64_t size;		/**< device size known by kernel in bytes */
-};
-
 /**
  * PXD_INIT message passed from kernel.
  *

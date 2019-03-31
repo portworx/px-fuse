@@ -630,6 +630,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (!disk)
 		return;
 
+	pxdmm_cleanup_dev(pxd_dev);
 	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
@@ -683,8 +684,15 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	if (err)
 		goto out_id;
 
+	err = pxdmm_init_dev(pxd_dev);
+	if (err) {
+		pxd_fastpath_cleanup(pxd_dev);
+		goto out_id;
+	}
+
 	err = pxd_init_disk(pxd_dev, add);
 	if (err) {
+		pxdmm_cleanup_dev(pxd_dev);
 		pxd_fastpath_cleanup(pxd_dev);
 		goto out_id;
 	}
@@ -709,8 +717,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	spin_unlock(&ctx->lock);
 
 	add_disk(pxd_dev->disk);
-
-	pxdmm_init_dev(pxd_dev);
 
 	return pxd_dev->minor;
 
@@ -758,6 +764,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
+	pxdmm_cleanup_dev(pxd_dev);
 	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->removing = true;
 

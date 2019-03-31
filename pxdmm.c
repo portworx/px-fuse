@@ -88,21 +88,25 @@ struct pxdmm_dev {
 	struct pxdmm_mbox *mbox;
 	struct pxdmm_cmdresp *cmdQ;
 	struct pxdmm_cmdresp *respQ;
+	struct pxd_dev_id *devList;
 	void *dataWindow;
 
 	uint64_t mboxLength;
 	uint64_t cmdQLength;
 	uint64_t respQLength;
+	uint64_t devListLength;
 	uint64_t dataWindowLength;
 
 	uint64_t totalWindowLength;
-	unsigned long magictail;
 
 	wait_queue_head_t waitQ;
 	struct task_struct *thread;
 
 	wait_queue_head_t serializeQ;
 	atomic_t active;
+
+	unsigned long ndevices;
+	unsigned long magictail;
 };
 
 static inline
@@ -478,7 +482,10 @@ const struct file_operations ctldev_fops = {
 };
 #endif
 #endif
-const struct file_operations ctldev_fops = { .owner = THIS_MODULE};
+
+const struct file_operations ctldev_fops = {
+	.owner = THIS_MODULE,
+};
 
 static struct miscdevice ctldev = {
 	.minor		= MISC_DYNAMIC_MINOR,
@@ -614,6 +621,10 @@ static int pxdmm_dev_init(void) {
 	udev->respQLength = NREQUESTS * sizeof(struct pxdmm_cmdresp);
 	offset += roundup(udev->respQLength, PAGE_SIZE);
 
+	udev->devList = udev->base + offset;
+	udev->devListLength = NMAXDEVICES * sizeof(struct pxd_dev_id);
+	offset += roundup(udev->devListLength, PAGE_SIZE);
+
 	BUG_ON(offset > CMDR_SIZE);
 
 	udev->dataWindowLength = NREQUESTS * MAXDATASIZE;
@@ -632,13 +643,10 @@ static int pxdmm_dev_init(void) {
 			(uint64_t) NREQUESTS,
 			(uint64_t) ((uintptr_t) udev->cmdQ - (uintptr_t) udev->base),
 			(uint64_t) ((uintptr_t) udev->respQ - (uintptr_t) udev->base),
+			(uint64_t) ((uintptr_t) udev->devList - (uintptr_t) udev->base),
 			(uint64_t) CMDR_SIZE);
 
-	printk("mbox init complete... nreqs %llu, cmdOffset %llu, respOffset %llu, dataOffset %llu\n",
-			udev->mbox->queueSize,
-			udev->mbox->cmdOffset,
-			udev->mbox->respOffset,
-			udev->mbox->dataOffset);
+	pxdmm_mbox_dump(udev->mbox);
 
 	// sysfs parent device.
 
@@ -1007,9 +1015,102 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 	return 0;
 }
 
-void pxdmm_init_dev(struct pxd_device *pxd_dev){
+int pxdmm_devlist_add(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
+	struct pxd_dev_id *base = getDeviceListBase(udev->mbox);
+	unsigned long currVer = udev->mbox->devVersion;
+	unsigned long currCsum = udev->mbox->devChecksum;
+	struct pxd_dev_id *newdevice;
+
+	if (udev->ndevices >= NMAXDEVICES) {
+		return -ENOSPC;
+	}
+
+	LOCK_DEVWINDOW(udev->mbox);
+
+	if (udev->ndevices) {
+		unsigned long csum;
+		csum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
+		BUG_ON(csum != currCsum);
+	}
+
+	newdevice = &base[udev->ndevices];
+	memset(newdevice, 0, sizeof(*newdevice));
+
+	newdevice->local_minor = pxd_dev->minor;
+	newdevice->dev_id = pxd_dev->dev_id;
+	newdevice->size = pxd_dev->size;
+
+	udev->ndevices++;
+	udev->mbox->devChecksum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
+	udev->mbox->ndevices = udev->ndevices;
+
+	UNLOCK_DEVWINDOW(udev->mbox, currVer+1);
+	return 0;
+}
+
+int pxdmm_devlist_remove(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
+	struct pxd_dev_id *base = getDeviceListBase(udev->mbox);
+	const int maxSize = NMAXDEVICES * sizeof(struct pxd_dev_id);
+	unsigned long currVer = udev->mbox->devVersion;
+	unsigned long currCsum = udev->mbox->devChecksum;
+
+	struct pxd_dev_id *tmp, *dst, *scratch;
+	bool found = false;
+	int i;
+
+	dst = scratch = (struct pxd_dev_id*) kzalloc(GFP_KERNEL, maxSize);
+	if (!scratch) {
+		return -ENOMEM;
+	}
+
+	LOCK_DEVWINDOW(udev->mbox);
+
+	if (udev->ndevices) {
+		unsigned long csum;
+		csum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
+		BUG_ON(csum != currCsum);
+	}
+
+	for (i=0; i<udev->ndevices; i++) {
+		tmp = &base[i];
+
+		if (!found && tmp->local_minor == pxd_dev->minor &&
+				tmp->dev_id == pxd_dev->dev_id) {
+			/* found the item to be deleted */
+			found = true;
+			continue;
+		}
+		memcpy(dst, tmp, sizeof(*tmp));
+		dst++;
+	}
+
+	if (found) {
+		udev->ndevices--;
+		if (udev->ndevices) {
+			memcpy(base, scratch, sizeof(struct pxd_dev_id) * udev->ndevices);
+			udev->mbox->devChecksum =
+				compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
+		} else {
+			udev->mbox->devChecksum = 0;
+		}
+		udev->mbox->ndevices = udev->ndevices;
+		UNLOCK_DEVWINDOW(udev->mbox, currVer+1);
+	} else {
+		UNLOCK_DEVWINDOW(udev->mbox, currVer);
+	}
+	kfree(scratch);
+	return 0;
+}
+
+
+int pxdmm_init_dev(struct pxd_device *pxd_dev){
 	// assign global pxdmm_dev to all pxd_devices for now
 	pxd_dev->mmdev = udev;
+	return pxdmm_devlist_add(udev, pxd_dev);
+}
+
+int pxdmm_cleanup_dev(struct pxd_device *pxd_dev) {
+	return pxdmm_devlist_remove(pxd_dev->mmdev, pxd_dev);
 }
 
 static

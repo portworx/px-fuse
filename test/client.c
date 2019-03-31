@@ -92,6 +92,7 @@ void closeBackingFileHandles(void) {
 int cdevfd;
 void *maddr;
 void *commonDataBuffer;
+struct pxd_dev_id devices[10];
 
 #define ull unsigned long long
 uintptr_t base;
@@ -299,6 +300,7 @@ int main(int argc, char *argv[]) {
   char buffer[128];
   int iter;
   struct pxdmm_cmdresp req;
+  int devcount;
 
   printf("arg count = %d\n", argc);
 
@@ -346,7 +348,20 @@ int main(int argc, char *argv[]) {
   commonDataBuffer = malloc(MAXDATASIZE);
   assert(commonDataBuffer != NULL);
 
+  printf("device count: %d\n",getDeviceCount(mbox));
+
+  devcount = getDevices(mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
+  pxdmm_devices_dump(devices, devcount);
+  printf("sanitizeChecksum: %d\n", sanitizeDeviceList(mbox, devices, devcount));
+
   while (true) {
+	  if (devcount != getDeviceCount(mbox)) {
+		/* device listing changed */
+		devcount = getDevices(mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
+		pxdmm_devices_dump(devices, devcount);
+		printf("sanitizeChecksum: %d\n", sanitizeDeviceList(mbox, devices, devcount));
+	  }
+
 	  // 1. read for any new requests, if none, sleep a while
 	  // 2. read request and acknowledge the mbox after picking it.
 	  if (pxdmm_read_request(mbox, &req)) {
