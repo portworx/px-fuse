@@ -22,20 +22,6 @@
 //#define CONTROLDEV "/dev/pxdmm-control"
 #define CONTROLDEV "/dev/uio0"
 
-/** fuse opcodes */
-enum pxd_opcode {
-    PXD_INIT = 8192,    /**< send on device open from kernel */
-    PXD_WRITE,          /**< write to device */
-    PXD_READ,           /**< read from device */
-    PXD_DISCARD,        /**< discard blocks */
-    PXD_ADD,            /**< add device to kernel */
-    PXD_REMOVE,         /**< remove device from kernel */
-    PXD_READ_DATA,      /**< read data from kernel */
-    PXD_UPDATE_SIZE,    /**< update device size */
-    PXD_WRITE_SAME,     /**< write_same operation */
-    PXD_LAST,
-};
-
 /** flags set by driver */
 #define PXD_FLAGS_FLUSH 0x1 /**< REQ_FLUSH set on bio */
 #define PXD_FLAGS_FUA   0x2 /**< REQ_FUA set on bio */

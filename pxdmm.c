@@ -980,6 +980,19 @@ out:
 	return bio;
 }
 
+static
+int __pxdmm_add_device (VOLATILE struct pxdmm_cmdresp* req) {
+	printk("TODO: __pxdmm_add_device: dev_id %lu, size %llu discard %lu qdepth %u\n",
+		req->dev_id, req->length, req->discardSize, req->qdepth);
+	return 0;
+}
+
+static
+int __pxdmm_rm_device (VOLATILE struct pxdmm_cmdresp* req) {
+	printk("TODO: __pxdmm_rm_device: dev_id %lu\n", req->dev_id);
+	return 0;
+}
+
 int pxdmm_complete_request (struct pxdmm_dev *udev) {
 	struct pxdmm_cmdresp top;
 	int status;
@@ -1003,6 +1016,24 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 			udev->io_index[0]);
 
 		incrRespQTail(udev->mbox);
+
+		/* special commands */
+		if (top.io_index == NREQUESTS) {
+			switch (top.cmd) {
+			case PXD_ADD:
+				/* create a new device */
+				__pxdmm_add_device(&top);
+				break;
+			case PXD_REMOVE:
+				/* remove an existing device */
+				__pxdmm_rm_device(&top);
+				break;
+			default:
+				break;
+			}
+			continue;
+		}
+
 
 		bio = __pxdmm_complete_request(&top, &status);
 		printk("completing[%u]: cmd %d, BIO %p with status %u\n",

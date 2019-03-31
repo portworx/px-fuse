@@ -84,6 +84,20 @@ void pxdmm_make_request_slowpath(struct request_queue *q, struct bio *bio);
 
 #else
 
+/** fuse opcodes */
+enum pxd_opcode {
+    PXD_INIT = 8192,    /**< send on device open from kernel */
+    PXD_WRITE,          /**< write to device */
+    PXD_READ,           /**< read from device */
+    PXD_DISCARD,        /**< discard blocks */
+    PXD_ADD,            /**< add device to kernel */
+    PXD_REMOVE,         /**< remove device from kernel */
+    PXD_READ_DATA,      /**< read data from kernel */
+    PXD_UPDATE_SIZE,    /**< update device size */
+    PXD_WRITE_SAME,     /**< write_same operation */
+    PXD_LAST,
+};
+
 typedef int bool;
 #define true (1)
 #define false (!true)
@@ -99,13 +113,20 @@ struct pxdmm_cmdresp {
 	unsigned long dev_id;
 
 	loff_t offset;
-	loff_t length;
+	loff_t length; // also: pxd_add arg for size of device
 
-	unsigned long checksum;
-	uint32_t status;
+	union {
+		unsigned long checksum;
+		unsigned long discardSize; // pxd_add arg
+	};
+
+	union {
+		uint32_t status;
+		uint32_t qdepth; // pxd_add arg
+	};
 
 	// below 2 fields should be passed as is.
-	uint32_t io_index;
+	uint32_t io_index; // == NREQUESTS are special cmds
 	uintptr_t dev; // the pxdmm_dev used for this xfer
 } __attribute__((aligned(64)));
 
@@ -374,6 +395,43 @@ void incrRespQTail(struct pxdmm_mbox *mbox) {
 static inline
 loff_t pxdmm_dataoffset(uint32_t io_index) {
 	return CMDR_SIZE + (io_index * MAXDATASIZE);
+}
+
+/* special commands, from userspace to kernel */
+static inline
+int pxdmm_add_device(struct pxdmm_mbox *mbox,
+		unsigned long dev_id, loff_t size, uint32_t discardsize, uint32_t qdepth) {
+	VOLATILE struct pxdmm_cmdresp* req = getRespQHead(mbox);
+
+	memset(req, 0, sizeof(*req));
+
+	req->io_index = NREQUESTS; // special req tag
+
+	req->cmd = PXD_ADD;
+	req->dev_id = dev_id;
+	req->length = size;
+	req->discardSize = discardsize;
+	req->qdepth = qdepth;
+
+	incrRespQHead(mbox);
+
+	return 0;
+}
+
+static inline
+int pxdmm_rm_device(struct pxdmm_mbox *mbox,
+		unsigned long dev_id) {
+	VOLATILE struct pxdmm_cmdresp* req = getRespQHead(mbox);
+
+	memset(req, 0, sizeof(*req));
+
+	req->io_index = NREQUESTS; // special req tag
+
+	req->cmd = PXD_REMOVE;
+	req->dev_id = dev_id;
+
+	incrRespQHead(mbox);
+	return 0;
 }
 
 #endif /* _PXDMM_H_ */
