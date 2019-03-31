@@ -13,6 +13,7 @@ but entire data copy totally. pxduio is one such implementation using constructs
 which when mapped to a userspace process, can do all of the above actions without context switches and actual data copy.
 
 Dependencies:
+-------------
 	The pxduio kernel module is an extension to px-fuse, and is dependent on uio kernel module as well. 
 lns@pwxbuild:~/srcs/src/github.com/portworx/px-fuse$ lsmod | grep px
 px                     69632  2
@@ -53,6 +54,7 @@ drwxr-xr-x 4 root root    0 Mar 28 14:51 uio0
 -rw-r--r-- 1 root root 4096 Mar 28 17:11 unmap
 
 Proof of concept:
+------------------
 Linux generic UIO module, needs a real device to be exposed through uio. Usually a pci/pcie device gets registered with linux uio module to be exposed through
 memory mapping. But in this case, similar to px-fuse implementation of /dev/pxd/pxd-control, a new misc device /dev/pxdmm-control is
 created. This is mapped as the real device for linux uio module to expose outside. The usual logic for virtual px user volumes under /dev/pxd/pxd<uniq>
@@ -74,7 +76,8 @@ A single memory window is registered for the device, that holds the following re
 a) mailbox
 b) cmd registers, a pre-allocated ring structure
 c) response register, a pre-allocated ring structure
-d) data buffers.
+d) devices window, a listing of all virtual block devices managed by that control device
+e) data buffers.
 
 Mailbox: This is a small fixed memory region from offset zero, that defines key parameters that allow userspace application
 to find correct offsets for the other regions. It defines maximum number of outstanding requests for exchange,
@@ -101,6 +104,9 @@ is reserved based on the io_index and actual data transfer both ways happens thr
 Ofcourse, since the reservation is fixed upfront, there exists a maximum IO for each request currently set at MAXDATASIZE (1MB).
 Within the kernel, for each IO, the block device bio data pages are remapped to this data region, so the data is fetched and written to the final destination straight away.
 
+Device window: This is a listing of all current px virtual block devices created and managed 
+by the kernel driver.
+
 Current PoC state:
 1) A simple userspace application waits for new requests, pulls them out of the cmd ring, does a crc checksum on the mapped data,
 and confirms that the checksum matches to the request, and completes the request by writing a response to the response ring.
@@ -123,8 +129,11 @@ Memory layout and various regions:
 +           + |
 + cmd region+ |
 +++++++++++++ This first CMDR_SIZE (8MB) region is reserved and holds
-+ response  + metadata regions (mailbox, cmd and response regions)
++ response  + metadata regions (mailbox, cmd and response regions and devices listing)
 + region    + |
++++++++++++++ |
++           + |
++  devices  + |
 +++++++++++++ |
 +           + |
 +  hole     + V
@@ -146,17 +155,28 @@ Data structures:
 -----------------
 mailbox:
 struct pxdmm_mbox {
-        const uint64_t queueSize; // const
+        const uint64_t queueSize;
         const uint64_t cmdOffset;
         const uint64_t respOffset;
+        const uint64_t devOffset;
         const uint64_t dataOffset;
+
+        // device list window parameters
+        unsigned long devChecksum;
+#ifdef __KERNEL__
+#define LOCK_DEVWINDOW(mbox)  ((mbox)->devVersion = 0)
+#define UNLOCK_DEVWINDOW(mbox,v)  ((mbox)->devVersion = (v))
+#endif
+#define DEVWINDOW_LOCKED(mbox)  ((mbox)->devVersion == 0)
+#define DEVWINDOW_VERSION(mbox)  ((mbox)->devVersion)
+        unsigned long devVersion;
+        unsigned long ndevices;
 
         uint64_t cmdHead __attribute__((aligned(64)));
         uint64_t cmdTail __attribute__((aligned(64)));
         uint64_t respHead __attribute__((aligned(64)));
         uint64_t respTail __attribute__((aligned(64)));
 } __attribute__((aligned(64)));
-
 
 Common command and response structure:
 struct pxdmm_cmdresp {
@@ -187,6 +207,7 @@ loff_t pxdmm_dataoffset(uint32_t io_index) {
 Constants of interest that defines the entire memory window:
 #define NREQUESTS (256)
 #define MAXDATASIZE (1<<20)
+#define NMAXDEVICES (256)
 #define CMDR_SIZE (8<<20)
 
 In all for the above constants, a total of 8MB + 256MB (264MB) is needed for each control device.
