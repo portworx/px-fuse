@@ -558,6 +558,8 @@ int pxdmm_remove_one(struct pxd_device *pxd_dev, struct pxd_remove_out *remove) 
 		return -EBUSY;
 	}
 
+printk("pxdmm_remove_one dev_id %llu calling free_disk\n",
+		pxd_dev->dev_id);
 	pxd_free_disk(pxd_dev);
 	pxd_dev->removing = true;
 
@@ -616,20 +618,19 @@ printk("pxdmm_add for dev_id %llu, calling pxdmm_add_one...\n", add->dev_id);
 		goto out_module;
 	}
 
-printk("pxdmm_add for dev_id %llu, calling pxdmm_init_dev...\n", add->dev_id);
-	err = pxdmm_init_dev(pxd_dev);
-	if (err) {
-		goto out_disk;
-	}
-
 printk("pxdmm_add for dev_id %llu, looking for existing.. \n", add->dev_id);
 	spin_lock(&udev->lock);
 	/* remove placeholder and replace with correct device */
 	list_del(&placeholder.node);
 printk("pxdmm_add for dev_id %llu, unique add to bus.. \n", add->dev_id);
 	list_add(&pxd_dev->node, &udev->list);
-	pxd_dev->mmdev = udev; // currently mapping all devices to global udev
 	spin_unlock(&udev->lock);
+
+printk("pxdmm_add for dev_id %llu, calling pxdmm_init_dev...\n", add->dev_id);
+	err = pxdmm_init_dev(pxd_dev);
+	if (err) {
+		goto out_disk;
+	}
 
 printk("pxdmm_add for dev_id %llu, finished with minor %u.. \n",
 		add->dev_id, pxd_dev->minor);
@@ -660,7 +661,7 @@ ssize_t pxdmm_remove(struct pxdmm_dev *udev, struct pxd_remove_out *remove)
 			spin_lock(&pxd_dev->lock);
 			if (!pxd_dev->open_count || remove->force) {
 				list_del(&pxd_dev->node);
-				--udev->ndevices;
+				udev->ndevices--;
 			}
 			found = true;
 			break;
@@ -1318,87 +1319,34 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 	return 0;
 }
 
-int pxdmm_devlist_add(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
+int pxdmm_devlist_refresh(struct pxdmm_dev *udev) {
+	struct pxd_device *pxd_dev_itr;
 	struct pxd_dev_id *base = getDeviceListBase(udev->mbox);
 	unsigned long currVer = udev->mbox->devVersion;
-	unsigned long currCsum = udev->mbox->devChecksum;
-	struct pxd_dev_id *newdevice;
-	unsigned long nextVer = currVer + 1;
-
-	if (udev->ndevices >= NMAXDEVICES) {
-		return -ENOSPC;
-	}
-	if (!nextVer) nextVer++; // handle overflow
-
-	LOCK_DEVWINDOW(udev->mbox);
-
-	if (udev->ndevices) {
-		unsigned long csum;
-		csum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
-		BUG_ON(csum != currCsum);
-	}
-
-	newdevice = &base[udev->ndevices];
-	memset(newdevice, 0, sizeof(*newdevice));
-
-	newdevice->local_minor = pxd_dev->minor;
-	newdevice->dev_id = pxd_dev->dev_id;
-	newdevice->size = pxd_dev->size;
-
-	udev->ndevices++;
-	udev->mbox->devChecksum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
-	udev->mbox->ndevices = udev->ndevices;
-
-	UNLOCK_DEVWINDOW(udev->mbox, nextVer);
-	return 0;
-}
-
-int pxdmm_devlist_remove(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
-	struct pxd_dev_id *base = getDeviceListBase(udev->mbox);
-	unsigned long currVer = udev->mbox->devVersion;
-	unsigned long currCsum = udev->mbox->devChecksum;
 	unsigned long nextVer = currVer+1;
-	struct pxd_dev_id *tmp;
-	bool found = false;
-	int i;
+	int i = 0;
 
 	if (!nextVer) nextVer++; // handle overflow
 
 	LOCK_DEVWINDOW(udev->mbox);
 
-	if (udev->ndevices) {
-		unsigned long csum;
-		csum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
-		BUG_ON(csum != currCsum);
+	spin_lock(&udev->lock);
+	list_for_each_entry(pxd_dev_itr, &udev->list, node) {
+		base[i].local_minor = pxd_dev_itr->minor;
+		base[i].pad = 0;
+		base[i].dev_id = pxd_dev_itr->dev_id;
+		base[i].size = pxd_dev_itr->size;
+		i++;
 	}
+	udev->ndevices = i;
+	spin_unlock(&udev->lock);
 
-	for (i=0; i<udev->ndevices; i++) {
-		tmp = &base[i];
+	udev->mbox->ndevices = udev->ndevices;
+	udev->mbox->devChecksum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
+	UNLOCK_DEVWINDOW(udev->mbox, nextVer);
 
-		if (!found && tmp->local_minor == pxd_dev->minor &&
-				tmp->dev_id == pxd_dev->dev_id) {
-			/* found the item to be deleted */
-			found = true;
-			break;
-		}
-	}
+	printk("pxdmm refreshed devwindow: %lu devices\n", udev->ndevices);
 
-	if (found) {
-		if (udev->ndevices) {
-			for (;i<udev->ndevices; i++) {
-				base[i] = base[i+1]; // overwrite and compact entries
-			}
-			udev->ndevices--;
-			udev->mbox->devChecksum =
-				compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
-		} else {
-			udev->mbox->devChecksum = 0;
-		}
-		udev->mbox->ndevices = udev->ndevices;
-		UNLOCK_DEVWINDOW(udev->mbox, nextVer);
-	} else {
-		UNLOCK_DEVWINDOW(udev->mbox, currVer);
-	}
 	return 0;
 }
 
@@ -1406,11 +1354,14 @@ int pxdmm_devlist_remove(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
 int pxdmm_init_dev(struct pxd_device *pxd_dev){
 	// assign global pxdmm_dev to all pxd_devices for now
 	pxd_dev->mmdev = udev;
-	return pxdmm_devlist_add(udev, pxd_dev);
+	return pxdmm_devlist_refresh(pxd_dev->mmdev);
 }
 
 int pxdmm_cleanup_dev(struct pxd_device *pxd_dev) {
-	return pxdmm_devlist_remove(pxd_dev->mmdev, pxd_dev);
+	printk("Inside pxdmm_cleanup_dev for dev_id %llu\n", pxd_dev->dev_id);
+	if (pxd_dev->mmdev)
+		return pxdmm_devlist_refresh(pxd_dev->mmdev);
+	return 0;
 }
 
 static

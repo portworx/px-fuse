@@ -11,7 +11,6 @@
 #include <assert.h>
 
 #include "pxdmm.h"
-#define CONTROL_DEV_BASE "/sys/devices/pxdmm/misc/pxdmm-control/uio0/maps/map0/"
 //#define DEFPATH "/var/.px/0/690901662210331304/pxdev"
 //
 #define MMADDR "addr"
@@ -19,8 +18,33 @@
 #define MMSIZE "size"
 #define MMNAME "name"
 
-//#define CONTROLDEV "/dev/pxdmm-control"
-#define CONTROLDEV "/dev/uio0"
+#define CTLDEV "/dev/pxdmm-control"
+#define UIO_PARAMS_BASE "/sys/devices/pxdmm/misc/pxdmm-control/uio0/maps/map0/"
+#define UIODEV "/dev/uio0"
+
+static
+int readfile(char *path, char *buffer, int length) {
+	int fd;
+	int err;
+
+	memset(buffer, 0, length);
+
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		perror("file open error");
+		return -1;
+	}
+
+	err = read(fd, buffer, length);
+	if (err < 0) {
+		perror("read error");
+		return -1;
+	}
+
+	printf("from path %s\nread %d bytes\ncontent: %s\n", path, err, buffer);
+	close(fd);
+	return err;
+}
 
 /**
  * PXD_ADD request from user space
@@ -102,17 +126,81 @@ void closeBackingFileHandles(void) {
 	}
 }
 
-int cdevfd;
-void *maddr;
-void *commonDataBuffer;
-struct pxd_dev_id devices[10];
-
 #define ull unsigned long long
-uintptr_t base;
-ull size;
-ull offset;
+struct pxdmm_client {
+	char name[128];
+	uintptr_t base;
+	ull size;
+	ull offset;
 
-struct pxdmm_mbox *mbox;
+	int uiodevfd;
+	void *maddr;
+	struct pxdmm_mbox *mbox;
+	void *commonDataBuffer;
+};
+
+static
+int pxdmm_client_init(struct pxdmm_client *client,
+		char *paramsbase, char *uiodev) {
+  char path[128];
+  char buffer[128];
+  int rc;
+
+  sprintf(path, "%s%s", paramsbase, MMNAME);
+  rc = readfile(path, buffer, sizeof(buffer));
+  if (rc < 0) exit (rc);
+  strncpy(client->name, path, sizeof(client->name)-1);
+  client->name[sizeof(client->name)-1] = 0;
+
+  sprintf(path, "%s%s", paramsbase, MMADDR);
+  rc = readfile(path, buffer, sizeof(buffer));
+  if (rc < 0) exit (rc);
+  client->base = strtoull(buffer, NULL, 0);
+
+  sprintf(path, "%s%s", paramsbase, MMOFFSET);
+  rc = readfile(path, buffer, sizeof(buffer));
+  if (rc < 0) exit (rc);
+  client->offset = strtoull(buffer, NULL, 0);
+
+  sprintf(path, "%s%s", paramsbase, MMSIZE);
+  rc = readfile(path, buffer, sizeof(buffer));
+  if (rc < 0) exit (rc);
+  client->size = strtoull(buffer, NULL, 0);
+
+  printf("Base address: %#lx\n", client->base);
+  printf("Offset: %llu\n", client->offset);
+  printf("Size: %llu\n", client->size);
+
+  client->uiodevfd = open(uiodev, O_RDWR);
+  if (client->uiodevfd < 0) {
+	  perror("control device open failure");
+	  exit(client->uiodevfd);
+  }
+
+  client->maddr =
+	  mmap((void*)client->base, client->size, PROT_WRITE, MAP_SHARED, client->uiodevfd, client->offset);
+  if (client->maddr == MAP_FAILED) {
+	  perror("mmap failed on control device");
+	  close(client->uiodevfd);
+	  exit(-1);
+  }
+
+  client->mbox = (struct pxdmm_mbox*) client->maddr;
+
+  pxdmm_mbox_dump(client->mbox);
+
+  client->commonDataBuffer = malloc(MAXDATASIZE);
+  assert(client->commonDataBuffer != NULL);
+
+  return 0;
+}
+
+static
+void pxdmm_client_exit(struct pxdmm_client *client) {
+	if (client->commonDataBuffer) free(client->commonDataBuffer);
+  	munmap((void*)client->maddr, client->size);
+	close(client->uiodevfd);
+}
 
 void initiate_mapping(int dbi) {
 	int fd, rc, len;
@@ -158,29 +246,6 @@ void clear_mapping(int dbi) {
 	close(fd);
 }
 
-int readfile(char *path, char *buffer, int length) {
-	int fd;
-	int err;
-
-	memset(buffer, 0, length);
-
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
-		perror("file open error");
-		return -1;
-	}
-
-	err = read(fd, buffer, length);
-	if (err < 0) {
-		perror("read error");
-		return -1;
-	}
-
-	printf("from path %s\nread %d bytes\ncontent: %s\n", path, err, buffer);
-	close(fd);
-	return err;
-}
-
 int pxdmm_read_request (struct pxdmm_mbox *mbox, struct pxdmm_cmdresp *req) {
 	struct pxdmm_cmdresp *top;
 	if (cmdQEmpty(mbox)) {
@@ -196,12 +261,10 @@ int pxdmm_read_request (struct pxdmm_mbox *mbox, struct pxdmm_cmdresp *req) {
 	return 0;
 }
 
-int pxdmm_process_request (struct pxdmm_cmdresp *req) {
-#if 1
-	int fd;
-	
-	fd = getBackingFileHandle(req->dev_id);
-	void *databuff = maddr + pxdmm_dataoffset(req->io_index);
+int pxdmm_process_request (struct pxdmm_client *client,
+		struct pxdmm_cmdresp *req) {
+	int fd = getBackingFileHandle(req->dev_id);
+	void *databuff = client->maddr + pxdmm_dataoffset(req->io_index);
 	ssize_t progress = 0;
 	ssize_t pending = req->length;
 
@@ -249,51 +312,6 @@ int pxdmm_process_request (struct pxdmm_cmdresp *req) {
 		}
 		break;
 	}
-#else
-	switch (req->cmd) {
-	case PXD_WRITE:
-		{
-			void *datasrc = maddr + pxdmm_dataoffset(req->io_index);
-			unsigned long csum;
-
-		if (req->cmd_flags & PXD_FLAGS_FLUSH) {
-			printf("write-flush: offset %lu, length %lu, csum %lu hasdata %d\n",
-					req->offset, req->length, req->checksum, req->hasdata);
-		} else {
-			printf("[%u] %p: write: offset %lu, length %lu, csum %lu, hasdata %d\n",
-					req->io_index, datasrc, req->offset, req->length, req->checksum, req->hasdata);
-		}
-
-		memcpy(commonDataBuffer, datasrc, req->length);
-		csum = compute_checksum(0, commonDataBuffer, req->length);
-		assert(csum == req->checksum);
-
-		printf("copy done\n");
-
-		}
-		break;
-	case PXD_READ:
-		{
-			void *datasrc = maddr + pxdmm_dataoffset(req->io_index);
-			unsigned long csum;
-
-			printf("read: offset %lu, length %lu with csum %lu\n",
-					req->offset, req->length, req->checksum);
-
-			memcpy(commonDataBuffer, datasrc, req->length);
-			csum = compute_checksum(0, commonDataBuffer, req->length);
-			assert(csum == req->checksum);
-
-			// fill in some dummy data... and update checksum within kernel
-			__fillpage_pattern(datasrc, PATTERN1, req->length);
-			csum = compute_checksum(0, datasrc, req->length);
-			req->checksum = csum;
-			break;
-		}
-	default:
-		printf("default: cmd %#x\n", req->cmd);
-	}
-#endif
 	return 0;
 }
 
@@ -308,68 +326,23 @@ int pxdmm_complete_request (struct pxdmm_mbox* mbox, struct pxdmm_cmdresp *req) 
 }
 
 int main(int argc, char *argv[]) {
-  int rc;
-  char path[128];
-  char buffer[128];
-  int iter;
   struct pxdmm_cmdresp req;
   int devcount;
+  struct pxd_dev_id devices[10];
+  struct pxdmm_client client;
 
   printf("arg count = %d\n", argc);
-
-  sprintf(path, "%s%s", CONTROL_DEV_BASE, MMNAME);
-  rc = readfile(path, buffer, sizeof(buffer));
-  if (rc < 0) exit (rc);
-
-  sprintf(path, "%s%s", CONTROL_DEV_BASE, MMADDR);
-  rc = readfile(path, buffer, sizeof(buffer));
-  if (rc < 0) exit (rc);
-  base = strtoull(buffer, NULL, 0);
-
-  sprintf(path, "%s%s", CONTROL_DEV_BASE, MMOFFSET);
-  rc = readfile(path, buffer, sizeof(buffer));
-  if (rc < 0) exit (rc);
-  offset = strtoull(buffer, NULL, 0);
-
-  sprintf(path, "%s%s", CONTROL_DEV_BASE, MMSIZE);
-  rc = readfile(path, buffer, sizeof(buffer));
-  if (rc < 0) exit (rc);
-  size = strtoull(buffer, NULL, 0);
-
-  printf("Base address: %#lx\n", base);
-  printf("Offset: %llu\n", offset);
-  printf("Size: %llu\n", size);
-
-  cdevfd = open(CONTROLDEV, O_RDWR);
-  if (cdevfd < 0) {
-	  perror("control device open failure");
-	  exit(cdevfd);
-  }
-
-  maddr = mmap((void*)base, size, PROT_WRITE, MAP_SHARED, cdevfd, offset);
-  if (maddr == MAP_FAILED) {
-	  perror("mmap failed on control device");
-	  close(cdevfd);
-	  exit(-1);
-  }
-
-  mbox = (struct pxdmm_mbox*) maddr;
-  pxdmm_mbox_dump(mbox);
-
+  assert(pxdmm_client_init(&client, UIO_PARAMS_BASE, UIODEV) == 0);
   printf("sizeof(pxdmm_cmdresp): %ld\n", sizeof(struct pxdmm_cmdresp));
+  printf("device count: %d\n", getDeviceCount(client.mbox));
 
-  commonDataBuffer = malloc(MAXDATASIZE);
-  assert(commonDataBuffer != NULL);
-
-  printf("device count: %d\n",getDeviceCount(mbox));
-
-  devcount = getDevices(mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
+  devcount = getDevices(client.mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
   pxdmm_devices_dump(devices, devcount);
-  printf("sanitizeChecksum: %d\n", sanitizeDeviceList(mbox, devices, devcount));
+  printf("sanitizeChecksum: %d\n", sanitizeDeviceList(client.mbox, devices, devcount));
 
   printf("***** checking ioctl *********\n");
   {
-	int _fd=open("/dev/pxdmm-control", O_RDWR);
+	int _fd=open(CTLDEV, O_RDWR);
 	int rc;
 	struct pxd_add_out add;
 	struct pxd_remove_out remove;
@@ -391,46 +364,43 @@ int main(int argc, char *argv[]) {
 	rc=ioctl(_fd, PXD_REMOVE, &remove);
 	printf("Received response code for ioctl %d\n", rc);
 
-#if 0
 	update.dev_id = 3456;
 	update.size = 1<<30;
 	rc=ioctl(_fd, PXD_UPDATE_SIZE, &update);
 	printf("Received response code for ioctl %d\n", rc);
-#endif
 
 	close(_fd);
   }
 
   while (true) {
-	  if (devcount != getDeviceCount(mbox)) {
+	  if (devcount != getDeviceCount(client.mbox)) {
 		/* device listing changed */
-		devcount = getDevices(mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
+		devcount = getDevices(client.mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
 		pxdmm_devices_dump(devices, devcount);
-		printf("sanitizeChecksum: %d\n", sanitizeDeviceList(mbox, devices, devcount));
+		printf("sanitizeChecksum: %d\n",
+				sanitizeDeviceList(client.mbox, devices, devcount));
 	  }
 
 	  // 1. read for any new requests, if none, sleep a while
 	  // 2. read request and acknowledge the mbox after picking it.
-	  if (pxdmm_read_request(mbox, &req)) {
+	  if (pxdmm_read_request(client.mbox, &req)) {
 		  continue;
 	  }
 	  // 3. process request
-	  pxdmm_process_request(&req);
+	  pxdmm_process_request(&client, &req);
 
 	  // 4. check if response q has space available.
-	  while (respQFull(mbox)) {
+	  while (respQFull(client.mbox)) {
 		/* sleep a while */
 		usleep(100);
 		printf("respQ full condition, sleeping..\n");
 	  }
 	  // 4. complete it
-	  pxdmm_complete_request(mbox, &req);
+	  pxdmm_complete_request(client.mbox, &req);
   }
 
-  free(commonDataBuffer);
   closeBackingFileHandles();
-  munmap((void*)maddr, size);
-  close(cdevfd);
+  pxdmm_client_exit(&client);
 
   return 0;
 }
