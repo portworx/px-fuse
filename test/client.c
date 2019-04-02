@@ -22,6 +22,33 @@
 //#define CONTROLDEV "/dev/pxdmm-control"
 #define CONTROLDEV "/dev/uio0"
 
+/**
+ * PXD_ADD request from user space
+ */
+struct pxd_add_out {
+	uint64_t dev_id;	/**< device global id */
+	size_t size;		/**< block device size in bytes */
+	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
+	int32_t discard_size;	/**< block device discard size in bytes */
+};
+
+/**
+ * PXD_REMOVE request from user space
+ */
+struct pxd_remove_out {
+	uint64_t dev_id;	/**< device global id */
+	bool force;		/**< force remove device */
+	char pad[7];
+};
+
+/**
+ * PXD_UPDATE_SIZE request from user space
+ */
+struct pxd_update_size_out {
+	uint64_t dev_id;
+	size_t size;
+};
+
 /** flags set by driver */
 #define PXD_FLAGS_FLUSH 0x1 /**< REQ_FLUSH set on bio */
 #define PXD_FLAGS_FUA   0x2 /**< REQ_FUA set on bio */
@@ -339,6 +366,40 @@ int main(int argc, char *argv[]) {
   devcount = getDevices(mbox, devices, sizeof(devices)/sizeof(struct pxd_dev_id));
   pxdmm_devices_dump(devices, devcount);
   printf("sanitizeChecksum: %d\n", sanitizeDeviceList(mbox, devices, devcount));
+
+  printf("***** checking ioctl *********\n");
+  {
+	int _fd=open("/dev/pxdmm-control", O_RDWR);
+	int rc;
+	struct pxd_add_out add;
+	struct pxd_remove_out remove;
+	struct pxd_update_size_out update;
+
+	assert(_fd>0);
+
+	add.dev_id = 1234;
+	add.size = 1<<20;
+	add.discard_size = 5;
+	add.queue_depth = 32;
+
+	rc=ioctl(_fd, PXD_ADD, &add);
+	printf("Received response code for ioctl %d\n", rc);
+
+	remove.dev_id = 1234;
+	remove.force = 1;
+
+	rc=ioctl(_fd, PXD_REMOVE, &remove);
+	printf("Received response code for ioctl %d\n", rc);
+
+#if 0
+	update.dev_id = 3456;
+	update.size = 1<<30;
+	rc=ioctl(_fd, PXD_UPDATE_SIZE, &update);
+	printf("Received response code for ioctl %d\n", rc);
+#endif
+
+	close(_fd);
+  }
 
   while (true) {
 	  if (devcount != getDeviceCount(mbox)) {

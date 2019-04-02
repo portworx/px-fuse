@@ -13,6 +13,8 @@
 
 #include "fuse.h"
 
+struct pxd_device;
+
 /// @file px_fuse/pxd.h
 
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
@@ -65,6 +67,7 @@ struct pxd_init_in {
 	uint32_t num_devices;	/**< number of devices in the list */
 	/* followed by array of struct pxd_dev_id */
 };
+int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
 /**
  * PXD_INIT response
@@ -184,4 +187,6 @@ struct pxd_ioctl_version_args {
 	char piv_data[64];
 };
 
+int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add);
+void pxd_free_disk(struct pxd_device *pxd_dev);
 #endif /* PXD_H_ */

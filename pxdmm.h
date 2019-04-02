@@ -8,6 +8,11 @@
 
 #define VOLATILE
 //#define SHOULDFLUSH
+#ifdef __KERNEL__
+#define UCONST /* user space constant */
+#else
+#define UCONST const
+#endif
 
 static inline
 unsigned long compute_checksum(unsigned long initial, void *_addr, unsigned int len) {
@@ -146,8 +151,10 @@ struct pxdmm_mbox {
 #endif
 #define DEVWINDOW_LOCKED(mbox)  ((mbox)->devVersion == 0)
 #define DEVWINDOW_VERSION(mbox)  ((mbox)->devVersion)
-	unsigned long devVersion;
+	unsigned long devVersion; // NOTE: can be zero only during kernel update
 	unsigned long ndevices;
+
+	UCONST char version[128];
 
 	uint64_t cmdHead __attribute__((aligned(64)));
 	uint64_t cmdTail __attribute__((aligned(64)));
@@ -221,6 +228,11 @@ int getDevices(struct pxdmm_mbox *mbox, struct pxd_dev_id* buff, int maxcount) {
 }
 
 static inline
+const char* getVersion(struct pxdmm_mbox *mbox) {
+	return mbox->version;
+}
+
+static inline
 void* getDataBufferBase(struct pxdmm_mbox *mbox) {
 	return ((char*) mbox + mbox->dataOffset);
 }
@@ -228,9 +240,10 @@ void* getDataBufferBase(struct pxdmm_mbox *mbox) {
 #ifndef __KERNEL__
 static inline
 void pxdmm_mbox_dump (struct pxdmm_mbox *mbox) {
-	printf("mbox @ %p, queueSize %lu, cmdOff %lu, respOff %lu, devOff: %lu, dataOff %lu devlist %lu:%lu:%lu\n"
+	printf("mbox @ %p, version %s\n\tqueueSize %lu, cmdOff %lu, respOff %lu, devOff: %lu, dataOff %lu devlist %lu:%lu:%lu\n"
 			"\tcmdQ Head:Tail {%lu:%lu},respQ head:Tail {%lu:%lu}\n",
-			mbox, mbox->queueSize, mbox->cmdOffset, mbox->respOffset,
+			mbox, mbox->version,
+			mbox->queueSize, mbox->cmdOffset, mbox->respOffset,
 			mbox->devOffset, mbox->dataOffset,
 			mbox->devChecksum, mbox->devVersion, mbox->ndevices,
 			mbox->cmdHead, mbox->cmdTail,
@@ -260,10 +273,13 @@ void pxdmm_cmdresp_dump(const char *msg, VOLATILE struct pxdmm_cmdresp *c) {
 #else
 static inline
 void pxdmm_mbox_dump (struct pxdmm_mbox *mbox) {
-	printk("mbox @ %p, queueSize %llu, cmdOff %llu, respOff %llu, dataOff %llu\n"
+	printk("mbox @ %p, version %s\n\tqueueSize %llu, cmdOff %llu, respOff %llu, devOff: %llu, dataOff %llu devlist %lu:%lu:%lu\n"
 			"\tcmdQ Head:Tail %llu:%llu\n"
 			"\trespQ head:Tail %llu:%llu\n",
-			mbox, mbox->queueSize, mbox->cmdOffset, mbox->respOffset, mbox->dataOffset,
+			mbox, mbox->version,
+			mbox->queueSize, mbox->cmdOffset, mbox->respOffset,
+			mbox->devOffset, mbox->dataOffset,
+			mbox->devChecksum, mbox->devVersion, mbox->ndevices,
 			mbox->cmdHead, mbox->cmdTail,
 			mbox->respHead, mbox->respTail);
 }
@@ -289,20 +305,26 @@ void pxdmm_cmdresp_dump(const char *msg, VOLATILE struct pxdmm_cmdresp *c) {
 
 #endif
 
+#ifdef __KERNEL__
 static inline
 void pxdmm_mbox_init(struct pxdmm_mbox *mbox,
+		const char *version,
 		uint64_t queueSize,
 		uint64_t cmdOff,
 		uint64_t respOff,
 		uint64_t devOff,
 		uint64_t dataOff) {
 	struct pxdmm_mbox tmp = {queueSize, cmdOff, respOff, devOff, CMDR_SIZE,
-								0, 0, 0, /* dev checksum, version, ndevices */
+								0, 1, 0, /* dev checksum, version, ndevices */
+								"", /* version */
 								0, 0,
 								0, 0};
+	strncpy(tmp.version, version, sizeof(tmp.version));
+	tmp.version[sizeof(tmp.version)-1] = 0;
 
 	memcpy(mbox, &tmp, sizeof(tmp));
 }
+#endif
 
 /* cmd queue interfaces */
 static inline

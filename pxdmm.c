@@ -34,6 +34,12 @@
 #define STATIC /* a temporary hack until all gets used */
 //#define DBGMODE
 
+static struct pxdmm_dev *udev;
+
+extern const char *gitversion;
+extern struct ida pxd_minor_ida;
+extern dev_t pxd_major;
+
 static struct page *apage, *bpage;
 
 static inline
@@ -70,6 +76,9 @@ struct pxdmm_dev {
 	struct device dev;
 	struct uio_info info;
 	DECLARE_BITMAP(io_index, NREQUESTS);
+
+	// holds list of all pxd_devices
+	struct list_head list;
 
 	spinlock_t lock;
 	// Keep a list of all active requests
@@ -483,16 +492,278 @@ const struct file_operations ctldev_fops = {
 #endif
 #endif
 
+static
+struct pxd_device* pxdmm_add_one(struct pxd_add_out *add)
+{
+	struct pxd_device *pxd_dev = NULL;
+	int new_minor;
+	int err;
+
+	err = -ENOMEM;
+	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
+	if (!pxd_dev)
+		goto out;
+
+	spin_lock_init(&pxd_dev->lock);
+	spin_lock_init(&pxd_dev->qlock);
+
+	new_minor = ida_simple_get(&pxd_minor_ida,
+				    1, 1 << MINORBITS,
+				    GFP_KERNEL);
+	if (new_minor < 0) {
+		err = new_minor;
+		goto out_module;
+	}
+
+	pxd_dev->dev_id = add->dev_id;
+	pxd_dev->major = pxd_major;
+	pxd_dev->minor = new_minor;
+	// pxd_dev->ctx = ctx;
+	pxd_dev->connected = true;
+
+	err = pxd_fastpath_init(pxd_dev, 0 /* later: should be offset */);
+	if (err)
+		goto out_id;
+
+	err = pxd_init_disk(pxd_dev, add);
+	if (err) {
+		pxd_fastpath_cleanup(pxd_dev);
+		goto out_id;
+	}
+
+	err = pxd_bus_add_dev(pxd_dev);
+	if (err) {
+		pxd_free_disk(pxd_dev);
+		goto out_id;
+	}
+
+	// finally add the disk, if all is well.
+	add_disk(pxd_dev->disk);
+
+	return pxd_dev;
+
+out_id:
+	ida_simple_remove(&pxd_minor_ida, new_minor);
+out_module:
+	if (pxd_dev)
+		kfree(pxd_dev);
+out:
+	return ERR_PTR(err);
+}
+
+static
+int pxdmm_remove_one(struct pxd_device *pxd_dev, struct pxd_remove_out *remove) {
+	/* pass locked pxd_dev */
+	if (pxd_dev->open_count && !remove->force) {
+		return -EBUSY;
+	}
+
+	pxd_free_disk(pxd_dev);
+	pxd_dev->removing = true;
+
+	/* Make sure the req_fn isn't called anymore even if the device hangs around */
+	if (pxd_dev->disk && pxd_dev->disk->queue){
+		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
+		queue_flag_set_unlocked(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+#else
+		blk_queue_flag_set(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+#endif
+		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+	}
+
+	device_unregister(&pxd_dev->dev);
+
+	return 0;
+}
+
+
+static
+ssize_t pxdmm_add(struct pxdmm_dev *udev, struct pxd_add_out *add) {
+	struct pxd_device *pxd_dev_itr, *pxd_dev;
+	int err = -ENODEV;
+	struct pxd_device placeholder;
+
+	if (udev->ndevices >= PXD_MAX_DEVICES) {
+		printk(KERN_ERR "Too many devices attached..\n");
+		return err;
+	}
+
+printk("pxdmm_add for dev_id %llu, unique add to bus.. \n", add->dev_id);
+	spin_lock(&udev->lock);
+	list_for_each_entry(pxd_dev_itr, &udev->list, node) {
+		if (pxd_dev_itr->dev_id == add->dev_id) {
+			err = -EEXIST;
+			spin_unlock(&udev->lock);
+			return -EEXIST;
+		}
+	}
+
+	/* add a placeholder into the list... until init is complete */
+	placeholder.dev_id = add->dev_id;
+	placeholder.mmdev = udev; // currently mapping all devices to global udev
+	list_add(&placeholder.node, &udev->list);
+	spin_unlock(&udev->lock);
+
+
+printk("pxdmm_add for dev_id %llu...\n", add->dev_id);
+	if (!try_module_get(THIS_MODULE))
+		goto out;
+
+printk("pxdmm_add for dev_id %llu, calling pxdmm_add_one...\n", add->dev_id);
+	pxd_dev = pxdmm_add_one(add);
+	if (IS_ERR_OR_NULL(pxd_dev)) {
+		goto out_module;
+	}
+
+printk("pxdmm_add for dev_id %llu, calling pxdmm_init_dev...\n", add->dev_id);
+	err = pxdmm_init_dev(pxd_dev);
+	if (err) {
+		goto out_disk;
+	}
+
+printk("pxdmm_add for dev_id %llu, looking for existing.. \n", add->dev_id);
+	spin_lock(&udev->lock);
+	/* remove placeholder and replace with correct device */
+	list_del(&placeholder.node);
+printk("pxdmm_add for dev_id %llu, unique add to bus.. \n", add->dev_id);
+	list_add(&pxd_dev->node, &udev->list);
+	pxd_dev->mmdev = udev; // currently mapping all devices to global udev
+	spin_unlock(&udev->lock);
+
+printk("pxdmm_add for dev_id %llu, finished with minor %u.. \n",
+		add->dev_id, pxd_dev->minor);
+	return pxd_dev->minor;
+
+out_disk:
+	if (pxd_dev) {
+		struct pxd_remove_out remove={pxd_dev->dev_id, 1};
+		pxdmm_remove_one(pxd_dev, &remove);
+		kfree(pxd_dev);
+	}
+out_module:
+	module_put(THIS_MODULE);
+out:
+	return err;
+}
+
+static
+ssize_t pxdmm_remove(struct pxdmm_dev *udev, struct pxd_remove_out *remove)
+{
+	int found = false;
+	int err;
+	struct pxd_device *pxd_dev;
+
+	spin_lock(&udev->lock);
+	list_for_each_entry(pxd_dev, &udev->list, node) {
+		if (pxd_dev->dev_id == remove->dev_id) {
+			spin_lock(&pxd_dev->lock);
+			if (!pxd_dev->open_count || remove->force) {
+				list_del(&pxd_dev->node);
+				--udev->ndevices;
+			}
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&udev->lock);
+
+	if (!found) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	err = pxdmm_remove_one(pxd_dev, remove);
+	spin_unlock(&pxd_dev->lock);
+
+	if (!err) {
+		module_put(THIS_MODULE);
+		return 0;
+	}
+
+out:
+	return err;
+}
+
+
+static
+int __pxdmm_add_device2(struct miscdevice *mdev, struct pxd_add_out *add) {
+	printk("adddevice: ctldev miscdev %p %s (minor %u), addout: %p {%llu,%lu,%u,%u}\n",
+			mdev, mdev->name, mdev->minor,
+			add, add->dev_id, add->size, add->discard_size, add->queue_depth);
+	// currently, miscdevice (pxdmm-control) to uio device (uio0) is hardcoded
+	// to single global devices.
+	return (int) pxdmm_add(udev, add);
+}
+
+static
+int __pxdmm_rm_device2(struct miscdevice *mdev, struct pxd_remove_out *remove) {
+	printk("removedevice: ctldev miscdev %p %s (minor %u), rmout: %p {%llu,%u}\n",
+			mdev, mdev->name, mdev->minor,
+			remove, remove->dev_id, remove->force);
+	// currently, miscdevice (pxdmm-control) to uio device (uio0) is hardcoded
+	// to single global devices.
+	return (int) pxdmm_remove(udev, remove);
+}
+
+static
+int __pxdmm_update_device2(struct miscdevice *mdev, struct pxd_update_size_out *update) {
+	printk("TODO updatedevice: ctldev miscdev %p %s (minor %u), update: %p {%llu,%lu}\n",
+			mdev, mdev->name, mdev->minor,
+			update, update->dev_id, update->size);
+	return 0;
+}
+
+
+static long pxdmm_handle_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	void __user *argp = (void __user *)arg;
+	struct pxd_add_out add;
+	const size_t addlen = sizeof(add);
+	struct pxd_remove_out remove;
+	const size_t rmlen = sizeof(remove);
+	struct pxd_update_size_out update;
+	const size_t updatelen = sizeof(update);
+
+	printk("pxdmm: received ioctl call cmd %#x, with arg %p\n", cmd, argp);
+	switch (cmd) {
+	case PXD_ADD:
+		if (copy_from_user(&add, argp, addlen)) {
+			printk(KERN_ERR "%s: can't copy arg\n", __func__);
+			return -EFAULT;
+		}
+		return __pxdmm_add_device2(file->private_data, &add);
+		break;
+	case PXD_REMOVE:
+		if (copy_from_user(&remove, argp, rmlen)) {
+			printk(KERN_ERR "%s: can't copy arg\n", __func__);
+			return -EFAULT;
+		}
+		return __pxdmm_rm_device2(file->private_data, &remove);
+		break;
+	case PXD_UPDATE_SIZE:
+		if (copy_from_user(&update, argp, updatelen)) {
+			printk(KERN_ERR "%s: can't copy arg\n", __func__);
+			return -EFAULT;
+		}
+		return __pxdmm_update_device2(file->private_data, &update);
+		break;
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+
 const struct file_operations ctldev_fops = {
 	.owner = THIS_MODULE,
+	.unlocked_ioctl = pxdmm_handle_ioctl,
 };
 
 static struct miscdevice ctldev = {
 	.minor		= MISC_DYNAMIC_MINOR,
 	.name		= "pxdmm-control",
 };
-
-static struct pxdmm_dev *udev;
 
 static
 void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata) {
@@ -639,7 +910,7 @@ static int pxdmm_dev_init(void) {
 	printk("base: %p, total: %llu, end: %p\n", udev->base, udev->totalWindowLength, 
 			(void*)((uintptr_t)udev->base+udev->totalWindowLength));
 
-	pxdmm_mbox_init(udev->mbox,
+	pxdmm_mbox_init(udev->mbox, gitversion,
 			(uint64_t) NREQUESTS,
 			(uint64_t) ((uintptr_t) udev->cmdQ - (uintptr_t) udev->base),
 			(uint64_t) ((uintptr_t) udev->respQ - (uintptr_t) udev->base),
@@ -685,6 +956,7 @@ static int pxdmm_dev_init(void) {
 		return err;
 	}
 
+	INIT_LIST_HEAD(&udev->list);
 	spin_lock_init(&udev->lock);
 	init_waitqueue_head(&udev->waitQ);
 	init_waitqueue_head(&udev->serializeQ);
@@ -696,6 +968,9 @@ static int pxdmm_dev_init(void) {
 		pxdmm_exit();
 		return PTR_ERR(udev->thread);
 	}
+
+	printk("ctldev[%p].this_device drvdata %p\n", &ctldev, dev_get_drvdata(ctldev.this_device));
+	dev_set_drvdata(ctldev.this_device, udev);
 
 	// initialize magic for sanity.
 	udev->magichead = MAGICHEAD;
@@ -1051,10 +1326,12 @@ int pxdmm_devlist_add(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
 	unsigned long currVer = udev->mbox->devVersion;
 	unsigned long currCsum = udev->mbox->devChecksum;
 	struct pxd_dev_id *newdevice;
+	unsigned long nextVer = currVer + 1;
 
 	if (udev->ndevices >= NMAXDEVICES) {
 		return -ENOSPC;
 	}
+	if (!nextVer) nextVer++; // handle overflow
 
 	LOCK_DEVWINDOW(udev->mbox);
 
@@ -1075,24 +1352,20 @@ int pxdmm_devlist_add(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
 	udev->mbox->devChecksum = compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
 	udev->mbox->ndevices = udev->ndevices;
 
-	UNLOCK_DEVWINDOW(udev->mbox, currVer+1);
+	UNLOCK_DEVWINDOW(udev->mbox, nextVer);
 	return 0;
 }
 
 int pxdmm_devlist_remove(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
 	struct pxd_dev_id *base = getDeviceListBase(udev->mbox);
-	const int maxSize = NMAXDEVICES * sizeof(struct pxd_dev_id);
 	unsigned long currVer = udev->mbox->devVersion;
 	unsigned long currCsum = udev->mbox->devChecksum;
-
-	struct pxd_dev_id *tmp, *dst, *scratch;
+	unsigned long nextVer = currVer+1;
+	struct pxd_dev_id *tmp;
 	bool found = false;
 	int i;
 
-	dst = scratch = (struct pxd_dev_id*) kzalloc(GFP_KERNEL, maxSize);
-	if (!scratch) {
-		return -ENOMEM;
-	}
+	if (!nextVer) nextVer++; // handle overflow
 
 	LOCK_DEVWINDOW(udev->mbox);
 
@@ -1109,27 +1382,26 @@ int pxdmm_devlist_remove(struct pxdmm_dev *udev, struct pxd_device *pxd_dev) {
 				tmp->dev_id == pxd_dev->dev_id) {
 			/* found the item to be deleted */
 			found = true;
-			continue;
+			break;
 		}
-		memcpy(dst, tmp, sizeof(*tmp));
-		dst++;
 	}
 
 	if (found) {
-		udev->ndevices--;
 		if (udev->ndevices) {
-			memcpy(base, scratch, sizeof(struct pxd_dev_id) * udev->ndevices);
+			for (;i<udev->ndevices; i++) {
+				base[i] = base[i+1]; // overwrite and compact entries
+			}
+			udev->ndevices--;
 			udev->mbox->devChecksum =
 				compute_checksum(0, base, sizeof(struct pxd_dev_id) * udev->ndevices);
 		} else {
 			udev->mbox->devChecksum = 0;
 		}
 		udev->mbox->ndevices = udev->ndevices;
-		UNLOCK_DEVWINDOW(udev->mbox, currVer+1);
+		UNLOCK_DEVWINDOW(udev->mbox, nextVer);
 	} else {
 		UNLOCK_DEVWINDOW(udev->mbox, currVer);
 	}
-	kfree(scratch);
 	return 0;
 }
 

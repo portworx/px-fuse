@@ -31,8 +31,8 @@
 #define VERTOSTR(x) TOSTRING_(x)
 
 extern const char *gitversion;
-static dev_t pxd_major;
-static DEFINE_IDA(pxd_minor_ida);
+dev_t pxd_major;
+DEFINE_IDA(pxd_minor_ida);
 
 #define STATIC
 
@@ -47,14 +47,23 @@ module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
 
-static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
-
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
-	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	int err = 0;
 
+#ifdef PXDMM
+	spin_lock(&pxd_dev->lock);
+	if (pxd_dev->removing)
+		err = -EBUSY;
+	else
+		pxd_dev->open_count++;
+	spin_unlock(&pxd_dev->lock);
+
+	if (!err)
+			(void)get_device(&pxd_dev->dev);
+#else
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	spin_lock(&fc->lock);
 	if (!fc->connected) {
 		err = -ENXIO;
@@ -70,6 +79,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 			(void)get_device(&pxd_dev->dev);
 	}
 	spin_unlock(&fc->lock);
+#endif
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
 }
@@ -550,7 +560,7 @@ static void pxd_rq_fn(struct request_queue *q)
 }
 #endif
 
-static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
+int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
@@ -623,15 +633,15 @@ out_disk:
 	return -ENOMEM;
 }
 
-static void pxd_free_disk(struct pxd_device *pxd_dev)
+void pxd_free_disk(struct pxd_device *pxd_dev)
 {
 	struct gendisk *disk = pxd_dev->disk;
 
+	pxdmm_cleanup_dev(pxd_dev);
+	pxd_fastpath_cleanup(pxd_dev);
 	if (!disk)
 		return;
 
-	pxdmm_cleanup_dev(pxd_dev);
-	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
@@ -1037,7 +1047,7 @@ static void pxd_dev_device_release(struct device *dev)
 	kfree(pxd_dev);
 }
 
-static int pxd_bus_add_dev(struct pxd_device *pxd_dev)
+int pxd_bus_add_dev(struct pxd_device *pxd_dev)
 {
 	struct device *dev;
 	int ret;
