@@ -202,6 +202,7 @@ void pxdmm_client_exit(struct pxdmm_client *client) {
 	close(client->uiodevfd);
 }
 
+// debug interface
 void initiate_mapping(int dbi) {
 	int fd, rc, len;
 	char buf[64];
@@ -224,6 +225,7 @@ void initiate_mapping(int dbi) {
 	close(fd);
 }
 
+// debug interface
 void clear_mapping(int dbi) {
 	int fd, rc, len;
 	char buf[64];
@@ -315,10 +317,10 @@ int pxdmm_process_request (struct pxdmm_client *client,
 	return 0;
 }
 
-int pxdmm_complete_request (struct pxdmm_mbox* mbox, struct pxdmm_cmdresp *req) {
+int pxdmm_complete_request (struct pxdmm_mbox* mbox, struct pxdmm_cmdresp *req, int status) {
 	struct pxdmm_cmdresp *top;
 
-	req->status = 0;
+	req->status = status;
 	top = getRespQHead(mbox);
 	memcpy(top, req, sizeof(struct pxdmm_cmdresp));
 	pxdmm_cmdresp_dump("send response:", req);
@@ -396,7 +398,7 @@ int main(int argc, char *argv[]) {
 		printf("respQ full condition, sleeping..\n");
 	  }
 	  // 4. complete it
-	  pxdmm_complete_request(client.mbox, &req);
+	  pxdmm_complete_request(client.mbox, &req, 0 /* always success */);
   }
 
   closeBackingFileHandles();
