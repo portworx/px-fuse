@@ -969,9 +969,6 @@ static int pxdmm_dev_init(void) {
 		return PTR_ERR(udev->thread);
 	}
 
-	printk("ctldev[%p].this_device drvdata %p\n", &ctldev, dev_get_drvdata(ctldev.this_device));
-	dev_set_drvdata(ctldev.this_device, udev);
-
 	// initialize magic for sanity.
 	udev->magichead = MAGICHEAD;
 	udev->magictail = MAGICTAIL;
