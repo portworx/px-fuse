@@ -38,6 +38,8 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 
+	atomic_t nactive;
+
 	struct pxdmm_dev *mmdev;
 };
 

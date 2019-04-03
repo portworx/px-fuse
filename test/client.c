@@ -22,6 +22,8 @@
 #define UIO_PARAMS_BASE "/sys/devices/pxdmm/misc/pxdmm-control/uio0/maps/map0/"
 #define UIODEV "/dev/uio0"
 
+//#define WAITREQ
+
 static
 int readfile(char *path, char *buffer, int length) {
 	int fd;
@@ -255,10 +257,12 @@ int pxdmm_read_request (struct pxdmm_mbox *mbox, struct pxdmm_cmdresp *req) {
 	}
 
 	top = getCmdQTail(mbox);
-	printf("found something in cmdQ.. %p\n", top);
+	//printf("found something in cmdQ.. %p\n", top);
 	memcpy(req, top, sizeof(struct pxdmm_cmdresp));
 
+#ifdef DEBUG_IO
 	pxdmm_cmdresp_dump("got request:", req);
+#endif
 	incrCmdQTail(mbox);
 	return 0;
 }
@@ -323,7 +327,9 @@ int pxdmm_complete_request (struct pxdmm_mbox* mbox, struct pxdmm_cmdresp *req, 
 	req->status = status;
 	top = getRespQHead(mbox);
 	memcpy(top, req, sizeof(struct pxdmm_cmdresp));
+#ifdef DEBUG_IO
 	pxdmm_cmdresp_dump("send response:", req);
+#endif
 	incrRespQHead(mbox);
 }
 
@@ -342,6 +348,7 @@ int main(int argc, char *argv[]) {
   pxdmm_devices_dump(devices, devcount);
   printf("sanitizeChecksum: %d\n", sanitizeDeviceList(client.mbox, devices, devcount));
 
+#if 0
   printf("***** checking ioctl *********\n");
   {
 	int _fd=open(CTLDEV, O_RDWR);
@@ -363,16 +370,28 @@ int main(int argc, char *argv[]) {
 	remove.dev_id = 1234;
 	remove.force = 1;
 
+#ifdef WAITREQ
+	printf("Waiting to remove device %lu, force %u\n", remove.dev_id, remove.force);
+	getchar();
+#endif
+
 	rc=ioctl(_fd, PXD_REMOVE, &remove);
 	printf("Received response code for ioctl %d\n", rc);
 
 	update.dev_id = 3456;
 	update.size = 1<<30;
+#ifdef WAITREQ
+	printf("Waiting to update size device %lu, size %lu\n",
+			update.dev_id, update.size);
+	getchar();
+#endif
+
 	rc=ioctl(_fd, PXD_UPDATE_SIZE, &update);
 	printf("Received response code for ioctl %d\n", rc);
 
 	close(_fd);
   }
+#endif
 
   while (true) {
 	  if (devcount != getDeviceCount(client.mbox)) {

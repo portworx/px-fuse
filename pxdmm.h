@@ -128,6 +128,7 @@ struct pxdmm_cmdresp {
 	union {
 		uint32_t status;
 		uint32_t qdepth; // pxd_add arg
+		uint32_t force; // pxd_remove arg
 	};
 
 	// below 2 fields should be passed as is.
