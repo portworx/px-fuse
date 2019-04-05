@@ -274,6 +274,8 @@ int pxdmm_process_request (struct pxdmm_client *client,
 	ssize_t progress = 0;
 	ssize_t pending = req->length;
 
+	//printf("Got new request: %u, offset %lu, data at %p, length %lu\n",
+	//		req->cmd, req->offset, databuff, req->length);
 	switch (req->cmd) {
 	case PXD_WRITE:
 		if (lseek(fd, req->offset, SEEK_SET) != req->offset) {

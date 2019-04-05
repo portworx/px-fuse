@@ -60,6 +60,7 @@ struct reqhandle {
 #define PXDMM_REQUEST_ACTIVE (0x1)
 #define PXDMM_REQUEST_TIMEDOUT (0x2)
 	unsigned long flags;
+	uint32_t dbi; // assigned data buffer index
 
 	unsigned long magictail;
 };
@@ -76,12 +77,13 @@ struct pxdmm_dev {
 	unsigned long magichead;
 	struct device dev;
 	struct uio_info info;
-	DECLARE_BITMAP(io_index, NREQUESTS);
+	DECLARE_BITMAP(dbi, MAXDBINDICES);
 
 	// holds list of all pxd_devices
 	struct list_head list;
 
 	spinlock_t lock;
+	DECLARE_BITMAP(rmap, NREQUESTS);
 	// Keep a list of all active requests
 	struct reqhandle requests[NREQUESTS];
 #define PXDMM_DEV_OPEN (0x1)
@@ -135,10 +137,11 @@ struct pxdmm_dev* find_uio(struct miscdevice *parent) {
 }
 
 static inline
-struct reqhandle* getRequestHandle(struct pxdmm_dev* udev, int dbi) {
-	BUG_ON(dbi >= NREQUESTS);
+struct reqhandle* getRequestHandle(struct pxdmm_dev* udev, opaque_t h) {
+	uint32_t ctxid = GET_CTXID(h);
+	BUG_ON(ctxid >= NREQUESTS);
 
-	return &udev->requests[dbi];
+	return &udev->requests[ctxid];
 }
 
 static inline
@@ -195,7 +198,6 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 	struct page *page = NULL;
 	unsigned long offset;
 	void *addr;
-	struct reqhandle *handle;
 	uint32_t dbi;
 
 	//int mi = pxdmm_find_mem_index(vmf->vma);
@@ -213,7 +215,19 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 		printk("vmf: cmd register window fault.. base %p, offset %lx, vaddr %p page %p\n",
 				(void*) info->mem[mi].addr, offset, addr, page);
 	} else {
-		dbi = (offset - CMDR_SIZE) / MAXDATASIZE;
+		/* unexpected dbi exception hit */
+		dbi = (offset - CMDR_SIZE) / PERINDEXSIZE;
+		printk("vmf: unexpected exception in data region... dbi %u, offset %#lx\n",
+				dbi, offset);
+#if 0
+		/* 
+		 * NOTE:
+		 * With split indices for requests and dbi, it is no longer possible to directly
+		 * find reqHandle from dbi offsets. This exception on data buffer is not expected any case.
+		 * But from dbi offset, if one were to need reqHandle, all handles have to be traversed
+		 * within udev and the right request found (based on dbi within the handle)
+		 */
+		struct reqhandle *handle;
 		// find the request that has data buffer index
 		handle = getRequestHandle(udev, dbi);
 
@@ -278,6 +292,7 @@ static vm_fault_t pxdmm_vma_fault(struct vm_area_struct *vma, struct vm_fault *v
 #endif
 }
 #endif /* DBGMODE */
+#endif
 	}
 
 	if (!page) {
@@ -293,8 +308,9 @@ static const struct vm_operations_struct pxdmm_vma_ops = {
 	.fault = pxdmm_vma_fault,
 };
 
+// DEBUG interfaces for testing
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *,int dbi);
-static void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata);
+static void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata, size_t dataSize);
 
 static
 int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
@@ -364,9 +380,9 @@ int uio_irqcontrol(struct uio_info *info, s32 irq_on) {
 /* map and unmap pages from bio within the inode address mapping */
 
 static
-int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, unsigned long *csum) {
+int pxdmm_map_bio(struct pxdmm_dev *udev, opaque_t index, struct bio* bio, unsigned long *csum) {
 	struct mm_struct *mm;
-	loff_t offset = pxdmm_dataoffset(io_index) + udev->vm_start;
+	loff_t offset = pxdmm_dataoffset(index) + udev->vm_start;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct bio_vec bvec;
 	struct bvec_iter i;
@@ -384,8 +400,8 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, un
 	}
 
 	mm = udev->task->mm;
-	dbg_printk("Inside pxdmm_map_bio(dev %p,io_index: %u, bio %p/%d segments)\n",
-			udev, io_index, bio, bio_segments(bio));
+	printk("Inside pxdmm_map_bio(dev %p,io_index: %#x, bio %p/%d segments)\n",
+			udev, index, bio, bio_segments(bio));
 	if (!bio_has_data(bio)) return 0;
 
 	vma = find_vma(mm, offset);
@@ -400,7 +416,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, un
 
 		BUG_ON(bvec.bv_offset || length != bvec.bv_len);
 
-		dbg_printk("for bio: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
+		printk("for bio: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {
@@ -433,7 +449,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, uint32_t io_index, struct bio* bio, un
 
 		BUG_ON(bvec->bv_offset || length != bvec->bv_len);
 
-		dbg_printk("for bio2: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
+		printk("for bio2: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {
@@ -798,19 +814,20 @@ static struct miscdevice ctldev = {
 };
 
 static
-void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata) {
+void pxdmm_unmap(struct pxdmm_dev* udev, int dbi, bool hasdata, size_t dataSize) {
 	loff_t offset;
 	struct address_space *as = udev->inode->i_mapping;
-	const uint32_t dataBufferLength = MAXDATASIZE;
+	size_t size = PAGE_ALIGN(dataSize);
 
+	BUG_ON(dataSize > MAXDATASIZE);
 	if (!hasdata) {
 		return;
 	}
 	offset = pxdmm_dataoffset(dbi);
-	dbg_printk("pxdmm_unmap: unmapping dbi %d, offset %llu\n",
-			dbi, offset);
+	dbg_printk("pxdmm_unmap: unmapping dbi %d, offset %llu for size %lu\n",
+			dbi, offset, size);
 
-    unmap_mapping_range(as, offset, dataBufferLength, 1);
+    unmap_mapping_range(as, offset, size, 1);
 }
 
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, int dbi) {
@@ -862,7 +879,7 @@ static ssize_t pxdmm_do_unmap(struct device *dev,
 {
 	long dbi;
 	kstrtol(buf, 0, &dbi);
-	pxdmm_unmap(udev, (int) dbi, true);
+	pxdmm_unmap(udev, (int) dbi, true, PAGE_SIZE);
 
 	printk("pxdmm unmapped for dbi %d\n", (int) dbi);
 	return count;
@@ -880,6 +897,7 @@ static ssize_t pxdmm_do_map(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+// Debug device attributes
 static DEVICE_ATTR(map, S_IRUGO|S_IWUSR, NULL, pxdmm_do_map);
 static DEVICE_ATTR(unmap, S_IRUGO|S_IWUSR, NULL, pxdmm_do_unmap);
 
@@ -1048,16 +1066,71 @@ void pxdmm_exit(void) {
 	kfree(udev);
 }
 
+// NOTE: called under udev lock
+static inline
+bool assignResources(struct pxdmm_dev *udev, bool hasdata,
+		size_t dataSize, opaque_t *opaque) {
+	uint32_t ctxid = 0, dbi = 0;
+	int count = 0;
+
+	if (cmdQFull(udev->mbox)) {
+		return false;
+	}
+
+	ctxid = find_first_zero_bit(udev->rmap, NREQUESTS);
+	if (ctxid >= NREQUESTS) {
+		return false;
+	}
+
+	if (hasdata && dataSize) {
+		// so many 4K pages, find contiguous data window for holding dataSize
+		count = PAGE_ALIGN(dataSize) >> PAGE_SHIFT;
+		dbi = bitmap_find_next_zero_area(udev->dbi, MAXDBINDICES, 0, count, 0);
+
+		if (dbi >= MAXDBINDICES) {
+			return false;
+		}
+		bitmap_set(udev->dbi, dbi, count);
+	}
+
+	bitmap_set(udev->rmap, ctxid, 1);
+
+	*opaque = MAKE_OPAQUE(ctxid, dbi);
+	dbg_printk("new resource[%#x]: ctx %#x, hasdata: %d, dbi %#x (%llu/%lu)\n",
+			*opaque, ctxid, hasdata, dbi, pxdmm_dataoffset(dbi),
+			PAGE_ALIGN(dataSize) >> PAGE_SHIFT);
+	return true;
+}
+
+// NOTE: called under udev lock
+static inline
+void clearResources(struct pxdmm_dev *udev, struct pxdmm_cmdresp *cmdresp) {
+	opaque_t opaque = cmdresp->io_index;
+	uint32_t ctxid = GET_CTXID(opaque);
+	uint32_t dbi = GET_DBI(opaque);
+
+	if (opaque == OPAQUE_SPECIAL) return;
+
+	dbg_printk("clearing resource[%#x]: ctx %#x, hasdata: %d, dbi %#x (%llu)\n",
+			opaque, ctxid, cmdresp->hasdata, dbi, pxdmm_dataoffset(dbi));
+	bitmap_clear(udev->rmap, ctxid, 1);
+	if (cmdresp->hasdata) {
+		int count = (cmdresp->length) >> PAGE_SHIFT;
+		bitmap_clear(udev->dbi, dbi, count);
+	}
+}
+
 static
 int __pxdmm_add_request(struct pxd_device *pxd_dev,
 		struct request_queue *q, struct bio *bio) {
 
 	struct pxdmm_dev *udev = pxd_dev->mmdev;
-	int next_idx;
 	VOLATILE struct pxdmm_cmdresp *cmd;
 	unsigned long f;
 	struct reqhandle *handle;
 	int err;
+	size_t dataSize = 0;
+	opaque_t io_index;
 
 	if (!udev || !sanitycheck(udev) || !pxd_dev) {
 		printk("No mm dev (or sanity check failed) %p initialized for pxd_dev\n", udev);
@@ -1069,23 +1142,34 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 		return -EIO;
 	}
 
+	if (bio_has_data(bio)) {
+		dataSize = compute_bio_rq_size(bio);
+		if (dataSize > MAXDATASIZE) {
+			printk("Data Size (%lu bytes) greater than maximum (%d bytes)\n",
+				dataSize, MAXDATASIZE);
+			return -EIO;
+		}
+	}
+
 	//  lock mbox access and get next index
 	spin_lock_irqsave(&udev->lock, f);
-	while (cmdQFull(udev->mbox) || bitmap_full(udev->io_index, NREQUESTS)) {
-		printk("Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d [%#lx]\n",
+	while (!assignResources(udev, bio_has_data(bio), dataSize, &io_index)) {
+		printk("Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d/%d\n",
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
-				bitmap_full(udev->io_index, NREQUESTS),
-				udev->io_index[0]);
+				bitmap_full(udev->rmap, NREQUESTS),
+				bitmap_full(udev->dbi, MAXDBINDICES));
 		spin_unlock_irqrestore(&udev->lock, f);
 		/* congestion wait */
 		wait_event_timeout(udev->serializeQ,
-				!cmdQFull(udev->mbox) && !bitmap_full(udev->io_index, NREQUESTS),
+				!cmdQFull(udev->mbox) &&
+				!bitmap_full(udev->rmap, NREQUESTS) &&
+				!bitmap_full(udev->dbi, MAXDBINDICES),
 				HZ);
 		spin_lock_irqsave(&udev->lock, f);
-		printk("congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d [%#lx]\n",
+		printk("congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d/%d\n",
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
-				bitmap_full(udev->io_index, NREQUESTS),
-				udev->io_index[0]);
+				bitmap_full(udev->rmap, NREQUESTS),
+				bitmap_full(udev->dbi, MAXDBINDICES));
 	}
 
 	//  fill up the cmd structure
@@ -1155,21 +1239,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	cmd->checksum = 0;
 
 	cmd->length = compute_bio_rq_size(bio);
-	if (bio_has_data(bio) && cmd->length > MAXDATASIZE) {
-		printk("Data Size (%lld bytes) greater than maximum (%d bytes)\n",
-				cmd->length, MAXDATASIZE);
-		err = -E2BIG;
-		goto out;
-	}
-
-	next_idx = find_first_zero_bit(udev->io_index, NREQUESTS);
-	if (next_idx >= NREQUESTS) {
-		// This is BUG condition
-		BUG();
-	}
-
-	bitmap_set(udev->io_index, next_idx, 1);
-	cmd->io_index = next_idx;
+	cmd->io_index = io_index;
 
 	// Find the io_index and initialize request handle for this
 	// new outstanding request.
@@ -1178,6 +1248,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	handle->bio = bio;
 	handle->queue = q;
 	handle->starttime = jiffies;
+	handle->dbi = GET_DBI(io_index);
 	atomic_inc(&pxd_dev->nactive);
 
 	if (handle->flags) {
@@ -1194,7 +1265,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 		printk("Mapping BIO has failed on index %u, error %d\n",
 				cmd->io_index, err);
 		handle->flags = 0;
-		bitmap_clear(udev->io_index, cmd->io_index, 1);
+		clearResources(udev, cmd);
 		goto out;
 	}
 
@@ -1271,7 +1342,7 @@ struct bio* __pxdmm_complete_request(VOLATILE struct pxdmm_cmdresp* resp, int *s
 	BUG_ON (!(handle->flags & PXDMM_REQUEST_ACTIVE));
 
 	// unmap the data buffer from window
-	pxdmm_unmap(udev, resp->io_index, bio_has_data(handle->bio));
+	pxdmm_unmap(udev, resp->io_index, bio_has_data(handle->bio), resp->length);
 
 	/* bio already completed... free up handle and return NULL */
 	if (!(handle->flags & PXDMM_REQUEST_TIMEDOUT)) {
@@ -1285,7 +1356,7 @@ struct bio* __pxdmm_complete_request(VOLATILE struct pxdmm_cmdresp* resp, int *s
 	handle->magichead = handle->magictail = ~0UL;
 	// free up the io index
 	spin_lock_irqsave(&udev->lock, f);
-	bitmap_clear(udev->io_index, resp->io_index, 1);
+	clearResources(udev, resp);
 	atomic_dec(&udev->active);
 	spin_unlock_irqrestore(&udev->lock, f);
 
@@ -1345,7 +1416,7 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 		incrRespQTail(udev->mbox);
 
 		/* special commands */
-		if (top.io_index == NREQUESTS) {
+		if (top.io_index == OPAQUE_SPECIAL) {
 			switch (top.cmd) {
 			case PXD_ADD:
 				/* create a new device */
