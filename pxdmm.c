@@ -400,7 +400,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, opaque_t index, struct bio* bio, unsig
 	}
 
 	mm = udev->task->mm;
-	printk("Inside pxdmm_map_bio(dev %p,io_index: %#x, bio %p/%d segments)\n",
+	dbg_printk("Inside pxdmm_map_bio(dev %p,io_index: %#x, bio %p/%d segments)\n",
 			udev, index, bio, bio_segments(bio));
 	if (!bio_has_data(bio)) return 0;
 
@@ -416,7 +416,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, opaque_t index, struct bio* bio, unsig
 
 		BUG_ON(bvec.bv_offset || length != bvec.bv_len);
 
-		printk("for bio: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
+		dbg_printk("for bio: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {
@@ -449,7 +449,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev, opaque_t index, struct bio* bio, unsig
 
 		BUG_ON(bvec->bv_offset || length != bvec->bv_len);
 
-		printk("for bio2: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
+		dbg_printk("for bio2: %p, vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu)\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length);
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {

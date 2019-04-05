@@ -1,6 +1,10 @@
 #ifndef _PXDMM_H_
 #define _PXDMM_H_
 
+#ifndef PAGE_SIZE
+#define PAGE_SIZE (1<<12)
+#endif
+
 #define NREQUESTS (256)
 #define NMAXDEVICES (256)
 #define MAXDATASIZE (1<<20)
