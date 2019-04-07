@@ -745,7 +745,7 @@ int pxdmm_remove_one(struct pxd_device *pxd_dev, struct pxd_remove_out *remove) 
 	// maybe a future remove shall pass then.
 	pxd_dev->removing = true;
 	if (atomic_read(&pxd_dev->nactive)) {
-		printk(KERN_WARN"pxdmm_remove_one for device %llu, got active requests %u\n",
+		printk(KERN_WARNING"pxdmm_remove_one for device %llu, got active requests %u\n",
 				pxd_dev->dev_id, atomic_read(&pxd_dev->nactive));
 		return -EBUSY;
 	}
@@ -767,7 +767,7 @@ int pxdmm_remove_one(struct pxd_device *pxd_dev, struct pxd_remove_out *remove) 
 	dbg_printk("pxdmm_remove_one for dev_id %llu, remove_one completing..\n", remove->dev_id);
 
 	if (atomic_read(&pxd_dev->nactive) != 0) {
-		printk(KERN_WARN"Active IO requests still pending with device (cnt=%u, device %llu)...\n",
+		printk(KERN_WARNING"Active IO requests still pending with device (cnt=%u, device %llu)...\n",
 				atomic_read(&pxd_dev->nactive), pxd_dev->dev_id);
 		goto skip_free;
 	}
