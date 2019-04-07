@@ -6,7 +6,7 @@
 #endif
 
 #define NREQUESTS (256)
-#define NMAXDEVICES (256)
+#define NMAXDEVICES (256) // same as PXD_MAX_DEVICES
 #define MAXDATASIZE (1<<20)
 #define PERINDEXSIZE PAGE_SIZE
 #define CMDR_SIZE (8<<20)

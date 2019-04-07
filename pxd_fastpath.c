@@ -22,6 +22,10 @@ static struct bio_set pxd_bio_set;
 #define PXD_MIN_POOL_PAGES (128)
 static struct bio_set* ppxd_bio_set;
 
+struct bio_set* pxd_bioset(void) {
+	return ppxd_bio_set;
+}
+
 int fastpath_init(void) {
 	int i;
 

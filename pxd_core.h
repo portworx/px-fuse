@@ -73,4 +73,6 @@ struct pxd_dev_id {
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
 
+struct bio_set* pxd_bioset(void);
+
 #endif /* _PXD_CORE_H_ */
