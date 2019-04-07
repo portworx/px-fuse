@@ -38,23 +38,10 @@
 static inline
 int compute_bio_rq_size(struct bio *breq) {
 #ifdef HAVE_BVEC_ITER
-	struct bio_vec bvec;
+		return breq->bi_iter.bi_size;
 #else
-	struct bio_vec *bvec = NULL;
+		return breq->bi_size;
 #endif
-
-#if defined(HAVE_BVEC_ITER)
-	struct bvec_iter bvec_iter;
-#else
-	int bvec_iter;
-#endif
-
-	int total_size = 0;
-	bio_for_each_segment(bvec, breq, bvec_iter) {
-		total_size += BVEC(bvec).bv_len;
-	}
-
-	return total_size;
 }
 
 static inline
