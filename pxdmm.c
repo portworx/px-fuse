@@ -1267,7 +1267,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	//  lock mbox access and get next index
 	spin_lock_irqsave(&udev->lock, f);
 	while (!assignResources(udev, bio_has_data(bio), dataSize, &io_index)) {
-		printk("Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d/%d\n",
+		printk(KERN_INFO"Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d/%d\n",
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
 				bitmap_full(udev->rmap, NREQUESTS),
 				bitmap_full(udev->dbi, MAXDBINDICES));
@@ -1279,7 +1279,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 				!bitmap_full(udev->dbi, MAXDBINDICES),
 				HZ);
 		spin_lock_irqsave(&udev->lock, f);
-		printk("congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d/%d\n",
+		printk(KERN_INFO"congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d/%d\n",
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
 				bitmap_full(udev->rmap, NREQUESTS),
 				bitmap_full(udev->dbi, MAXDBINDICES));
@@ -1290,7 +1290,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	cmd = getCmdQHead(udev->mbox);
 	dbg_printk("cmdQHead %p, mbox %p, cmdOffset %llu, cmd Head:Tail %llu:%llu bitmap %#lx\n",
 			cmd, udev->mbox, udev->mbox->cmdOffset, udev->mbox->cmdHead, udev->mbox->cmdTail,
-			udev->io_index[0]);
+			udev->dbi[0]);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	cmd->cmd_flags = bio->bi_opf;
@@ -1322,28 +1322,28 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	case REQ_WRITE:
 	case (REQ_WRITE | REQ_WRITE_SAME):
 		if (flags & REQ_WRITE_SAME) {
-			printk("cmd_flags %#x, matched write_same hasdata: %d\n",
+			dbg_printk("cmd_flags %#x, matched write_same hasdata: %d\n",
 					flags, bio_has_data(bio));
 			cmd->cmd = PXD_WRITE_SAME;
 		} else if (flags & (REQ_FUA|REQ_FLUSH)) {
-			printk("cmd_flags %#x, matched write_flush hasdata: %d\n",
+			dbg_printk("cmd_flags %#x, matched write_flush hasdata: %d\n",
 					flags, bio_has_data(bio));
 			cmd->cmd = PXD_WRITE;
 			cmd->cmd_flags = PXD_FLAGS_FLUSH;
 		} else {
-			printk("cmd_flags %#x, matched single write hasdata: %d\n",
+			dbg_printk("cmd_flags %#x, matched single write hasdata: %d\n",
 					flags, bio_has_data(bio));
 			cmd->cmd = PXD_WRITE;
 		}
 		break;
 	case 0:
-		printk("cmd_flags %#x, matched single read hasdata: %d\n",
+		dbg_printk("cmd_flags %#x, matched single read hasdata: %d\n",
 				flags, bio_has_data(bio));
 		cmd->cmd = PXD_READ;
 		break;
 	case REQ_DISCARD:
 	case REQ_WRITE|REQ_DISCARD:
-		printk("cmd_flags %#x, matched discard (hasdata: %d)\n",
+		dbg_printk("cmd_flags %#x, matched discard (hasdata: %d)\n",
 				flags, bio_has_data(bio));
 		cmd->cmd = PXD_DISCARD;
 		break;
@@ -1360,7 +1360,6 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	cmd->dev_id = pxd_dev->dev_id;
 	cmd->dev = (uintptr_t) udev;
 	cmd->checksum = 0;
-
 	cmd->length = compute_bio_rq_size(bio);
 	cmd->io_index = io_index;
 
@@ -1532,10 +1531,10 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 #endif
 		memcpy(&top, (struct pxdmm_cmdresp*) resp, sizeof(top));
 		// increment response tail.
-		dbg_printk("[%d] respQTail %p, mbox %p, respOffset %llu, resp Head/Tail %llu:%llu bitmap[%#lx]\n",
-			atomic_read(&udev->active), resp, udev->mbox,
+		dbg_printk("[%p] respQTail %p, mbox %p, respOffset %llu, resp Head/Tail %llu:%llu bitmap[%#lx]\n",
+			udev, resp, udev->mbox,
 			udev->mbox->respOffset, udev->mbox->respHead, udev->mbox->respTail,
-			udev->io_index[0]);
+			udev->dbi[0]);
 
 		incrRespQTail(udev->mbox);
 
@@ -1558,8 +1557,8 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 
 
 		bio = __pxdmm_complete_request(&top, &status);
-		dbg_printk("completing[%u]: cmd %d, BIO %p with status %u\n",
-					atomic_read(&udev->active), top.cmd, bio, status);
+		dbg_printk("completing[%p]: cmd %d, BIO %p with status %u\n",
+					udev, top.cmd, bio, status);
 		if (bio) {
 			BIO_ENDIO(bio, status);
 		}
