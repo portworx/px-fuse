@@ -359,12 +359,21 @@ static void pxd_complete_io(struct bio* bio) {
 #else
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-        if (bio->bi_error) { /* non-zero indicates failure */
-                bio_io_error(iot->orig);
-        } else {
-                bio_endio(iot->orig);
-        }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+{
+	iot->orig->bi_status = bio->bi_status;
+	bio_endio(iot->orig);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+{
+	int status = bio->bi_error;
+	if (status) {
+		bio_io_error(iot->orig);
+	} else {
+		bio_endio(iot->orig);
+	}
+}
 #else
         bio_endio(iot->orig, bio->bi_error);
 #endif
