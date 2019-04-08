@@ -9,6 +9,9 @@
 #include <libgen.h>
 #include <sys/mman.h>
 #include <assert.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
 
 #include "pxdmm.h"
 //#define DEFPATH "/var/.px/0/690901662210331304/pxdev"
@@ -88,6 +91,30 @@ struct backingFds {
 	int fd;
 	unsigned long dev_id;
 };
+
+static void initBackingDir(void) {
+	int err;
+	struct stat buf;
+
+	printf("Looking for backing dir at path %s\n", BKPATH);
+	err = stat(BKPATH, &buf);
+	if (!err) {
+		/* stat passed... check it is a directory, if not abort */
+		if (!S_ISDIR(buf.st_mode)) {
+			perror("Backing path exists and not a directory");
+			exit(1);
+		}
+		printf("Backing dir at path %s exists!\n", BKPATH);
+		return;
+	}
+
+	err = mkdir(BKPATH, S_IRWXU|S_IRWXG|S_IRWXO);
+	if (err) {
+		perror("backing path directory creation failed");
+		exit(1);
+	}
+	printf("Backing dir at path %s created!\n", BKPATH);
+}
 
 static struct backingFds bkFd[MAXFD];
 int getBackingFileHandle(unsigned long dev_id) {
@@ -342,6 +369,8 @@ int main(int argc, char *argv[]) {
   struct pxdmm_client client;
 
   printf("arg count = %d\n", argc);
+  initBackingDir();
+
   assert(pxdmm_client_init(&client, UIO_PARAMS_BASE, UIODEV) == 0);
   printf("sizeof(pxdmm_cmdresp): %ld\n", sizeof(struct pxdmm_cmdresp));
   printf("device count: %d\n", getDeviceCount(client.mbox));
