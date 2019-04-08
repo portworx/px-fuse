@@ -170,7 +170,8 @@ bool bio_should_copy (struct bio *breq) {
 	struct bio_vec bvec;
 	struct bvec_iter i;
 	bio_for_each_segment(bvec, breq, i) {
-		if (page_mapped(bvec.bv_page) || PageAnon(bvec.bv_page)) {
+		struct page *pg = bvec.bv_page;
+		if (page_mapped(pg) || PageAnon(pg) || page_file_mapping(pg) != NULL) {
 			return true;
 		}
 	}
@@ -178,7 +179,8 @@ bool bio_should_copy (struct bio *breq) {
 	struct bio_vec *bvec;
 	int i;
 	bio_for_each_segment(bvec, breq, i) {
-		if (page_mapped(bvec->bv_page) || PageAnon(bvec->bv_page)) {
+		struct page *pg = bvec.bv_page;
+		if (page_mapped(pg) || PageAnon(pg) || page_file_mapping(pg) != NULL) {
 			return true;
 		}
 	}
@@ -186,6 +188,22 @@ bool bio_should_copy (struct bio *breq) {
 #endif
 	return false;
 }
+
+#if 0
+/*
+ * For address_spaces which do not use buffers nor write back.
+ */
+int __set_page_dirty_no_writeback(struct page *page)
+{
+	if (!PageDirty(page))
+			return !TestSetPageDirty(page);
+	return 0;
+}
+
+static const struct address_space_operations pxdmm_aops = {
+		.set_page_dirty = __set_page_dirty_no_writeback,
+};
+#endif
 
 static struct pxdmm_dev *udev;
 static struct page *apage, *bpage;
@@ -244,6 +262,15 @@ struct pxdmm_dev {
 
 	unsigned long ndevices;
 	struct miscdevice *parent;
+
+	// statistics...
+	atomic_t nsubmitted; // all submissions
+	atomic_t ncompleted; // successful completions
+	atomic_t nerrored; // all failed IOs
+	atomic_t ncongestion_in;
+	atomic_t ncongestion_out;
+	atomic_t nbounced;
+
 	unsigned long magictail;
 };
 
@@ -464,6 +491,28 @@ int uio_open(struct uio_info* info, struct inode *inode) {
 	udev->inode = inode;
 	udev->task = current;
 
+	//still validating whether it is possible to map a mapped page
+#if 0
+	if (inode->i_mapping) {
+		printk(KERN_INFO"Inode address space mapping exists.. @ %p\n", inode->i_mapping);
+
+		if (inode->i_mapping->a_ops) {
+			printk(KERN_INFO"Inode address space operations exists.. @ %p\n",
+					inode->i_mapping->a_ops);
+
+			if (inode->i_mapping->a_ops->set_page_dirty) {
+				printk(KERN_INFO"Inode address space operations spd exists.. @ %p\n",
+					inode->i_mapping->a_ops->set_page_dirty);
+			} else {
+				printk(KERN_INFO"Inode address space operations spd not set.. @ %p\n",
+					inode->i_mapping->a_ops->set_page_dirty);
+			}
+		}
+	}
+
+	inode->i_mapping->a_ops = &pxdmm_aops;
+#endif
+
 	pr_debug("open\n");
 
 	return 0;
@@ -532,6 +581,7 @@ int pxdmm_map_bio(struct pxdmm_dev *udev,
 		if (err) {
 			return err;
 		}
+		atomic_inc(&udev->nbounced);
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -1037,6 +1087,11 @@ static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, opaque
 
 
 static inline
+struct pxdmm_dev* dev_to_pxdmm(struct device *dev) {
+	return container_of(dev, struct pxdmm_dev, dev);
+}
+
+static inline
 struct pxdmm_dev* to_pxdmm_dev(struct uio_info *info) {
 	return container_of(info, struct pxdmm_dev, info);
 }
@@ -1064,13 +1119,40 @@ static ssize_t pxdmm_do_map(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxdmm_show_stats(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct pxdmm_dev *_udev = dev_to_pxdmm(dev);
+
+	if (sanitycheck(_udev)) {
+		return sprintf(buf, "Sanity check failed:udev got %p, expected %p\n",
+					_udev, udev);
+	}
+
+	return sprintf(buf,
+				" Submitted: %u\n"
+				" Completed: %u\n"
+				"  Errored: %u\n"
+				"  Bounced: %u\n"
+				"Congestion: %u/%u\n",
+				atomic_read(&udev->nsubmitted),
+				atomic_read(&udev->ncompleted),
+				atomic_read(&udev->nerrored),
+				atomic_read(&udev->nbounced),
+				atomic_read(&udev->ncongestion_in),
+				atomic_read(&udev->ncongestion_out));
+}
+
+
 // Debug device attributes
 static DEVICE_ATTR(map, S_IRUGO|S_IWUSR, NULL, pxdmm_do_map);
 static DEVICE_ATTR(unmap, S_IRUGO|S_IWUSR, NULL, pxdmm_do_unmap);
+static DEVICE_ATTR(stats, S_IRUGO|S_IWUSR, pxdmm_show_stats, NULL);
 
 static struct attribute *pxdmm_attrs[] = {
 	&dev_attr_map.attr,
 	&dev_attr_unmap.attr,
+	&dev_attr_stats.attr,
 	NULL
 };
 
@@ -1188,6 +1270,14 @@ static int pxdmm_dev_init(void) {
 
 	udev->parent = &ctldev;
 
+	// initialize statistics
+	atomic_set(&udev->nsubmitted, 0);
+	atomic_set(&udev->ncompleted, 0);
+	atomic_set(&udev->nerrored, 0);
+	atomic_set(&udev->nbounced, 0);
+	atomic_set(&udev->ncongestion_in, 0);
+	atomic_set(&udev->ncongestion_out, 0);
+
 	// initialize magic for sanity.
 	udev->magichead = MAGICHEAD;
 	udev->magictail = MAGICTAIL;
@@ -1244,6 +1334,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	int err;
 	size_t dataSize = 0;
 	opaque_t io_index;
+	bool congested = false;
 
 	if (!udev || !sanitycheck(udev) || !pxd_dev) {
 		printk("No mm dev (or sanity check failed) %p initialized for pxd_dev\n", udev);
@@ -1273,6 +1364,10 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 				bitmap_full(udev->dbi, MAXDBINDICES));
 		spin_unlock_irqrestore(&udev->lock, f);
 		/* congestion wait */
+		if (!congested) {
+			congested = true;
+			atomic_inc(&udev->ncongestion_in);
+		}
 		wait_event_timeout(udev->serializeQ,
 				!cmdQFull(udev->mbox) &&
 				!bitmap_full(udev->rmap, NREQUESTS) &&
@@ -1283,6 +1378,10 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
 				bitmap_full(udev->rmap, NREQUESTS),
 				bitmap_full(udev->dbi, MAXDBINDICES));
+	}
+
+	if (congested) { // out of congestion
+		atomic_inc(&udev->ncongestion_out);
 	}
 
 	//  fill up the cmd structure
@@ -1405,7 +1504,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	incrCmdQHead(udev->mbox);
 
 out:
-	if (!err) atomic_inc(&pxd_dev->nactive);
+	if (!err) { atomic_inc(&pxd_dev->nactive); }
 	spin_unlock_irqrestore(&udev->lock, f);
 
 	return err;
@@ -1422,10 +1521,13 @@ int pxdmm_add_request(struct pxd_device *pxd_dev,
 		return -EIO;
 	}
 
+	atomic_inc(&udev->nsubmitted);
+
 	err = __pxdmm_add_request(pxd_dev, q, bio);
 	if (err) {
 		/* failed submission */
 		printk("Failed submission for a new request bio %p, status %d\n", bio, err);
+		atomic_inc(&udev->nerrored);
 		BIO_ENDIO(bio, err);
 	}
 	return err;
@@ -1560,6 +1662,11 @@ int pxdmm_complete_request (struct pxdmm_dev *udev) {
 		dbg_printk("completing[%p]: cmd %d, BIO %p with status %u\n",
 					udev, top.cmd, bio, status);
 		if (bio) {
+			if (status) {
+				atomic_inc(&udev->nerrored);
+			} else {
+				atomic_inc(&udev->ncompleted);
+			}
 			BIO_ENDIO(bio, status);
 		}
 	}
