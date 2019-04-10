@@ -206,7 +206,10 @@ static const struct address_space_operations pxdmm_aops = {
 #endif
 
 static struct pxdmm_dev *udev;
+
+#ifdef DBGMODE
 static struct page *apage, *bpage;
+#endif
 
 static inline
 void fillpage (struct page *pg) {
@@ -448,7 +451,9 @@ static const struct vm_operations_struct pxdmm_vma_ops = {
 };
 
 // DEBUG interfaces for testing
+#ifdef DBGMODE
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *,opaque_t dbi);
+#endif
 static void pxdmm_unmap(struct pxdmm_dev* udev, opaque_t dbi, bool force);
 
 static
@@ -468,7 +473,7 @@ int uio_mmap(struct uio_info* info, struct vm_area_struct  *vma) {
 	if (vma_pages(vma) != (udev->totalWindowLength >> PAGE_SHIFT))
 		return -EINVAL;
 
-#if 0
+#ifdef DBGMODE
 	dbg_printk("mapping dbi 0\n");
 	pxdmm_map(udev, vma, 0);
 	dbg_printk("mapping dbi 1\n");
@@ -1069,6 +1074,7 @@ void pxdmm_unmap(struct pxdmm_dev* udev, opaque_t dbi, bool force) {
 	handle_free_bounce(handle);
 }
 
+#ifdef DBGMODE
 static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, opaque_t dbi) {
 	struct mm_struct *mm;
 	loff_t offset;
@@ -1106,7 +1112,7 @@ static void pxdmm_map(struct pxdmm_dev* udev, struct vm_area_struct *vma, opaque
 		return;
 	}
 }
-
+#endif
 
 static inline
 struct pxdmm_dev* dev_to_pxdmm(struct device *dev) {
@@ -1118,6 +1124,7 @@ struct pxdmm_dev* to_pxdmm_dev(struct uio_info *info) {
 	return container_of(info, struct pxdmm_dev, info);
 }
 
+#ifdef DBGMODE
 static ssize_t pxdmm_do_unmap(struct device *dev,
                      struct device_attribute *attr, const char *buf, size_t count)
 {
@@ -1140,6 +1147,7 @@ static ssize_t pxdmm_do_map(struct device *dev, struct device_attribute *attr,
 
 	return count;
 }
+#endif
 
 static ssize_t pxdmm_show_stats(struct device *dev,
 			     struct device_attribute *attr, char *buf)
@@ -1167,13 +1175,17 @@ static ssize_t pxdmm_show_stats(struct device *dev,
 
 
 // Debug device attributes
+static DEVICE_ATTR(stats, S_IRUGO|S_IWUSR, pxdmm_show_stats, NULL);
+#ifdef DBGMODE
 static DEVICE_ATTR(map, S_IRUGO|S_IWUSR, NULL, pxdmm_do_map);
 static DEVICE_ATTR(unmap, S_IRUGO|S_IWUSR, NULL, pxdmm_do_unmap);
-static DEVICE_ATTR(stats, S_IRUGO|S_IWUSR, pxdmm_show_stats, NULL);
+#endif
 
 static struct attribute *pxdmm_attrs[] = {
+#ifdef DBGMODE
 	&dev_attr_map.attr,
 	&dev_attr_unmap.attr,
+#endif
 	&dev_attr_stats.attr,
 	NULL
 };
@@ -1316,8 +1328,10 @@ int pxdmm_init(void) {
 		return err;
 	}
 
+#ifdef DBGMODE
 	apage = alloc_pages(GFP_KERNEL, get_order(PAGE_SIZE));
 	bpage = alloc_pages(GFP_KERNEL, get_order(PAGE_SIZE));
+#endif
 
 	dbg_printk("Allocated apage %p, bpage %p\n", apage, bpage);
 	return 0;
@@ -1327,20 +1341,17 @@ int pxdmm_init(void) {
 void pxdmm_exit(void) {
 	kthread_stop(udev->thread);
 
+#ifdef DBGMODE
 	dbg_printk("Freeing apage %p, bpage %p\n", apage, bpage);
 	__free_pages(apage, get_order(PAGE_SIZE));
 	__free_pages(bpage, get_order(PAGE_SIZE));
+#endif
 
 	uio_unregister_device(&udev->info);
 
 	misc_deregister(&ctldev);
 	root_device_unregister(pxdmm_root_dev);
 
-	printk("Freeing data window @ %p\n", udev->dataWindow);
-	// vfree(dataWindow);
-	printk("Freeing respQ @ %p\n", udev->respQ);
-	printk("Freeing cmdQ @ %p\n", udev->cmdQ);
-	printk("Freeing mbox @ %p\n", udev->mbox);
 	vfree(udev->base);
 	kfree(udev);
 }
@@ -1380,7 +1391,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 	//  lock mbox access and get next index
 	spin_lock_irqsave(&udev->lock, f);
 	while (!assignResources(udev, bio_has_data(bio), dataSize, &io_index)) {
-		printk(KERN_INFO"Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d/%d\n",
+		dbg_printk("Hit congestion... wait until free cmdQ Head:Tail %llu:%llu, bm full %d/%d\n",
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
 				bitmap_full(udev->rmap, NREQUESTS),
 				bitmap_full(udev->dbi, MAXDBINDICES));
@@ -1396,7 +1407,7 @@ int __pxdmm_add_request(struct pxd_device *pxd_dev,
 				!bitmap_full(udev->dbi, MAXDBINDICES),
 				HZ);
 		spin_lock_irqsave(&udev->lock, f);
-		printk(KERN_INFO"congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d/%d\n",
+		dbg_printk("congestion wakeup... check if free cmdQ Head:Tail %llu:%llu bm full %d/%d\n",
 				udev->mbox->cmdHead, udev->mbox->cmdTail,
 				bitmap_full(udev->rmap, NREQUESTS),
 				bitmap_full(udev->dbi, MAXDBINDICES));
