@@ -171,7 +171,7 @@ bool bio_should_copy (struct bio *breq) {
 	struct bvec_iter i;
 	bio_for_each_segment(bvec, breq, i) {
 		struct page *pg = bvec.bv_page;
-		if (page_mapped(pg) || PageAnon(pg) || page_file_mapping(pg) != NULL) {
+		if (PageAnon(pg)) {
 			return true;
 		}
 	}
@@ -180,7 +180,7 @@ bool bio_should_copy (struct bio *breq) {
 	int i;
 	bio_for_each_segment(bvec, breq, i) {
 		struct page *pg = bvec.bv_page;
-		if (page_mapped(pg) || PageAnon(pg) || page_file_mapping(pg) != NULL) {
+		if (PageAnon(pg)) {
 			return true;
 		}
 	}
@@ -591,9 +591,9 @@ int pxdmm_map_bio(struct pxdmm_dev *udev,
 
 		BUG_ON(bvec.bv_offset || length != bvec.bv_len);
 
-		dbg_printk("for bio: %p vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu) pgCount:%d, anon %d, mapped %d, data_offset %u\n",
+		dbg_printk("for bio: %p vm_insert_page(vma=%p, offset=%p, pg=[%p,off=%u,len=%u], len=%llu) pgCount:%d, anon %d, mapped %d, locked %d, data_offset %u\n",
 				bio, vma, (void*) offset, pg, bvec.bv_offset, bvec.bv_len, length,
-				page_count(pg), PageAnon(pg), page_mapped(pg), data_offset);
+				page_count(pg), PageAnon(pg), page_mapped(pg), PageLocked(pg), data_offset);
 
 		if (handle->bounce) {
 			struct page *newpage = get_bounce_page(handle, segment);
@@ -613,6 +613,10 @@ int pxdmm_map_bio(struct pxdmm_dev *udev,
 			data_offset += bvec.bv_len;
 			segment++;
 		}
+
+		/* XXX: mark page still dirty */
+		if (!handle->bounce) SetPageDirty(pg);
+
 		err = vm_insert_page(vma, offset, pg);
 		if (err) {
 			printk(KERN_ERR"vm_insert_page(vma=%p[%#lx:%#lx], offset=%p, page=%p) failed with error: %d\n",
@@ -1043,6 +1047,24 @@ void pxdmm_unmap(struct pxdmm_dev* udev, opaque_t dbi, bool force) {
 
 	unmap_mapping_range(as, offset, handle->length, 1);
 
+	/* walk through all the pages and clear PageDirty that was set earlier */
+	if (!handle->bounce) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+		struct bio_vec bvec;
+		struct bvec_iter i;
+		bio_for_each_segment(bvec, handle->bio, i) {
+			struct page *pg = bvec.bv_page;
+			ClearPageDirty(pg);
+		}
+#else
+		struct bio_vec *bvec;
+		int i;
+		bio_for_each_segment(bvec, bio, i) {
+			struct page *pg = bvec->bv_page;
+			ClearPageDirty(pg);
+		}
+#endif
+	}
 	/* free up all resources in clone bio */
 	handle_free_bounce(handle);
 }
