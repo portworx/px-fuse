@@ -15,7 +15,7 @@
 
 #include "pxd_compat.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 #include <linux/blk-mq.h>
 #include <linux/workqueue.h>
 
@@ -90,7 +90,7 @@ struct pxd_device {
 	bool removing;
 	struct pxd_context *ctx;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
         struct blk_mq_tag_set tag_set;
 #endif
 };
@@ -196,7 +196,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 	part_stat_lock();
         part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
         part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
@@ -252,7 +252,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,18,0)
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
@@ -262,7 +262,7 @@ static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,18,0)
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
@@ -469,7 +469,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	return BLK_QC_RETVAL;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,18,0)
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -530,7 +530,7 @@ static void pxd_queue_workfn(struct work_struct *work)
 	u64 length = blk_rq_bytes(rq);
 	int result = 0;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq)) {     
+	if (BLK_RQ_IS_PASSTHROUGH(rq)) {
 		pxd_printk("%s: invalid request type %d\n", __func__, (int)rq->cmd_type);
 		result = -EIO;
 		goto err;
@@ -573,7 +573,7 @@ static void pxd_queue_workfn(struct work_struct *work)
 	req->misc.pxd_rdwr_in.chksum = 0;
 	req->misc.pxd_rdwr_in.pad = 0;
 	req->rq = rq;
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req); 
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	//spin_lock_irq(&pxd_dev->qlock);
 	return;
 
@@ -634,7 +634,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 			goto out_disk;
 		blk_queue_make_request(q, pxd_make_request);
 	} else {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 	  int err;
 
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
@@ -695,7 +695,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	pxd_dev->disk = disk;
 
 	return 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 out_free_tags:
 	blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
@@ -716,7 +716,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
 	}
@@ -1354,7 +1354,7 @@ int pxd_init(void)
 			pxd_miscdev.name, err);
 		goto out_fuse;
 	}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
         pxd_wq = alloc_workqueue("pxd", WQ_MEM_RECLAIM, 0);
         if (!pxd_wq) {
                 err = -ENOMEM;
@@ -1381,7 +1381,7 @@ int pxd_init(void)
 out_blkdev:
 	unregister_blkdev(0, "pxd");
 out_wq:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
         destroy_workqueue(pxd_wq);
 out_misc:
 #endif
@@ -1403,7 +1403,7 @@ void pxd_exit(void)
 
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
         destroy_workqueue(pxd_wq);
 #endif
 	misc_deregister(&pxd_miscdev);
