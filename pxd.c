@@ -15,8 +15,14 @@
 
 #include "pxd_compat.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)	
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
 #include <linux/blk-mq.h>
+#include <linux/workqueue.h>
+
+#define SECTOR_SHIFT    9
+
+static struct workqueue_struct *pxd_wq;
+
 #endif
 
 /** enables time tracing */
@@ -71,10 +77,6 @@ module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
 struct pxd_device {
-  
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
-        struct blk_mq_tag_set tag_set;
-#endif
 	uint64_t dev_id;
 	int major;
 	int minor;
@@ -87,6 +89,10 @@ struct pxd_device {
 	int open_count;
 	bool removing;
 	struct pxd_context *ctx;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+        struct blk_mq_tag_set tag_set;
+#endif
 };
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
@@ -190,10 +196,10 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)	
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
 	part_stat_lock();
         part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-        part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);	
+        part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
 #else
 	int cpu = part_stat_lock();
 	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
@@ -246,16 +252,20 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)  
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+#else
+	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
 #endif
 	pxd_request_complete(fc, req);
 }
 
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)  
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+#else
+	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
 #endif
 	pxd_request_complete(fc, req);
 }
@@ -509,38 +519,90 @@ static void pxd_rq_fn(struct request_queue *q)
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
-#endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
-static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
-				 const struct blk_mq_queue_data *bd)
+#else
+static void pxd_queue_workfn(struct work_struct *work)
 {
-  return 0;
+	struct request *rq = blk_mq_rq_from_pdu(work);
+	struct pxd_device *pxd_dev = rq->q->queuedata;
+	struct fuse_req *req;
+	u64 offset = (u64)blk_rq_pos(rq) << SECTOR_SHIFT;
+	u64 length = blk_rq_bytes(rq);
+	int result = 0;
+
+	if (BLK_RQ_IS_PASSTHROUGH(rq)) {     
+		pxd_printk("%s: invalid request type %d\n", __func__, (int)rq->cmd_type);
+		result = -EIO;
+		goto err;
+	}
+
+	if (!length) {
+		pxd_printk("%s: zero-length request\n", __func__);
+		result = 0;
+		goto err;
+	}
+
+	if (offset && length > U64_MAX - offset + 1) {
+		pxd_printk("bad request range (%llu~%llu)", offset, length);
+		result = -EINVAL;
+		goto err;
+	}
+
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+		"flags  %llx\n", __func__,
+		pxd_dev->minor, pxd_dev->dev_id,
+		rq_data_dir(rq) == WRITE ? "wr" : "rd",
+		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, rq->cmd_flags);
+
+	blk_mq_start_request(rq);
+	//spin_unlock_irq(&pxd_dev->qlock);
+
+	req = pxd_fuse_req(pxd_dev, 0);
+	if (IS_ERR(req)) {
+		//spin_lock_irq(&pxd_dev->qlock);
+		blk_mq_end_request(rq, errno_to_blk_status(EIO));
+		goto err;
+	}
+
+	pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+		    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
+			REQCTR(&pxd_dev->ctx->fc));
+
+	req->num_pages = 0;
+	req->misc.pxd_rdwr_in.chksum = 0;
+	req->misc.pxd_rdwr_in.pad = 0;
+	req->rq = rq;
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req); 
+	//spin_lock_irq(&pxd_dev->qlock);
+	return;
+
+err:
+	blk_mq_end_request(rq, result);
+}
+
+static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
+		const struct blk_mq_queue_data *bd)
+{
+	struct request *rq = bd->rq;
+	struct work_struct *work = blk_mq_rq_to_pdu(rq);
+
+	queue_work(pxd_wq, work);
+	return BLK_STS_OK;
 }
 
 static int pxd_init_request(struct blk_mq_tag_set *set, struct request *rq,
 			    unsigned int hctx_idx, unsigned int numa_node)
 {
-  return 0;
-}
+	struct work_struct *work = blk_mq_rq_to_pdu(rq);
 
-static void pxd_complete_rq(struct request *req)
-{
-  blk_mq_end_request(req, BLK_STS_OK);
-}
-
-static enum blk_eh_timer_return pxd_xmit_timeout(struct request *req,
-						 bool reserved)
-{
-  blk_mq_complete_request(req);
-  return BLK_EH_DONE;
+	INIT_WORK(work, pxd_queue_workfn);
+	return 0;
 }
 
 static const struct blk_mq_ops pxd_mq_ops = {
-  .queue_rq       = pxd_queue_rq,
-  .complete       = pxd_complete_rq,
-  .init_request   = pxd_init_request,
-  .timeout        = pxd_xmit_timeout,
+	.queue_rq       = pxd_queue_rq,
+	.init_request   = pxd_init_request,
 };
 #endif
 
@@ -575,28 +637,32 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
 	  int err;
 
+	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
-	  pxd_dev->tag_set.nr_hw_queues = 1;
+
+
 	  pxd_dev->tag_set.queue_depth = PXD_MAX_QDEPTH;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
-	  pxd_dev->tag_set.driver_data = pxd_dev;
+	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_SG_MERGE;
+	  pxd_dev->tag_set.nr_hw_queues = 8;
+	  pxd_dev->tag_set.cmd_size = sizeof(struct work_struct);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
 	  if (err)
 	    goto out_disk;
-	  
+
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
 	    err = PTR_ERR(q);
 	    goto out_free_tags;
 	  }
-#else	  
+#else
 	  q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 #endif
 	  if (!q)
 	    goto out_disk;
 	}
-	
+
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_io_min(q, PXD_LBS);
@@ -627,7 +693,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
-	
+
 	return 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
 out_free_tags:
@@ -650,6 +716,9 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+		blk_mq_free_tag_set(&pxd_dev->tag_set);
+#endif
 	}
 	put_disk(disk);
 }
@@ -1285,12 +1354,18 @@ int pxd_init(void)
 			pxd_miscdev.name, err);
 		goto out_fuse;
 	}
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+        pxd_wq = alloc_workqueue("pxd", WQ_MEM_RECLAIM, 0);
+        if (!pxd_wq) {
+                err = -ENOMEM;
+                goto out_misc;
+        }
+#endif
 	pxd_major = register_blkdev(0, "pxd");
 	if (pxd_major < 0) {
 		err = pxd_major;
 		printk(KERN_ERR "pxd: failed to register dev pxd: %d\n", err);
-		goto out_misc;
+		goto out_wq;
 	}
 
 	err = pxd_sysfs_init();
@@ -1305,7 +1380,11 @@ int pxd_init(void)
 
 out_blkdev:
 	unregister_blkdev(0, "pxd");
+out_wq:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+        destroy_workqueue(pxd_wq);
 out_misc:
+#endif
 	misc_deregister(&pxd_miscdev);
 out_fuse:
 	for (j = 0; j < i; ++j) {
@@ -1324,6 +1403,9 @@ void pxd_exit(void)
 
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+        destroy_workqueue(pxd_wq);
+#endif
 	misc_deregister(&pxd_miscdev);
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
