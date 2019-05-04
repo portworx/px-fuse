@@ -4,9 +4,15 @@ obj-m = px.o
 KBUILD_CPPFLAGS := -D__KERNEL__
 PXDEFINES := -D__PXKERNEL__
 
+KVERSION=$(shell uname -r)
+
+# EL8 Specific kernel checks
+ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)
+PXDEFINES += -D__PX_BLKMQ__
+endif
+
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
-KVERSION=$(shell uname -r)
 ifndef KERNELPATH
 ifeq ($(shell test -d "/usr/src/linux-headers-$(KVERSION)"; echo $$?),0)
      KERNELPATH=/usr/src/linux-headers-$(KVERSION)
