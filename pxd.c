@@ -198,8 +198,8 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 
 #ifdef __PX_BLKMQ__
 	part_stat_lock();
-        part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-        part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
+	part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
+	part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
 #else
 	int cpu = part_stat_lock();
 	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
@@ -521,32 +521,15 @@ static void pxd_rq_fn(struct request_queue *q)
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
-
 #else
 static void pxd_queue_workfn(struct work_struct *work)
 {
 	struct request *rq = blk_mq_rq_from_pdu(work);
 	struct pxd_device *pxd_dev = rq->q->queuedata;
-	struct fuse_req *req;
-	u64 offset = (u64)blk_rq_pos(rq) << SECTOR_SHIFT;
-	u64 length = blk_rq_bytes(rq);
-	int result = 0;
+	struct fuse_req *req = NULL;
+	blk_status_t error = BLK_STS_OK;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq)) {
-		pxd_printk("%s: invalid request type %d\n", __func__, (int)rq->cmd_type);
-		result = -EIO;
-		goto err;
-	}
-
-	if (!length) {
-		pxd_printk("%s: zero-length request\n", __func__);
-		result = 0;
-		goto err;
-	}
-
-	if (offset && length > U64_MAX - offset + 1) {
-		pxd_printk("bad request range (%llu~%llu)", offset, length);
-		result = -EINVAL;
 		goto err;
 	}
 
@@ -558,29 +541,26 @@ static void pxd_queue_workfn(struct work_struct *work)
 		rq->nr_phys_segments, rq->cmd_flags);
 
 	blk_mq_start_request(rq);
-	//spin_unlock_irq(&pxd_dev->qlock);
 
 	req = pxd_fuse_req(pxd_dev, 0);
 	if (IS_ERR(req)) {
-		//spin_lock_irq(&pxd_dev->qlock);
-		blk_mq_end_request(rq, errno_to_blk_status(EIO));
+		error = BLK_STS_IOERR;
 		goto err;
 	}
 
 	pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-		    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
-			REQCTR(&pxd_dev->ctx->fc));
+		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
+		REQCTR(&pxd_dev->ctx->fc));
 
 	req->num_pages = 0;
 	req->misc.pxd_rdwr_in.chksum = 0;
 	req->misc.pxd_rdwr_in.pad = 0;
 	req->rq = rq;
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
-	//spin_lock_irq(&pxd_dev->qlock);
 	return;
 
 err:
-	blk_mq_end_request(rq, result);
+	blk_mq_end_request(rq, error);
 }
 
 static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
@@ -612,6 +592,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
+	int err = 0;
 
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
 		return -EINVAL;
@@ -632,17 +613,15 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	/* Bypass queue if queue_depth is zero. */
 	if (add->queue_depth == 0) {
 		q = blk_alloc_queue(GFP_KERNEL);
-		if (!q)
+		if (!q) {
+			err = -ENOMEM;
 			goto out_disk;
+		}
 		blk_queue_make_request(q, pxd_make_request);
 	} else {
 #ifdef __PX_BLKMQ__
-	  int err;
-
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
-
-
 	  pxd_dev->tag_set.queue_depth = PXD_MAX_QDEPTH;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE | BLK_MQ_F_SG_MERGE;
@@ -655,16 +634,18 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
-	    err = PTR_ERR(q);
-	    goto out_free_tags;
+		err = PTR_ERR(q);
+		blk_mq_free_tag_set(&pxd_dev->tag_set);
+		goto out_disk;
 	  }
 #else
 	  q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
+	  if (!q) {
+		err = -ENOMEM;
+	  	goto out_disk;
+	  }
 #endif
-	  if (!q)
-	    goto out_disk;
-	}
-
+       }
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_io_min(q, PXD_LBS);
@@ -697,13 +678,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	pxd_dev->disk = disk;
 
 	return 0;
-#ifdef __PX_BLKMQ__
-out_free_tags:
-	blk_mq_free_tag_set(&pxd_dev->tag_set);
-#endif
 out_disk:
 	put_disk(disk);
-	return -ENOMEM;
+	return err;
 }
 
 static void pxd_free_disk(struct pxd_device *pxd_dev)
@@ -1376,7 +1353,11 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 
+#ifdef __PX_BLKMQ__
+	printk(KERN_INFO "pxd: blk-mq driver loaded version %s\n", gitversion);
+#else
 	printk(KERN_INFO "pxd: driver loaded version %s\n", gitversion);
+#endif
 
 	return 0;
 
