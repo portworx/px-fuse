@@ -196,16 +196,9 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 	struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#ifdef __PX_BLKMQ__
-	part_stat_lock();
-	part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-	part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
-#else
 	int cpu = part_stat_lock();
 	part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
 	part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
-#endif
-
 	part_stat_unlock();
 }
 
