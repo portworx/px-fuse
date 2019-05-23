@@ -6,13 +6,6 @@ PXDEFINES := -D__PXKERNEL__
 
 KVERSION=$(shell uname -r)
 
-# EL8 Specific kernel checks
-ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)
-PXDEFINES += -D__PX_BLKMQ__
-endif
-
-ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
-
 ifndef KERNELPATH
 ifeq ($(shell test -d "/usr/src/linux-headers-$(KVERSION)"; echo $$?),0)
      KERNELPATH=/usr/src/linux-headers-$(KVERSION)
@@ -21,11 +14,28 @@ else
 endif
 endif
 
+# Check for version in KERNELPATH version release file
+ifeq ($(shell test -f "$(KERNELPATH)/include/generated/utsrelease.h"; echo $$?),0)
+CHK_KVER=$(shell sed -n 's/.* *UTS_RELEASE *"\(.*\)".*/\1/p' $(KERNELPATH)/include/generated/utsrelease.h)
+endif
+
+# If no KERNELPATH version found or extract fails use $(KVERSION)
+ifeq ($(CHK_KVER),)
+CHK_KVER=$(KVERSION)
+endif
+
+# EL8 Specific kernel checks
+ifeq ($(shell test "$(CHK_KVER)" = "4.18.0-80.el8.x86_64"  -o  "$(CHK_KVER)" = "4.18.0-80.1.2.el8.x86_64" -o "$(CHK_KVER)" = "4.18.0.el8.x86_64"; echo $$?),0)
+PXDEFINES += -D__PX_BLKMQ__
+endif
+
+ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
+
 ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
 $(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif
 
-ifeq ($(shell test  -f "/usr/bin/bc"; echo $$?),0)
+ifeq ($(shell test -f "/usr/bin/bc"; echo $$?),0)
 MINKVER=3.10
 KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
 ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
