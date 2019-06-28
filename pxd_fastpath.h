@@ -59,6 +59,12 @@ struct pxd_fastpath_extension {
 	spinlock_t   	sync_lock;
 	atomic_t nsync_active; // [global] currently active?
 	atomic_t nsync; // [global] number of forced syncs completed
+	atomic_t nio_discard;
+	atomic_t nio_preflush;
+	atomic_t nio_flush;
+	atomic_t nio_flush_nop;
+	atomic_t nio_fua;
+	atomic_t nio_write;
 	atomic_t ncount; // [global] total active requests
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path

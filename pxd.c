@@ -554,6 +554,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
 	//blk_queue_flag_set(QUEUE_FLAG_NOMERGES, q);
+	//queue_flag_set_unlocked(QUEUE_FLAG_NOMERGES, q);
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
@@ -789,6 +790,10 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	struct pxd_device *pxd_dev;
 	int i;
 	struct file* f;
+	int mode = O_DIRECT | O_LARGEFILE | O_RDWR | O_NOATIME;
+
+	printk(KERN_INFO "%s for path %s\n",
+		__func__, update_path->devpath[0]);
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -801,10 +806,12 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	spin_unlock(&ctx->lock);
 
 	if (!found) {
+		printk(KERN_INFO "dev not found: %llu\n", pxd_dev->dev_id);
 		err = -ENOENT;
 		goto out;
 	}
 
+	if (pxd_dev->sync) mode |= O_SYNC;
 	for (i=0; i<update_path->size; i++) {
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
 			// If previous paths are same.. then skip anymore config.
@@ -815,7 +822,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 
 		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 
-		f = filp_open(update_path->devpath[i], O_DIRECT | O_LARGEFILE | O_RDWR, 0600);
+		f = filp_open(update_path->devpath[i], mode, 0600);
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
 				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
@@ -832,8 +839,8 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 
 	spin_unlock(&pxd_dev->lock);
 
-	printk(KERN_INFO"Success attaching path to device %llu [nfd:%d]\n",
-		pxd_dev->dev_id, pxd_dev->fp.nfd);
+	printk(KERN_INFO"Success attaching path to device %llu mode %#x [nfd:%d]\n",
+		pxd_dev->dev_id, mode, pxd_dev->fp.nfd);
 	return 0;
 
 out_file_failed:
@@ -932,8 +939,12 @@ static ssize_t pxd_active_show(struct device *dev,
 	int ncount;
 	int available=PAGE_SIZE-1;
 
-	ncount=snprintf(cp, available, "nactive: %u/%u, switched: %u, slowpath: %u\n",
+	ncount=snprintf(cp, available, "nactive: %u/%u, [write: %u, flush: %u(nop: %u), fua: %u, discard: %u, preflush: %u], switched: %u, slowpath: %u\n",
                 atomic_read(&pxd_dev->fp.ncount), atomic_read(&pxd_dev->fp.ncomplete),
+		atomic_read(&pxd_dev->fp.nio_write),
+		atomic_read(&pxd_dev->fp.nio_flush), atomic_read(&pxd_dev->fp.nio_flush_nop),
+		atomic_read(&pxd_dev->fp.nio_fua), atomic_read(&pxd_dev->fp.nio_discard),
+		atomic_read(&pxd_dev->fp.nio_preflush),
 		atomic_read(&pxd_dev->fp.nswitch), atomic_read(&pxd_dev->fp.nslowPath));
 
 	return ncount;

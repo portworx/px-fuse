@@ -49,11 +49,6 @@ sector_t getsectors(struct bio *breq) {
 	return compute_bio_rq_size(breq) >> 9;
 }
 
-static inline
-sector_t getsectors(struct bio *breq) {
-	return compute_bio_rq_size(breq) >> 9;
-}
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 #define BIO_OP(bio)   bio_op(bio)
 #define SUBMIT_BIO(bio) submit_bio(bio)

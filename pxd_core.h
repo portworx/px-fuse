@@ -35,10 +35,11 @@ struct pxd_device {
 	struct pxd_fastpath_extension fp;
 	struct pxd_context *ctx;
 	bool connected;
+	bool sync;
 };
 
 #define pxd_printk(args...)
-//#define pxd_printk(args...) printk(KERN_ERR args)
+//#define pxd_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
 
 #ifndef SECTOR_SIZE
 #define SECTOR_SIZE 512
