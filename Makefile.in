@@ -1,10 +1,8 @@
-px-objs = pxd.o dev.o iov_iter.o px_version.o pxd_fastpath.o
+px-objs = pxd.o dev.o iov_iter.o px_version.o 
 obj-m = px.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__
 PXDEFINES := -D__PXKERNEL__
-
-ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
 KVERSION=$(shell uname -r)
 ifndef KERNELPATH
@@ -19,17 +17,32 @@ ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
 $(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif
 
-ifeq ($(shell test  -f "/usr/bin/bc"; echo $$?),0)
 MINKVER=3.10
-KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
-ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
+FPATH_MINKVER=4.0
+KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
+
+ifeq ($(shell expr $(KERNELVER) \>= $(MINKVER)),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif
+
+ifeq ($(shell expr $(KERNELVER) \>= $(FPATH_MINKVER)),1)
+px-objs += pxd_fastpath.o
+PXDEFINES:=$(PXDEFINES) -D__PX_FASTPATH__
+$(warning kernel fast path enabled, version $(KVERSION).)
+
+## below are debug messages
+$(warning Debug kernel fast path enabled, px-objs $(px-objs).)
+$(warning Debug kernel fast path enabled, PXDEFINES=$(PXDEFINES).)
+else
+px-objs += pxd_fastpath_stub.o
+$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 endif
 
 ifdef KERNELOTHER
 KERNELOTHEROPT=O=$(KERNELOTHER)
 endif
+
+ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
 MAJOR=$(shell echo $(KVERSION) | awk -F. '{print $$1}')
 MINOR=$(shell echo $(KVERSION) | awk -F. '{print $$2}')
