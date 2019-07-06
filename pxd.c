@@ -534,16 +534,26 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	/* Bypass queue if queue_depth is zero. */
-#ifndef USE_REQUESTQ_MODEL
+#ifdef __PX_FASTPATH__
 	q = blk_alloc_queue(GFP_KERNEL);
 	if (!q)
 		goto out_disk;
 	blk_queue_make_request(q, pxd_make_request_fastpath);
 #else
-	q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
-	if (!q)
-		goto out_disk;
+
+#ifndef USE_REQUESTQ_MODEL
+		q = blk_alloc_queue(GFP_KERNEL);
+		if (!q) {
+			goto out_disk;
+		}
+		blk_queue_make_request(q, pxd_make_request_slowpath);
+#else
+		q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
+		if (!q) {
+			goto out_disk;
+		}
+#endif
+
 #endif
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
