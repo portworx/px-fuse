@@ -66,8 +66,18 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 
 
 static inline
-mode_t open_mode(void) {
-	return O_LARGEFILE | O_NOATIME | O_RDWR;
+mode_t open_mode(mode_t mode) {
+	mode_t m = O_LARGEFILE | O_NOATIME; // default
+	if (mode & O_RDONLY) {
+		m |= O_RDONLY;
+	} else {
+		m |= O_RDWR;
+	}
+
+	if (mode & O_SYNC) m |= O_SYNC;
+	if (mode & O_DIRECT) m |= O_DIRECT;
+
+	return m;
 }
 
 #endif /* _PXD_CORE_H_ */

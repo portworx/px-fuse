@@ -682,7 +682,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force) {
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int nfd = fp->nfd;
-	mode_t mode = open_mode();
+	mode_t mode = open_mode(pxd_dev->mode);
 
 	for (i=0; i<nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
