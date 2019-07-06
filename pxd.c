@@ -2,7 +2,6 @@
 #include <linux/blkdev.h>
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
-#include <linux/miscdevice.h>
 #include "fuse_i.h"
 #include "pxd.h"
 
@@ -14,12 +13,11 @@
 #undef CREATE_TRACE_POINTS
 
 #include "pxd_compat.h"
+#include "pxd_core.h"
 
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
 #include <linux/workqueue.h>
-
-#define SECTOR_SHIFT    9
 
 static struct workqueue_struct *pxd_wq;
 
@@ -33,14 +31,6 @@ static struct workqueue_struct *pxd_wq;
 #define KTIME_GET_TS(t)
 #endif
 
-#define pxd_printk(args...)
-//#define pxd_printk(args...) printk(KERN_ERR args)
-
-#ifndef SECTOR_SIZE
-#define SECTOR_SIZE 512
-#endif
-#define SEGMENT_SIZE (1024 * 1024)
-
 #define PXD_TIMER_SECS_MIN 30
 #define PXD_TIMER_SECS_MAX 600
 
@@ -51,21 +41,6 @@ extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
-struct pxd_context {
-	spinlock_t lock;
-	struct list_head list;
-	size_t num_devices;
-	struct fuse_conn fc;
-	struct file_operations fops;
-	char name[256];
-	int id;
-	struct miscdevice miscdev;
-	struct list_head pending_requests;
-	struct timer_list timer;
-	bool init_sent;
-	uint64_t unique;
-};
-
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -75,25 +50,6 @@ uint32_t pxd_detect_zero_writes = 0;
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
-
-struct pxd_device {
-	uint64_t dev_id;
-	int major;
-	int minor;
-	struct gendisk *disk;
-	struct device dev;
-	size_t size;
-	spinlock_t lock;
-	spinlock_t qlock;
-	struct list_head node;
-	int open_count;
-	bool removing;
-	struct pxd_context *ctx;
-
-#ifdef __PX_BLKMQ__
-        struct blk_mq_tag_set tag_set;
-#endif
-};
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
@@ -438,13 +394,14 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-#ifndef USE_REQUESTQ_MODEL
+// fastpath uses this path to punt requests to slowpath
+#if !defined(USE_REQUESTQ_MODEL) || defined(__PX_FASTPATH__)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
+static blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-static void pxd_make_request(struct request_queue *q, struct bio *bio)
+static void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
@@ -623,14 +580,21 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	/* cannot be chosen dynamically as other files also need to know how requests are to be processed. */
+	/* cannot choose io processing model dynamically based on queue size.
+	 * Because other files also need to know how requests are to be processed.
+	 */
 #if !defined(USE_REQUESTQ_MODEL)
 	q = blk_alloc_queue(GFP_KERNEL);
 	if (!q) {
 		err = -ENOMEM;
 		goto out_disk;
 	}
-	blk_queue_make_request(q, pxd_make_request);
+#ifdef __PX_FASTPATH__
+	blk_queue_make_request(q, pxd_make_request_fastpath);
+#else
+	blk_queue_make_request(q, pxd_make_request_slowpath);
+#endif
+
 #else
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
@@ -706,6 +670,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (!disk)
 		return;
 
+	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
@@ -755,10 +720,18 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	pxd_dev->major = pxd_major;
 	pxd_dev->minor = new_minor;
 	pxd_dev->ctx = ctx;
+	pxd_dev->connected = true; // fuse slow path connection
+	pxd_dev->size = add->size;
 
-	err = pxd_init_disk(pxd_dev, add);
+	err = pxd_fastpath_init(pxd_dev);
 	if (err)
 		goto out_id;
+
+	err = pxd_init_disk(pxd_dev, add);
+	if (err) {
+		pxd_fastpath_cleanup(pxd_dev);
+		goto out_id;
+	}
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
@@ -828,6 +801,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	}
 
 	pxd_dev->removing = true;
+	pxd_fastpath_cleanup(pxd_dev);
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
@@ -1200,6 +1174,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	fc->allow_disconnected = 1;
 	file->private_data = fc;
 
+	pxdctx_set_connected(ctx, true);
 	fuse_restart_requests(fc);
 
 	rc = pxd_send_init(fc);
@@ -1261,6 +1236,7 @@ static void pxd_timeout(unsigned long args)
 
 	fc->connected = true;
 	fc->allow_disconnected = 0;
+	pxdctx_set_connected(ctx, false);
 	fuse_abort_conn(fc);
 	printk(KERN_INFO "PXD_TIMEOUT (%s:%llu): Aborting all requests...",
 		ctx->name, ctx->unique);
@@ -1369,6 +1345,11 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 
+	err = fastpath_init();
+	if (err) {
+		printk(KERN_ERR "pxd: fastpath initialization failed: %d\n", err);
+		goto out_blkdev;
+	}
 #ifdef __PX_BLKMQ__
 	printk(KERN_INFO "pxd: blk-mq driver loaded version %s\n", gitversion);
 #else
@@ -1400,6 +1381,7 @@ void pxd_exit(void)
 {
 	int i;
 
+	fastpath_cleanup();
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
 #ifdef __PX_BLKMQ__

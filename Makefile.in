@@ -27,9 +27,12 @@ endif
 
 ifeq ($(shell expr $(KERNELVER) \>= $(FPATH_MINKVER)),1)
 PXDEFINES:=$(PXDEFINES) -D__PX_FASTPATH__
+px-objs += pxd_fastpath.o
 $(warning kernel fast path enabled, version $(KVERSION).)
 else
 PXDEFINES += -DUSE_REQUESTQ_MODEL
+px-objs += pxd_fastpath_stub.o
+
 $(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 # EL8 Specific kernel checks
 ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)

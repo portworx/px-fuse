@@ -2,6 +2,7 @@
 #define PXD_H_
 
 #include <linux/version.h>
+#include <linux/kernel.h>
 #ifdef __PXKERNEL__
 #include <linux/types.h>
 #else
@@ -30,6 +31,9 @@
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
+
+#define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
+#define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
 
 /** fuse opcodes */
 enum pxd_opcode {
