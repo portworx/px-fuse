@@ -817,7 +817,11 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 			goto fail;
 		}
 
-		// kthread_bind(tc->pxd_thread, i);
+		//
+		// NOTE this has to change for small sized, small queuedepth sync io.
+		// ibm mq issue. Will come in separate PR
+		//
+		kthread_bind(tc->pxd_thread, i);
 		set_user_nice(tc->pxd_thread, MIN_NICE);
 		wake_up_process(tc->pxd_thread);
 	}
