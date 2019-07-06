@@ -319,7 +319,11 @@ __acquires(fc->lock)
 
 ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
+#ifdef USE_REQUESTQ_MODEL
 	struct request *breq = req->rq;
+#else
+	struct bio *breq = req->bio;
+#endif
 	size_t copied, len;
 
 	copied = sizeof(req->in.h);
@@ -338,12 +342,17 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 	if (unlikely(req->num_pages)) {
 		int i;
 		for (i = 0; i < req->num_pages; ++i) {
+#ifdef USE_REQUESTQ_MODEL
+			int nsegs = breq->nr_phys_segments;
+#else
+			int nsegs = bio_phys_segments(req->queue, breq);
+#endif
 			len = req->page_descs[i].length;
 			if (copy_page_to_iter(req->pages[i],
 					      req->page_descs[i].offset,
 					      len, iter) != len) {
 				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
-				       __func__, i, breq->nr_phys_segments);
+				       __func__, i, nsegs);
 				return -EFAULT;
 			}
 			copied += len;
@@ -361,7 +370,14 @@ extern uint32_t pxd_detect_zero_writes;
 static void fuse_convert_zero_writes(struct fuse_req *req)
 {
 	uint8_t wsize = sizeof(uint64_t);
+#ifdef USE_REQUESTQ_MODEL
 	struct req_iterator breq_iter;
+#elif defined(HAVE_BVEC_ITER)
+	struct bvec_iter bvec_iter;
+#else
+	int bvec_iter;
+#endif
+
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 #else
@@ -371,7 +387,11 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 	size_t i, len;
 	uint64_t *q;
 
+#ifdef USE_REQUESTQ_MODEL
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
+#else
+	bio_for_each_segment(bvec, req->bio, bvec_iter) {
+#endif
 		kaddr = kmap_atomic(BVEC(bvec).bv_page);
 		p = kaddr + BVEC(bvec).bv_offset;
 		q = (uint64_t *)p;
@@ -609,7 +629,14 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 #else
 	struct bio_vec *bvec = NULL;
 #endif
+
+#ifdef USE_REQUESTQ_MODEL
 	struct req_iterator breq_iter;
+#elif defined(HAVE_BVEC_ITER)
+	struct bvec_iter bvec_iter;
+#else
+	int bvec_iter;
+#endif
 	struct iov_iter data_iter;
 	size_t copied, skipped = 0;
 	int ret;
@@ -644,7 +671,11 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		iov_iter_advance(&data_iter,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
+#ifdef USE_REQUESTQ_MODEL
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
+#else
+	bio_for_each_segment(bvec, req->bio, bvec_iter) {
+#endif
 		copied = 0;
 		len = BVEC(bvec).bv_len;
 		if (skipped < read_data.offset) {
@@ -782,22 +813,39 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	req->out.h = oh;
 
 	if (req->bio_pages && req->out.numargs && iter->count > 0) {
-		struct request *breq = req->rq;
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
 #else
 		struct bio_vec *bvec = NULL;
 #endif
+
+#ifdef USE_REQUESTQ_MODEL
+		struct request *breq = req->rq;
 		struct req_iterator breq_iter;
-		if (breq->nr_phys_segments && req->in.h.opcode == PXD_READ) {
+		int nsegs = breq->nr_phys_segments;
+#elif defined(HAVE_BVEC_ITER)
+		struct bio *breq = req->bio;
+		int nsegs = bio_phys_segments(req->queue, breq);
+		struct bvec_iter bvec_iter;
+#else
+		struct bio *breq = req->bio;
+		int nsegs = bio_phys_segments(req->queue, breq);
+		int bvec_iter;
+#endif
+
+		if (nsegs && req->in.h.opcode == PXD_READ) {
 			int i = 0;
+#ifdef USE_REQUESTQ_MODEL
 			rq_for_each_segment(bvec, breq, breq_iter) {
+#else
+			rq_for_each_segment(bvec, breq, bvec_iter) {
+#endif
 				len = BVEC(bvec).bv_len;
 				if (copy_page_from_iter(BVEC(bvec).bv_page,
 							BVEC(bvec).bv_offset,
 							len, iter) != len) {
 					printk(KERN_ERR "%s: copy page %d of %d error\n",
-					       __func__, i, breq->nr_phys_segments);
+					       __func__, i, nsegs);
 					return -EFAULT;
 				}
 				i++;

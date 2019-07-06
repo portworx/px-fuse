@@ -34,7 +34,38 @@
 #define BVEC(bvec) (*(bvec))
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+#define REQUEST_GET_SECTORS(bio)  (BIO_SIZE(bio) >> 9)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#define BIO_OP(bio)   bio_op(bio)
+#define SUBMIT_BIO(bio) submit_bio(bio)
+#else
+// only supports read or write
+#define BIO_OP(bio)   (bio->bi_rw & 1)
+#define SUBMIT_BIO(bio)  submit_bio(BIO_OP(bio), bio)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#else
+#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
+#else
+#define BIO_SET_DEV(bio, bdev)  \
+	do { \
+		(bio)->bi_bdev = (bdev); \
+	} while (0)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+#define BIO_ENDIO(bio, err) do {                \
+    bio->bi_status = err;                       \
+    bio_endio(bio);                             \
+} while (0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 #define BIO_ENDIO(bio, err) do { 		\
 	if (err != 0) { 			\
 		bio_io_error((bio)); 		\

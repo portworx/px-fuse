@@ -6,13 +6,6 @@ PXDEFINES := -D__PXKERNEL__
 
 KVERSION=$(shell uname -r)
 
-# EL8 Specific kernel checks
-ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)
-PXDEFINES += -D__PX_BLKMQ__
-endif
-
-ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
-
 ifndef KERNELPATH
 ifeq ($(shell test -d "/usr/src/linux-headers-$(KVERSION)"; echo $$?),0)
      KERNELPATH=/usr/src/linux-headers-$(KVERSION)
@@ -25,17 +18,32 @@ ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
 $(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif
 
-ifeq ($(shell test  -f "/usr/bin/bc"; echo $$?),0)
 MINKVER=3.10
-KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
-ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
+FPATH_MINKVER=4.0
+KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
+ifeq ($(shell expr $(KERNELVER) \>= $(MINKVER)),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif
+
+ifeq ($(shell expr $(KERNELVER) \>= $(FPATH_MINKVER)),1)
+PXDEFINES:=$(PXDEFINES) -D__PX_FASTPATH__
+$(warning kernel fast path enabled, version $(KVERSION).)
+else
+PXDEFINES += -DUSE_REQUESTQ_MODEL
+$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+# EL8 Specific kernel checks
+ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)
+PXDEFINES += -D__PX_BLKMQ__
+$(warning enabling slow path with BLKMQ support)
+endif
+
 endif
 
 ifdef KERNELOTHER
 KERNELOTHEROPT=O=$(KERNELOTHER)
 endif
+
+ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
 MAJOR=$(shell echo $(KVERSION) | awk -F. '{print $$1}')
 MINOR=$(shell echo $(KVERSION) | awk -F. '{print $$2}')
@@ -72,7 +80,7 @@ docker-build: docker-build-dev
 	portworx/px-fuse:dev make
 
 px_version.c:
-	echo "const char *gitversion = \"$(shell git rev-parse HEAD)\";" > $@
+	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD):$(shell git rev-parse HEAD)\";" > $@
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile

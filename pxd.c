@@ -250,9 +250,9 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 	pxd_request_complete(fc, req);
 }
 
+/* only used by the USE_REQUESTQ_MODEL definition */
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
-
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 #else
@@ -261,6 +261,7 @@ static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 	pxd_request_complete(fc, req);
 }
 
+/* only used by the USE_REQUESTQ_MODEL definition */
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
 
@@ -312,6 +313,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	req->misc.pxd_rdwr_in.flags =
 		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
+		((flags & REQ_PREFLUSH) ? PXD_FLAGS_FLUSH : 0) |
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #else
 	req->misc.pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
@@ -382,6 +384,10 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	case REQ_OP_FLUSH:
 		pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
 		break;
+	default:
+		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
+			req->in.h.unique, op, size, off, minor, flags);
+		BUG();
 	}
 }
 
@@ -409,6 +415,10 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	case REQ_WRITE | REQ_DISCARD:
 		pxd_discard_request(req, size, off, minor, flags, qfn);
 		break;
+	default:
+		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
+			req->in.h.unique, flags, size, off, minor, flags);
+		BUG();
 	}
 }
 #endif
@@ -427,6 +437,8 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #endif
 	return op_flags;
 }
+
+#ifndef USE_REQUESTQ_MODEL
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 static blk_qc_t pxd_make_request(struct request_queue *q, struct bio *bio)
@@ -470,6 +482,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
 }
+#endif
 
 #ifndef __PX_BLKMQ__
 static void pxd_rq_fn(struct request_queue *q)
@@ -610,15 +623,15 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	/* Bypass queue if queue_depth is zero. */
-	if (add->queue_depth == 0) {
-		q = blk_alloc_queue(GFP_KERNEL);
-		if (!q) {
-			err = -ENOMEM;
-			goto out_disk;
-		}
-		blk_queue_make_request(q, pxd_make_request);
-	} else {
+	/* cannot be chosen dynamically as other files also need to know how requests are to be processed. */
+#if !defined(USE_REQUESTQ_MODEL)
+	q = blk_alloc_queue(GFP_KERNEL);
+	if (!q) {
+		err = -ENOMEM;
+		goto out_disk;
+	}
+	blk_queue_make_request(q, pxd_make_request);
+#else
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
@@ -646,12 +659,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	  	goto out_disk;
 	  }
 #endif
-       }
+#endif
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
+	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
 	blk_queue_io_min(q, PXD_LBS);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
+	blk_queue_physical_block_size(q, PXD_LBS);
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
