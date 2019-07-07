@@ -838,7 +838,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 #ifdef USE_REQUESTQ_MODEL
 			rq_for_each_segment(bvec, breq, breq_iter) {
 #else
-			rq_for_each_segment(bvec, breq, bvec_iter) {
+			bio_for_each_segment(bvec, breq, bvec_iter) {
 #endif
 				len = BVEC(bvec).bv_len;
 				if (copy_page_from_iter(BVEC(bvec).bv_page,

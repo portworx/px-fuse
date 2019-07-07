@@ -328,7 +328,7 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t p
 #endif
 
 	pxd_printk("pxd_receive[%llu] with bio=%p, pos=%llu, nsects=%lu\n",
-				pxd_dev->dev_id, bio, pos, getsectors(bio));
+				pxd_dev->dev_id, bio, pos, REQUEST_GET_SECTORS(bio));
 	bio_for_each_segment(bvec, bio, i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 		s = do_pxd_receive(pxd_dev, &bvec, pos);
@@ -411,9 +411,9 @@ static int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
 	clone_bio->bi_private = pxd_dev;
 	clone_bio->bi_end_io = pxd_complete_io;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &pxd_dev->disk->part0);
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
-	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
+	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
 	SUBMIT_BIO(clone_bio);
@@ -466,14 +466,14 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio)
 		return -EIO;
 	}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &pxd_dev->disk->part0);
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
-	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
+	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->fp.ncount));
-	pos = ((loff_t) bio->bi_iter.bi_sector << 9) + pxd_dev->fp.offset;
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
 
 	switch (op) {
 	case REQ_OP_READ:
@@ -550,9 +550,9 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), getsectors(bio), &pxd_dev->disk->part0);
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
-	generic_start_io_acct(bio_data_dir(bio), getsectors(bio), &pxd_dev->disk->part0);
+	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -794,8 +794,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 	atomic_set(&fp->nslowPath,0);
 	atomic_set(&fp->ncomplete,0);
 	atomic_set(&fp->nwrite_counter,0);
-
-	fp->offset = 0;
 
 	fp->tc = kzalloc(MAX_THREADS * sizeof(struct thread_context), GFP_NOIO);
 	if (!fp->tc) {
