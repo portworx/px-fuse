@@ -398,10 +398,10 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #if !defined(USE_REQUESTQ_MODEL) || defined(__PX_FASTPATH__)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-static blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
+blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
-static void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
+void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
 #endif
 {
@@ -439,9 +439,7 @@ static void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
 }
-#endif
-
-#ifndef __PX_BLKMQ__
+#elif !defined(__PX_BLKMQ__)
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
