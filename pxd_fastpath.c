@@ -8,6 +8,7 @@
 // within same numa node
 static struct node_cpu_map *node_cpu_map;
 
+static
 int getnextcpu(int node, int pos) {
 	const struct node_cpu_map *map = &node_cpu_map[node];
 	if (map->ncpu == 0) { return 0; }
@@ -807,11 +808,12 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 
 	for (i=0; i<MAX_THREADS; i++) {
 		struct thread_context *tc = &fp->tc[i];
+		int node = cpu_to_node(i);
 		tc->pxd_dev = pxd_dev;
 		spin_lock_init(&tc->lock);
 		init_waitqueue_head(&tc->pxd_event);
-		tc->pxd_thread = kthread_create_on_node(pxd_io_thread, tc, cpu_to_node(i),
-				"pxd%d:%llu", i, pxd_dev->dev_id);
+		tc->pxd_thread = kthread_create_on_node(pxd_io_thread, tc,
+				node, "pxd%d:%llu", i, pxd_dev->dev_id);
 		if (IS_ERR(tc->pxd_thread)) {
 			pxd_printk("Init kthread for device %llu failed %lu\n",
 				pxd_dev->dev_id, PTR_ERR(tc->pxd_thread));
@@ -820,10 +822,10 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 		}
 
 		//
-		// NOTE this has to change for small sized, small queuedepth sync io.
-		// ibm mq issue. Will come in separate PR
+		// Each px volume, creates a 'cpu' number of threads, that
+		// are bound to the numa node mask.
 		//
-		kthread_bind(tc->pxd_thread, i);
+		set_cpus_allowed_ptr(tc->pxd_thread, cpumask_of_node(node));
 		set_user_nice(tc->pxd_thread, MIN_NICE);
 		wake_up_process(tc->pxd_thread);
 	}

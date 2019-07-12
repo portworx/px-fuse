@@ -905,6 +905,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = (char) 0;
 	}
+	pxd_dev->fp.nfd = update_path->size;
 
 	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
