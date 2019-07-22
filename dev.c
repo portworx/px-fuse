@@ -319,11 +319,6 @@ __acquires(fc->lock)
 
 ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
-#ifdef USE_REQUESTQ_MODEL
-	struct request *breq = req->rq;
-#else
-	struct bio *breq = req->bio;
-#endif
 	size_t copied, len;
 
 	copied = sizeof(req->in.h);
@@ -342,17 +337,12 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 	if (unlikely(req->num_pages)) {
 		int i;
 		for (i = 0; i < req->num_pages; ++i) {
-#ifdef USE_REQUESTQ_MODEL
-			int nsegs = breq->nr_phys_segments;
-#else
-			int nsegs = bio_phys_segments(req->queue, breq);
-#endif
 			len = req->page_descs[i].length;
 			if (copy_page_to_iter(req->pages[i],
 					      req->page_descs[i].offset,
 					      len, iter) != len) {
 				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
-				       __func__, i, nsegs);
+				       __func__, i, req->num_pages);
 				return -EFAULT;
 			}
 			copied += len;

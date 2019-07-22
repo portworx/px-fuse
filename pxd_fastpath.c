@@ -328,7 +328,7 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t p
 	int i;
 #endif
 
-	pxd_printk("pxd_receive[%llu] with bio=%p, pos=%llu, nsects=%lu\n",
+	pxd_printk("pxd_receive[%llu] with bio=%p, pos=%llu, nsects=%u\n",
 				pxd_dev->dev_id, bio, pos, REQUEST_GET_SECTORS(bio));
 	bio_for_each_segment(bvec, bio, i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
