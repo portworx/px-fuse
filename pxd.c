@@ -903,7 +903,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 		}
 		pxd_dev->fp.file[i] = f;
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
-		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = (char) 0;
+		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
 	}
 	pxd_dev->fp.nfd = update_path->size;
 
@@ -923,6 +923,47 @@ out_file_failed:
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
 
+out:
+	if (found) spin_unlock(&pxd_dev->lock);
+	return err;
+}
+
+
+int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
+{
+	bool found = false;
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	struct pxd_device *pxd_dev;
+	int err;
+
+	printk(KERN_WARNING"device %llu, set fastpath enable %d, cleanup %d\n",
+			fp->dev_id, fp->enable, fp->cleanup);
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		if ((pxd_dev->dev_id == fp->dev_id) && !pxd_dev->removing) {
+			spin_lock(&pxd_dev->lock);
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	if (!found) {
+		err = -ENOENT;
+		goto out;
+	}
+
+	/* setup whether access is block or file access */
+	if (fp->enable) {
+		enableFastPath(pxd_dev, false);
+	} else {
+		// TODO - complete this path
+		// disableFastPath(pxd_dev, fp->cleanup);
+	}
+
+	spin_unlock(&pxd_dev->lock);
+
+	return 0;
 out:
 	if (found) spin_unlock(&pxd_dev->lock);
 	return err;

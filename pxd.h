@@ -46,7 +46,8 @@ enum pxd_opcode {
 	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
-	PXD_UPDATE_PATH,        /**< pdate backing file/device path for a volume */
+	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
+	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
 	PXD_LAST,
 };
 
@@ -129,6 +130,15 @@ struct pxd_update_path_out {
 	uint64_t dev_id;
 	size_t size; // count of paths below.
 	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
+};
+
+/**
+ * PXD_SET_FASTPATH request from user space
+ */
+struct pxd_fastpath_out {
+	uint64_t dev_id;
+	int enable;
+	int cleanup; // only meaningful while disabling
 };
 
 /**

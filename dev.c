@@ -745,6 +745,19 @@ static int fuse_notify_update_path(struct fuse_conn *conn, unsigned int size,
 	return pxd_update_path(conn, &update_path);
 }
 
+static int fuse_notify_set_fastpath(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_fastpath_out fp;
+	size_t len = sizeof(fp);
+
+	if (copy_from_iter(&fp, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	return pxd_set_fastpath(conn, &fp);
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -759,6 +772,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_update_size(fc, size, iter);
 	case PXD_UPDATE_PATH:
 		return fuse_notify_update_path(fc, size, iter);
+	case PXD_SET_FASTPATH:
+		return fuse_notify_set_fastpath(fc, size, iter);
 	default:
 		return -EINVAL;
 	}
