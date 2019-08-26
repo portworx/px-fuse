@@ -557,9 +557,9 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	pos = ((loff_t) bio->bi_iter.bi_sector << 9) + pxd_dev->fp.offset;
+	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
 #else
-	pos = ((loff_t) bio->bi_sector << 9) + pxd_dev->fp.offset;
+	pos = ((loff_t) bio->bi_sector << 9);
 #endif
 
 	if (bio_data_dir(bio) == WRITE) {
