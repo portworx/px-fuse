@@ -87,6 +87,15 @@ struct pxd_init_out {
 };
 
 /**
+ * PXD_UPDATE_PATH request from user space
+ */
+struct pxd_update_path_out {
+	uint64_t dev_id;
+	size_t size; // count of paths below.
+	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
+};
+
+/**
  * PXD_ADD request from user space
  */
 struct pxd_add_out {
@@ -95,6 +104,8 @@ struct pxd_add_out {
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
+	int     enable_fp; /**< enable fast path */
+	struct pxd_update_path_out paths; /**< backing device paths */
 };
 
 /**
@@ -121,15 +132,6 @@ struct pxd_read_data_out {
 struct pxd_update_size_out {
 	uint64_t dev_id;
 	size_t size;
-};
-
-/**
- * PXD_UPDATE_PATH request from user space
- */
-struct pxd_update_path_out {
-	uint64_t dev_id;
-	size_t size; // count of paths below.
-	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 };
 
 /**
