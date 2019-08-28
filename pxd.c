@@ -786,6 +786,9 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int err;
 	struct pxd_device *pxd_dev;
 
+	pxd_printk(KERN_INFO"pxd_remove for device %llu\n",
+			remove->dev_id);
+
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
 		if (pxd_dev->dev_id == remove->dev_id) {
@@ -1164,6 +1167,13 @@ static ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute 
 	return count;
 }
 
+static ssize_t pxd_fastpath_state(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "%d\n", pxd_dev->fp.nfd);
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
@@ -1172,6 +1182,7 @@ static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
+static DEVICE_ATTR(fastpath, S_IRUGO, pxd_fastpath_state, NULL);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,

@@ -756,7 +756,7 @@ void disableFastPath(struct pxd_device *pxd_dev) {
 			struct thread_context *tc = &fp->tc[i];
 			if (tc->pxd_thread) kthread_stop(tc->pxd_thread);
 		}
-		if (fp->tc) kfree(fp->tc);
+		kfree(fp->tc);
 	}
 	fp->tc = NULL;
 }
