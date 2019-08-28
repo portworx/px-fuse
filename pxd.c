@@ -1193,6 +1193,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_sync.attr,
 	&dev_attr_congested.attr,
 	&dev_attr_writesegment.attr,
+	&dev_attr_fastpath.attr,
 	NULL
 };
 
