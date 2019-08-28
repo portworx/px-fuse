@@ -901,6 +901,9 @@ static int __pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_upd
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
 	}
 	pxd_dev->fp.nfd = update_path->size;
+
+	enableFastPath(pxd_dev, false);
+
 	return 0;
 
 out_file_failed:
@@ -980,11 +983,11 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	}
 
 	/* setup whether access is block or file access */
+	/* TODO temporary suspend/resume not done yet */
 	if (fp->enable) {
 		enableFastPath(pxd_dev, false);
 	} else {
-		// TODO - complete this path
-		// disableFastPath(pxd_dev, fp->cleanup);
+		if (fp->cleanup) disableFastPath(pxd_dev);
 	}
 
 	spin_unlock(&pxd_dev->lock);

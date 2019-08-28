@@ -96,5 +96,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 #endif
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
+void disableFastPath(struct pxd_device *pxd_dev);
 
 #endif /* _PXD_FASTPATH_H_ */

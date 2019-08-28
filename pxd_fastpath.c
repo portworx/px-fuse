@@ -73,7 +73,7 @@ void fastpath_cleanup(void) {
 }
 
 // forward decl
-static void disableFastPath(struct pxd_device *pxd_dev);
+void disableFastPath(struct pxd_device *pxd_dev);
 
 struct file* getFile(struct pxd_device *pxd_dev, int index) {
 	if (index < pxd_dev->fp.nfd) {
@@ -742,7 +742,7 @@ out_file_failed:
 		pxd_dev->dev_id);
 }
 
-static void disableFastPath(struct pxd_device *pxd_dev) {
+void disableFastPath(struct pxd_device *pxd_dev) {
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
