@@ -1186,8 +1186,14 @@ static ssize_t pxd_fastpath_state(struct device *dev,
 
 static char* __strtok_r(char *src, const char delim, char **saveptr) {
 	char *curr;
-	char *start = src ? src : *saveptr;
+	char *start;
 
+	if (src) {
+		start = src;
+		*saveptr = NULL;
+	} else {
+		start = *saveptr;
+	}
 	curr = start;
 	while (curr && *curr) {
 		if (*curr == delim) {
@@ -1210,7 +1216,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	struct pxd_update_path_out update_out;
 	const char delim = ',';
 	char *token;
-	char *saveptr;
+	char *saveptr = NULL;
 	int i;
 
 	char *tmp = kzalloc(count, GFP_KERNEL);
