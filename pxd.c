@@ -905,6 +905,7 @@ static int __pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_upd
 	}
 	pxd_dev->fp.nfd = update_path->size;
 
+	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
 
 	return 0;
@@ -917,7 +918,18 @@ out_file_failed:
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
 
-	return err;
+	// even if there are errors setting up fastpath, initialize to take slow path,
+	// do not report failure outside
+	return 0;
+}
+
+static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
+{
+	/// This seems risky to update paths on the fly while the px device is active
+	/// Need to confirm behavior while IOs are active and handle it right!!!!
+	__pxd_init_fastpath_target(pxd_dev, update_path);
+	return 0;
+
 }
 
 ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path)
@@ -942,19 +954,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 		goto out;
 	}
 
-	/// This seems risky to update paths on the fly while the px device is active
-	/// Need to confirm behavior while IOs are active and handle it right!!!!
-	err = __pxd_init_fastpath_target(pxd_dev, update_path);
-	if (err != 0) goto out;
-
-	/* setup whether access is block or file access */
-	enableFastPath(pxd_dev, false);
-	spin_unlock(&pxd_dev->lock);
-
-	printk(KERN_INFO"Success attaching path to device %llu [nfd:%d]\n",
-		pxd_dev->dev_id, pxd_dev->fp.nfd);
-	return 0;
-
+	err=__pxd_update_path(pxd_dev, update_path);
 out:
 	if (found) spin_unlock(&pxd_dev->lock);
 	return err;
@@ -1082,8 +1082,9 @@ static ssize_t pxd_active_show(struct device *dev,
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	char *cp = buf;
-	int ncount;
+	int ncount,tmp;
 	int available=PAGE_SIZE-1;
+	int i;
 
 	ncount=snprintf(cp, available, "nactive: %u/%u, [write: %u, flush: %u(nop: %u), fua: %u, discard: %u, preflush: %u], switched: %u, slowpath: %u\n",
                 atomic_read(&pxd_dev->fp.ncount), atomic_read(&pxd_dev->fp.ncomplete),
@@ -1092,6 +1093,15 @@ static ssize_t pxd_active_show(struct device *dev,
 		atomic_read(&pxd_dev->fp.nio_fua), atomic_read(&pxd_dev->fp.nio_discard),
 		atomic_read(&pxd_dev->fp.nio_preflush),
 		atomic_read(&pxd_dev->fp.nswitch), atomic_read(&pxd_dev->fp.nslowPath));
+
+	cp += ncount;
+	available -= ncount;
+	for (i=0; i<pxd_dev->fp.nfd; i++) {
+		tmp=snprintf(cp, available, "%s ", pxd_dev->fp.device_path[i]);
+		cp+=tmp;
+		available-=tmp;
+		ncount+=tmp;
+	}
 
 	return ncount;
 }
@@ -1174,6 +1184,59 @@ static ssize_t pxd_fastpath_state(struct device *dev,
 	return sprintf(buf, "%d\n", pxd_dev->fp.nfd);
 }
 
+static char* __strtok_r(char *src, const char delim, char **saveptr) {
+	char *curr;
+	char *start = src ? src : *saveptr;
+
+	curr = start;
+	while (curr && *curr) {
+		if (*curr == delim) {
+			*saveptr = curr+1;
+			*curr = '\0';
+
+			return start;
+		}
+		curr++;
+	}
+
+	return start;
+}
+
+static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *attr,
+		               const char *buf, size_t count)
+{
+	// format: path,path,path
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	struct pxd_update_path_out update_out;
+	const char delim = ',';
+	char *token;
+	char *saveptr;
+	int i;
+
+	char *tmp = kzalloc(count, GFP_KERNEL);
+	if (!tmp) {
+		printk("No memory to process %lu bytes", count);
+		return count;
+	}
+	memcpy(tmp, buf, count);
+
+	i=0;
+	token = __strtok_r(tmp, delim, &saveptr);
+	for (i=0; i<MAX_PXD_BACKING_DEVS && token; i++) {
+		strncpy(update_out.devpath[i], token, MAX_PXD_DEVPATH_LEN);
+		update_out.devpath[i][MAX_PXD_DEVPATH_LEN] = '\0';
+
+		token = __strtok_r(0, delim, &saveptr);
+	}
+	update_out.size = i;
+	update_out.dev_id = pxd_dev->dev_id;
+
+	__pxd_update_path(pxd_dev, &update_out);
+	kfree(tmp);
+
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
@@ -1182,7 +1245,7 @@ static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
-static DEVICE_ATTR(fastpath, S_IRUGO, pxd_fastpath_state, NULL);
+static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
