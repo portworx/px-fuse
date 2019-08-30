@@ -1098,7 +1098,7 @@ static ssize_t pxd_active_show(struct device *dev,
 	cp += ncount;
 	available -= ncount;
 	for (i=0; i<pxd_dev->fp.nfd; i++) {
-		tmp=snprintf(cp, available, "%s ", pxd_dev->fp.device_path[i]);
+		tmp=snprintf(cp, available, "%s\n", pxd_dev->fp.device_path[i]);
 		cp+=tmp;
 		available-=tmp;
 		ncount+=tmp;
@@ -1281,7 +1281,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	for (i=0; i<MAX_PXD_BACKING_DEVS && token; i++) {
 		// strip the token of any newline/whitespace
 		__strip_nl(token, trimtoken, sizeof(trimtoken));
-		strncpy(update_out.devpath[i], tmp, MAX_PXD_DEVPATH_LEN);
+		strncpy(update_out.devpath[i], trimtoken, MAX_PXD_DEVPATH_LEN);
 		update_out.devpath[i][MAX_PXD_DEVPATH_LEN] = '\0';
 
 		token = __strtok_r(0, delim, &saveptr);
