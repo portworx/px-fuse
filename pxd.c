@@ -2,6 +2,7 @@
 #include <linux/blkdev.h>
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
+#include <linux/ctype.h>
 #include "fuse_i.h"
 #include "pxd.h"
 
@@ -1208,6 +1209,54 @@ static char* __strtok_r(char *src, const char delim, char **saveptr) {
 	return start;
 }
 
+static void __strip_nl(const char *src, char *dst, int maxlen) {
+	char *tmp;
+	int len=strlen(src);
+
+
+	if (!src || !dst) {
+		return;
+	}
+
+	dst[0] = '\0';
+	if (!len) {
+		return;
+	}
+
+	if (len >= maxlen) {
+		// to accomodate null
+		printk(KERN_WARNING"stripping newline output buffer overflow.. src %d(%s), dst %d\n",
+				len, src, maxlen);
+		len = maxlen - 1;
+	}
+
+	// leading space
+	while (src && *src) {
+		if (!isspace(*src) && !iscntrl(*src)) {
+			memcpy(dst,src,len);
+			dst[len]='\0';
+			break;
+		}
+		src++;
+		len--;
+	}
+
+	// trailing space
+	tmp = dst + len - 1;
+	while (len && *tmp) {
+		if (isspace(*tmp) || iscntrl(*tmp)) {
+			*tmp='\0';
+			tmp--;
+			len--;
+			continue;
+		}
+		break;
+	}
+
+	printk(KERN_INFO"stripping newline src=(%s), dst=(%s), len=%d\n",
+			src, dst, len);
+}
+
 static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *attr,
 		               const char *buf, size_t count)
 {
@@ -1218,6 +1267,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	char *token;
 	char *saveptr = NULL;
 	int i;
+	char trimtoken[256];
 
 	char *tmp = kzalloc(count, GFP_KERNEL);
 	if (!tmp) {
@@ -1229,7 +1279,9 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	i=0;
 	token = __strtok_r(tmp, delim, &saveptr);
 	for (i=0; i<MAX_PXD_BACKING_DEVS && token; i++) {
-		strncpy(update_out.devpath[i], token, MAX_PXD_DEVPATH_LEN);
+		// strip the token of any newline/whitespace
+		__strip_nl(token, trimtoken, sizeof(trimtoken));
+		strncpy(update_out.devpath[i], tmp, MAX_PXD_DEVPATH_LEN);
 		update_out.devpath[i][MAX_PXD_DEVPATH_LEN] = '\0';
 
 		token = __strtok_r(0, delim, &saveptr);
