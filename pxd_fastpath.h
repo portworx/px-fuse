@@ -32,6 +32,7 @@ struct pxd_io_tracker {
 	struct list_head item; // only HEAD needs this
 	atomic_t active; // only HEAD has refs to all active IO
 	atomic_t fails; // should be zero, non-zero indicates atleast one path failed
+	int read; // if read is from the first target only
 
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]

@@ -450,6 +450,12 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	iot->orig = bio;
 	iot->start = jiffies;
 	atomic_set(&iot->active, 0);
+	atomic_set(&iot->fails, 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	iot->read = (bio_op(bio) == REQ_OP_READ);
+#else
+	iot->read = (bio_data_dir(bio) == READ);
+#endif
 
 	BIO_SET_DEV(clone_bio, bdi);
 	clone_bio->bi_private = pxd_dev;
@@ -471,19 +477,21 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 		return NULL;
 	}
 
-	// initialize the replicas
-	for (index=1; index<pxd_dev->fp.nfd; index++) {
-		mapping = pxd_dev->fp.file[index]->f_mapping;
-		inode = mapping->host;
-		bdi = I_BDEV(inode);
+	// initialize the replicas only if the request is non-read
+	if (!head->read) {
+		for (index=1; index<pxd_dev->fp.nfd; index++) {
+			mapping = pxd_dev->fp.file[index]->f_mapping;
+			inode = mapping->host;
+			bdi = I_BDEV(inode);
 
-		repl = __pxd_init_block_replica(pxd_dev, bio, bdi);
-		if (!repl) {
-			goto repl_cleanup;
+			repl = __pxd_init_block_replica(pxd_dev, bio, bdi);
+			if (!repl) {
+				goto repl_cleanup;
+			}
+
+			repl->head = head;
+			list_add(&repl->item, &head->replicas);
 		}
-
-		repl->head = head;
-		list_add(&repl->item, &head->replicas);
 	}
 
 	return head;
@@ -511,12 +519,16 @@ static int pxd_switch_bio(struct thread_context *tc,
 #endif
 
 	// initialize active io to configured replicas
-	atomic_set(&head->active, pxd_dev->fp.nfd);
-
-	// submit all replicas linked from head
-	list_for_each_entry(curr, &head->replicas, item) {
-		SUBMIT_BIO(&curr->clone);
+	if (!head->read) {
+		atomic_set(&head->active, pxd_dev->fp.nfd);
+		// submit all replicas linked from head, if not read
+		list_for_each_entry(curr, &head->replicas, item) {
+			SUBMIT_BIO(&curr->clone);
+		}
+	} else {
+		atomic_set(&head->active, 1);
 	}
+
 	// submit head bio the last
 	SUBMIT_BIO(&head->clone);
 
