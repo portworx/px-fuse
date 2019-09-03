@@ -354,9 +354,36 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct bio *bio, loff_t p
 	return 0;
 }
 
+static void __pxd_cleanup_block_io(struct pxd_io_tracker *head) {
+	while (!list_empty(&head->replicas)) {
+		struct pxd_io_tracker *repl = list_first_entry(&head->replicas, struct pxd_io_tracker, item);
+		list_del(&repl->item);
+		bio_put(&repl->clone);
+	}
+	// remove from thread context
+	list_del(&head->item);
+	bio_put(&head->clone);
+}
+
 static void pxd_complete_io(struct bio* bio) {
 	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
 	struct pxd_device *pxd_dev = bio->bi_private;
+	struct pxd_io_tracker *head = iot->head;
+
+	if (!atomic_dec_and_test(&head->active)) {
+		// not all responses have come back
+		// but update head status if this is a failure
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+		if (bio->bi_status) {
+			atomic_inc(&head->fails);
+		}
+#else
+		if (bio->bi_error) {
+			atomic_inc(&head->fails);
+		}
+#endif
+		return;
+	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
@@ -367,11 +394,17 @@ static void pxd_complete_io(struct bio* bio) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
 	iot->orig->bi_status = bio->bi_status;
+	if (atomic_read(&head->fails)) {
+		iot->orig->bi_status = -EIO; // mark failure
+	}
 	bio_endio(iot->orig);
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
 	int status = bio->bi_error;
+	if (atomic_read(&head->fails)) {
+		status = -EIO; // mark failure
+	}
 	if (status) {
 		bio_io_error(iot->orig);
 	} else {
@@ -379,13 +412,17 @@ static void pxd_complete_io(struct bio* bio) {
 	}
 }
 #else
-        bio_endio(iot->orig, bio->bi_error);
+	int status = bio->bi_error;
+	if (atomic_read(&head->fails)) {
+		status = -EIO; // mark failure
+	}
+	bio_endio(iot->orig, status);
 #endif
+
+	__pxd_cleanup_block_io(head);
 
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->fp.ncount);
-
-	bio_put(bio);
 
 	/* free up from any prior congestion wait */
 	spin_lock_irq(&pxd_dev->lock);
@@ -395,29 +432,94 @@ static void pxd_complete_io(struct bio* bio) {
 	spin_unlock_irq(&pxd_dev->lock);
 }
 
-static int pxd_switch_bio(struct pxd_device *pxd_dev, struct bio* bio) {
-	struct address_space *mapping = pxd_dev->fp.file[0]->f_mapping;
-	struct inode *inode = mapping->host;
-	struct block_device *bdi = I_BDEV(inode);
+static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_dev,
+		struct bio *bio, struct block_device *bdi) {
 	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
-	struct pxd_io_tracker* iot = container_of(clone_bio, struct pxd_io_tracker, clone);
+	struct pxd_io_tracker* iot;
 
 	if (!clone_bio) {
-		return -ENOMEM;
+		pxd_printk(KERN_ERR"No memory for io context");
+		return NULL;
 	}
 
+	iot = container_of(clone_bio, struct pxd_io_tracker, clone);
+
+	iot->head = iot;
+	INIT_LIST_HEAD(&iot->replicas);
+	INIT_LIST_HEAD(&iot->item);
 	iot->orig = bio;
 	iot->start = jiffies;
+	atomic_set(&iot->active, 0);
+
 	BIO_SET_DEV(clone_bio, bdi);
 	clone_bio->bi_private = pxd_dev;
 	clone_bio->bi_end_io = pxd_complete_io;
+
+	return iot;
+}
+
+static
+struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct bio* bio) {
+	struct address_space *mapping = pxd_dev->fp.file[0]->f_mapping;
+	struct inode *inode = mapping->host;
+	struct block_device *bdi = I_BDEV(inode);
+	struct pxd_io_tracker* head = __pxd_init_block_replica(pxd_dev, bio, bdi);
+	struct pxd_io_tracker *repl;
+	int index;
+
+	if (!head) {
+		return NULL;
+	}
+
+	// initialize the replicas
+	for (index=1; index<pxd_dev->fp.nfd; index++) {
+		mapping = pxd_dev->fp.file[index]->f_mapping;
+		inode = mapping->host;
+		bdi = I_BDEV(inode);
+
+		repl = __pxd_init_block_replica(pxd_dev, bio, bdi);
+		if (!repl) {
+			goto repl_cleanup;
+		}
+
+		repl->head = head;
+		list_add(&repl->item, &head->replicas);
+	}
+
+	return head;
+
+repl_cleanup:
+	__pxd_cleanup_block_io(head);
+	return NULL;
+}
+
+static int pxd_switch_bio(struct thread_context *tc,
+		struct pxd_device *pxd_dev, struct bio* bio) {
+	struct pxd_io_tracker *head = __pxd_init_block_head(pxd_dev, bio);
+	struct pxd_io_tracker *curr;
+
+	if (!head) {
+		return -ENOMEM;
+	}
+
+	// add reference from thread context to head item
+	list_add(&head->item, &tc->iot_heads);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
-	SUBMIT_BIO(clone_bio);
+	// initialize active io to configured replicas
+	atomic_set(&head->active, pxd_dev->fp.nfd);
+
+	// submit all replicas linked from head
+	list_for_each_entry(curr, &head->replicas, item) {
+		SUBMIT_BIO(&curr->clone);
+	}
+	// submit head bio the last
+	SUBMIT_BIO(&head->clone);
+
 	atomic_inc(&pxd_dev->fp.ncount);
 	atomic_inc(&pxd_dev->fp.nswitch);
 
@@ -612,7 +714,7 @@ out:
 #else
 	bio_endio(bio, ret);
 #endif
-        return ret;
+    return ret;
 }
 
 #endif
@@ -620,6 +722,13 @@ out:
 static inline void pxd_handle_bio(struct thread_context *tc, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = tc->pxd_dev;
+
+	if (pxd_dev->fp.block_device) { /* switch bio to target device bypassing vfs */
+		if (pxd_switch_bio(tc, pxd_dev, bio)) {
+			BIO_ENDIO(bio, -ENOMEM);
+		}
+		return;
+	}
 
 	// calling version dependent handling code
 	__do_bio_filebacked(pxd_dev, bio);
@@ -810,6 +919,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 		struct thread_context *tc = &fp->tc[i];
 		int node = cpu_to_node(i);
 		tc->pxd_dev = pxd_dev;
+		INIT_LIST_HEAD(&tc->iot_heads);
 		spin_lock_init(&tc->lock);
 		init_waitqueue_head(&tc->pxd_event);
 		tc->pxd_thread = kthread_create_on_node(pxd_io_thread, tc,
@@ -904,13 +1014,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 		spin_unlock_irq(&pxd_dev->lock);
 
-	}
-
-	if (pxd_dev->fp.block_device) { /* switch bio to target device bypassing vfs */
-		if (pxd_switch_bio(pxd_dev, bio)) {
-			BIO_ENDIO(bio, -ENOMEM);
-		}
-		return BLK_QC_RETVAL;
 	}
 
 	/* keep writes on same cpu, but allow reads to spread but within same numa node */

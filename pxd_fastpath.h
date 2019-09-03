@@ -27,9 +27,15 @@ struct node_cpu_map {
 
 // Added metadata for each bio
 struct pxd_io_tracker {
-	unsigned long start; // start time
-	struct bio *orig;    // original request bio
-	struct bio clone;    // cloned bio
+	struct pxd_io_tracker *head; // back pointer to head copy [ALL]
+	struct list_head replicas; // only replica needs this
+	struct list_head item; // only HEAD needs this
+	atomic_t active; // only HEAD has refs to all active IO
+	atomic_t fails; // should be zero, non-zero indicates atleast one path failed
+
+	unsigned long start; // start time [HEAD]
+	struct bio *orig;    // original request bio [HEAD]
+	struct bio clone;    // cloned bio [ALL]
 };
 
 struct pxd_device;
@@ -39,6 +45,9 @@ struct thread_context {
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
 	struct bio_list  bio_list;
+
+	// extension for block mode io trackers
+	struct list_head  iot_heads;
 };
 
 struct pxd_fastpath_extension {
