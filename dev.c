@@ -845,11 +845,11 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		int nsegs = breq->nr_phys_segments;
 #elif defined(HAVE_BVEC_ITER)
 		struct bio *breq = req->bio;
-		int nsegs = bio_phys_segments(req->queue, breq);
+		int nsegs = bio_segments(breq);
 		struct bvec_iter bvec_iter;
 #else
 		struct bio *breq = req->bio;
-		int nsegs = bio_phys_segments(req->queue, breq);
+		int nsegs = bio_segments(breq);
 		int bvec_iter;
 #endif
 
