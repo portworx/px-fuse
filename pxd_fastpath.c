@@ -426,7 +426,7 @@ static void pxd_complete_io(struct bio* bio) {
 
 	/* free up from any prior congestion wait */
 	spin_lock_irq(&pxd_dev->lock);
-	if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->disk->queue->nr_congestion_off) {
+	if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
 		wake_up(&pxd_dev->fp.congestion_wait);
 	}
 	spin_unlock_irq(&pxd_dev->lock);
@@ -784,7 +784,7 @@ static int pxd_io_thread(void *data) {
 		BUG_ON(!bio);
 
 		spin_lock_irq(&tc->pxd_dev->lock);
-		if (atomic_read(&tc->pxd_dev->fp.ncount) < tc->pxd_dev->disk->queue->nr_congestion_off) {
+		if (atomic_read(&tc->pxd_dev->fp.ncount) < tc->pxd_dev->fp.nr_congestion_off) {
 			wake_up(&tc->pxd_dev->fp.congestion_wait);
 		}
 		spin_unlock_irq(&tc->pxd_dev->lock);
@@ -899,6 +899,10 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	// congestion init
+	// hard coded congestion limits within driver
+	fp->nr_congestion_on = 128;
+	fp->nr_congestion_off = 3/4*128;
+
 	init_waitqueue_head(&fp->congestion_wait);
 	init_waitqueue_head(&fp->sync_event);
 	spin_lock_init(&fp->sync_lock);
@@ -1015,11 +1019,11 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	{ /* add congestion handling */
 		spin_lock_irq(&pxd_dev->lock);
-		if (atomic_read(&pxd_dev->fp.ncount) >= q->nr_congestion_on) {
+		if (atomic_read(&pxd_dev->fp.ncount) >= pxd_dev->fp.nr_congestion_on) {
 			pxd_printk("Hit congestion... wait until clear\n");
 			atomic_inc(&pxd_dev->fp.ncongested);
 			wait_event_lock_irq(pxd_dev->fp.congestion_wait,
-				atomic_read(&pxd_dev->fp.ncount) < q->nr_congestion_off,
+				atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off,
 				pxd_dev->lock);
 			pxd_printk("congestion cleared\n");
 		}

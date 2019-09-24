@@ -154,7 +154,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
         struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#ifdef __PX_BLKMQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
         part_stat_lock();
         part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
         part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
@@ -163,7 +163,6 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
         part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
         part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
 #endif
-
         part_stat_unlock();
 }
 
@@ -209,6 +208,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
+#ifndef __PX_FASTPATH__
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
 #ifndef __PX_BLKMQ__
@@ -230,6 +230,7 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 #endif
 	pxd_request_complete(fc, req);
 }
+#endif
 
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 {
@@ -287,7 +288,11 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->out.numargs = 1;
 	req->out.argpages = 1;
 	req->out.args[0].size = size;
+#ifdef __PX_FASTPATH__
+	req->end = pxd_process_read_reply;
+#else
 	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
+#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -296,7 +301,11 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
+#ifdef __PX_FASTPATH__
+	req->end = pxd_process_write_reply;
+#else
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -305,7 +314,11 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_DISCARD;
+#ifdef __PX_FASTPATH__
+	req->end = pxd_process_write_reply;
+#else
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -314,7 +327,11 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE_SAME;
+#ifdef __PX_FASTPATH__
+	req->end = pxd_process_write_reply;
+#else
 	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -1162,9 +1179,8 @@ static ssize_t pxd_congestion_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	struct request_queue *q = pxd_dev->disk->queue;
 
-	bool congested = atomic_read(&pxd_dev->fp.ncount) >= q->nr_congestion_on;
+	bool congested = atomic_read(&pxd_dev->fp.ncount) >= pxd_dev->fp.nr_congestion_on;
 	return sprintf(buf, "congested: %d/%d\n", congested, atomic_read(&pxd_dev->fp.ncongested));
 }
 

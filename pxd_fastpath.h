@@ -63,6 +63,9 @@ struct pxd_fastpath_extension {
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
 	struct thread_context *tc;
+	unsigned int nr_congestion_on;
+	unsigned int nr_congestion_off;
+
 	wait_queue_head_t   congestion_wait;
 	wait_queue_head_t   sync_event;
 	spinlock_t   	sync_lock;
