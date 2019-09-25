@@ -46,9 +46,6 @@ struct thread_context {
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
 	struct bio_list  bio_list;
-
-	// extension for block mode io trackers
-	struct list_head  iot_heads;
 };
 
 struct pxd_fastpath_extension {

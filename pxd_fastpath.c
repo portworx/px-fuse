@@ -360,8 +360,6 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head) {
 		list_del(&repl->item);
 		bio_put(&repl->clone);
 	}
-	// remove from thread context
-	list_del(&head->item);
 	bio_put(&head->clone);
 }
 
@@ -510,8 +508,6 @@ static int pxd_switch_bio(struct thread_context *tc,
 		return -ENOMEM;
 	}
 
-	// add reference from thread context to head item
-	list_add(&head->item, &tc->iot_heads);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
@@ -935,7 +931,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 		struct thread_context *tc = &fp->tc[i];
 		int node = cpu_to_node(i);
 		tc->pxd_dev = pxd_dev;
-		INIT_LIST_HEAD(&tc->iot_heads);
 		spin_lock_init(&tc->lock);
 		init_waitqueue_head(&tc->pxd_event);
 		tc->pxd_thread = kthread_create_on_node(pxd_io_thread, tc,
