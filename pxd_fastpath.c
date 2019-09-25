@@ -1012,6 +1012,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
 
+	#if 0
 	{ /* add congestion handling */
 		spin_lock_irq(&pxd_dev->lock);
 		if (atomic_read(&pxd_dev->fp.ncount) >= pxd_dev->fp.nr_congestion_on) {
@@ -1026,6 +1027,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		spin_unlock_irq(&pxd_dev->lock);
 
 	}
+	#endif
 
 	/* keep writes on same cpu, but allow reads to spread but within same numa node */
 	if (rw == READ) {
