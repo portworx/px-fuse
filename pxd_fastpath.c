@@ -113,14 +113,11 @@ static int pxd_should_flush(struct pxd_device *pxd_dev, int *active) {
 	return 0;
 }
 
-static void pxd_issue_sync(struct pxd_device *pxd_dev) {
-	int i;
+static void pxd_issue_sync(struct pxd_device *pxd_dev, struct file *file) {
 	struct block_device *bdev = bdget_disk(pxd_dev->disk, 0);
 	if (!bdev) return;
 
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
-		vfs_fsync(getFile(pxd_dev, i), 0);
-	}
+	vfs_fsync(file, 0);
 
 	spin_lock_irq(&pxd_dev->fp.sync_lock);
 	atomic_set(&pxd_dev->fp.nwrite_counter, 0);
@@ -131,7 +128,7 @@ static void pxd_issue_sync(struct pxd_device *pxd_dev) {
 	wake_up(&pxd_dev->fp.sync_event);
 }
 
-static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev) {
+static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file *file) {
 	int sync_wait, sync_now;
 	spin_lock_irq(&pxd_dev->fp.sync_lock);
 	sync_now = pxd_should_flush(pxd_dev, &sync_wait);
@@ -143,7 +140,7 @@ static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev) {
 	}
 	spin_unlock_irq(&pxd_dev->fp.sync_lock);
 
-	if (sync_now) pxd_issue_sync(pxd_dev);
+	if (sync_now) pxd_issue_sync(pxd_dev, file);
 }
 
 static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos) {
@@ -152,7 +149,6 @@ static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struc
 
 	atomic_inc(&pxd_dev->fp.nio_discard);
 
-	pxd_printk("calling discard [%s] (REQ_DISCARD)...\n", pxd_dev->fp.device_path[i]);
 	if ((!file->f_op->fallocate)) {
 		return -EOPNOTSUPP;
 	}
@@ -230,31 +226,26 @@ static int do_pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
-		loff_t tpos = pos;
-
 		nsegs++;
-		ret = _pxd_write(file, &bvec, &tpos);
+		ret = _pxd_write(file, &bvec, &pos);
 		if (ret < 0) {
 			printk(KERN_ERR"do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
 				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
 			return ret;
 		}
 
-		pos += bvec.bv_len;
 		cond_resched();
 	}
 #else
 	bio_for_each_segment(bvec, bio, i) {
 		nsegs++;
-		loff_t tpos = pos;
-		ret = _pxd_write(file, bvec, &tpos);
+		ret = _pxd_write(file, bvec, &pos);
 		if (ret < 0) {
 			pxd_printk("do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
 				pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
 			return ret;
 		}
 
-		pos += bvec->bv_len;
 		cond_resched();
 	}
 #endif
@@ -537,7 +528,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 		}
 
 		/* Before any newer writes happen, make sure previous write/sync complete */
-		pxd_check_write_cache_flush(pxd_dev);
+		pxd_check_write_cache_flush(pxd_dev, iot->file);
 
 		ret = do_pxd_send(pxd_dev, iot->file, bio, pos);
 		if (ret < 0) goto out;
@@ -609,7 +600,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 			goto out;
 		}
 		/* Before any newer writes happen, make sure previous write/sync complete */
-		pxd_check_write_cache_flush(pxd_dev);
+		pxd_check_write_cache_flush(pxd_dev, iot->file);
 		ret = do_pxd_send(pxd_dev, iot->file, bio, pos);
 
 		if (!ret) {
