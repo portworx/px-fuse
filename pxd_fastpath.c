@@ -497,7 +497,6 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	loff_t pos;
 	unsigned int op = bio_op(bio);
 	int ret;
-	unsigned long startTime = jiffies;
 
 	// NOTE NOTE NOTE accessing out of lock
 	if (!pxd_dev->connected) {
