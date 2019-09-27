@@ -32,6 +32,7 @@ struct pxd_io_tracker {
 	struct list_head item; // only HEAD needs this
 	atomic_t active; // only HEAD has refs to all active IO
 	atomic_t fails; // should be zero, non-zero indicates atleast one path failed
+	struct file* file;
 	int read; // if read is from the first target only
 
 	unsigned long start; // start time [HEAD]
@@ -46,14 +47,10 @@ struct thread_context {
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
 	struct bio_list  bio_list;
-
-	// extension for block mode io trackers
-	struct list_head  iot_heads;
 };
 
 struct pxd_fastpath_extension {
 	// Extended information
-	bool   block_device;
 	int bg_flush_enabled; // dynamically enable bg flush from driver
 	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
 
