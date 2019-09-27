@@ -557,7 +557,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 out:
 	if (ret < 0) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-		bio->bio_status = ret;
+		bio->bi_status = ret;
 #else
 		bio->bi_error = ret;
 #endif
@@ -582,7 +582,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 
 	// mark status all good to begin with!
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-	bio->bio_status = 0;
+	bio->bi_status = 0;
 #else
 	bio->bi_error = 0;
 #endif
@@ -621,7 +621,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 out:
 	if (ret < 0) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-		bio->bio_status = ret;
+		bio->bi_status = ret;
 #else
 		bio->bi_error = ret;
 #endif
