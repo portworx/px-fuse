@@ -322,7 +322,7 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct
 }
 
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head) {
-	pxd_printk("__pxd_cleanup_block_io for head %p, repl %p\n", head, repl);
+	pxd_printk("__pxd_cleanup_block_io for bio %p, head %p\n", head->orig, head);
 
 	while (!list_empty(&head->replicas)) {
 		struct pxd_io_tracker *repl = list_first_entry(&head->replicas, struct pxd_io_tracker, item);
@@ -340,7 +340,7 @@ static void pxd_complete_io(struct bio* bio) {
 	struct pxd_io_tracker *head = iot->head;
 
 	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d\n",
-			bio, pxd_dev, head, atomic_get(&head->active));
+			bio, pxd_dev, head, atomic_read(&head->active));
 
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
@@ -355,7 +355,7 @@ static void pxd_complete_io(struct bio* bio) {
 		}
 #endif
 		pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d - early return\n",
-			bio, pxd_dev, head, atomic_get(&head->active));
+			bio, pxd_dev, head, atomic_read(&head->active));
 
 		return;
 	}
@@ -367,7 +367,7 @@ static void pxd_complete_io(struct bio* bio) {
 #endif
 
 	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d - completing orig %p\n",
-			bio, pxd_dev, head, atomic_get(&head->active), iot->orig);
+			bio, pxd_dev, head, atomic_read(&head->active), iot->orig);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
