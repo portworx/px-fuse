@@ -37,6 +37,8 @@ struct pxd_io_tracker {
 
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
+
+	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
 };
 

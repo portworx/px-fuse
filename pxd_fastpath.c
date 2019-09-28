@@ -263,6 +263,7 @@ ssize_t _pxd_read(struct file *file, struct bio_vec *bvec, loff_t *pos) {
 	struct iov_iter i;
 
 	iov_iter_bvec(&i, READ, bvec, 1, bvec->bv_len);
+	result = vfs_iter_read(file, &i, pos, 0);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	struct iov_iter i;
 
@@ -330,6 +331,7 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head) {
 		list_del(&repl->item);
 		bio_put(&repl->clone);
 	}
+
 	pxd_printk("__pxd_cleanup_block_io freeing head %p\n", head);
 	bio_put(&head->clone);
 }
@@ -411,12 +413,16 @@ static void pxd_complete_io(struct bio* bio) {
 
 static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_dev,
 		struct bio *bio, struct file *fileh) {
-	struct bio* clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
+	struct bio* clone_bio;
 	struct pxd_io_tracker* iot;
 	struct address_space *mapping = fileh->f_mapping;
 	struct inode *inode = mapping->host;
 	struct block_device *bdi = I_BDEV(inode);
 
+	pxd_printk("pxd %p:__pxd_init_block_replica entering with bio %p, fileh %p with blkg %p\n",
+			pxd_dev, bio, fileh, bio->bi_blkg);
+
+	clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
 	if (!clone_bio) {
 		pxd_printk(KERN_ERR"No memory for io context");
 		return NULL;
@@ -438,7 +444,12 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	iot->read = (bio_data_dir(bio) == READ);
 #endif
 
-	BIO_SET_DEV(clone_bio, bdi);
+	pxd_printk("pxd %p:__pxd_init_block_replica clone bio %p (blkg %p), resetting backing block dev to %p\n",
+			pxd_dev, clone_bio, clone_bio->bi_blkg, bdi);
+
+	if (S_ISBLK(inode->i_mode)) {
+		BIO_SET_DEV(clone_bio, bdi);
+	}
 	clone_bio->bi_private = pxd_dev;
 	clone_bio->bi_end_io = pxd_complete_io;
 
