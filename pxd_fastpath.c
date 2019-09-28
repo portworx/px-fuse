@@ -322,11 +322,15 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct
 }
 
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head) {
+	pxd_printk("__pxd_cleanup_block_io for head %p, repl %p\n", head, repl);
+
 	while (!list_empty(&head->replicas)) {
 		struct pxd_io_tracker *repl = list_first_entry(&head->replicas, struct pxd_io_tracker, item);
+		pxd_printk("__pxd_cleanup_block_io for head %p, repl %p\n", head, repl);
 		list_del(&repl->item);
 		bio_put(&repl->clone);
 	}
+	pxd_printk("__pxd_cleanup_block_io freeing head %p\n", head);
 	bio_put(&head->clone);
 }
 
@@ -334,6 +338,9 @@ static void pxd_complete_io(struct bio* bio) {
 	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
+
+	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d\n",
+			bio, pxd_dev, head, atomic_get(&head->active));
 
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
@@ -347,6 +354,9 @@ static void pxd_complete_io(struct bio* bio) {
 			atomic_inc(&head->fails);
 		}
 #endif
+		pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d - early return\n",
+			bio, pxd_dev, head, atomic_get(&head->active));
+
 		return;
 	}
 
@@ -355,6 +365,9 @@ static void pxd_complete_io(struct bio* bio) {
 #else
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
+
+	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d - completing orig %p\n",
+			bio, pxd_dev, head, atomic_get(&head->active), iot->orig);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
@@ -429,19 +442,25 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	clone_bio->bi_private = pxd_dev;
 	clone_bio->bi_end_io = pxd_complete_io;
 
+	pxd_printk("pxd %p:__pxd_init_block_replica allocated repl %p for orig bio %p\n",
+			pxd_dev, iot, bio);
+
 	return iot;
 }
 
 static
 struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct bio* bio) {
-	struct pxd_io_tracker* head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
+	struct pxd_io_tracker* head;
 	struct pxd_io_tracker *repl;
 	int index;
 
+	pxd_printk("pxd %p:__pxd_init_block_replica to allocate iotracker for bio %p\n",
+			pxd_dev, bio);
+
+	head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
 	if (!head) {
 		return NULL;
 	}
-
 	// initialize the replicas only if the request is non-read
 	if (!head->read) {
 		for (index=1; index<pxd_dev->fp.nfd; index++) {
@@ -455,6 +474,8 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 		}
 	}
 
+	pxd_printk("pxd %p:__pxd_init_block_head allocated head %p for orig bio %p nfd %d\n",
+			pxd_dev, head, bio, pxd_dev->fp.nfd);
 	return head;
 
 repl_cleanup:
@@ -730,11 +751,11 @@ static int pxd_io_thread(void *data) {
 		if (bio_list_empty(&tc->bio_list))
 			continue;
 
-		pxd_printk("pxd_io_thread new bio for device %llu, pending %u\n",
-				tc->pxd_dev->dev_id, atomic_read(&tc->pxd_dev->fp.ncount));
-
 		bio = pxd_get_bio(tc);
 		BUG_ON(!bio);
+
+		pxd_printk("pxd_io_thread new bio %p for device %llu, pending %u\n",
+				bio, tc->pxd_dev->dev_id, atomic_read(&tc->pxd_dev->fp.ncount));
 
 		spin_lock_irq(&tc->pxd_dev->lock);
 		if (atomic_read(&tc->pxd_dev->fp.ncount) < tc->pxd_dev->fp.nr_congestion_off) {
@@ -964,7 +985,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return pxd_make_request_slowpath(q, bio);
 	}
 
-	pxd_printk("pxd_make_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
+	pxd_printk("pxd_make_fastpath_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
 
 	#if 0
 	{ /* add congestion handling */
