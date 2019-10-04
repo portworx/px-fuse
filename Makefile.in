@@ -50,12 +50,10 @@ export OUTPATH
 
 # EL8 Specific kernel checks
 ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
-FOUND = "RHEL8"
 PXDEFINES += -D__PX_BLKMQ__
 else
 # 5.x kernel checks
 ifeq ($(shell test "$(MAJOR)" = "5"; echo $$?),0)
-FOUND = "5.x"
 PXDEFINES += -D__PX_BLKMQ__
 endif
 endif
