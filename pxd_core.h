@@ -44,6 +44,9 @@ struct pxd_device {
 #define pxd_printk(args...)
 //#define pxd_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
 
+#define pxd_io_printk(args...)
+//#define pxd_io_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
+
 #ifndef SECTOR_SIZE
 #define SECTOR_SIZE 512
 #endif
@@ -78,6 +81,18 @@ mode_t open_mode(mode_t mode) {
 	if (mode & O_DIRECT) m |= O_DIRECT;
 
 	return m;
+}
+
+static inline
+void decode_mode(mode_t mode, char *out) {
+	if (mode & O_LARGEFILE) *out++ = 'L';
+	if (mode & O_NOATIME) *out++ = 'A';
+	if (mode & O_DIRECT) *out++='D';
+	if (mode & O_RDONLY) *out++='R';
+	if (mode & O_RDWR) *out++ = 'W';
+	if (mode & O_SYNC) *out++ = 'S';
+
+	*out = '\0';
 }
 
 #endif /* _PXD_CORE_H_ */

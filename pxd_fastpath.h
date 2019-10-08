@@ -14,6 +14,7 @@
 #include <linux/bio.h>
 
 #define MAX_THREADS (nr_cpu_ids)
+#define PXD_MAX_THREAD_PER_CPU (1)
 
 struct pxd_device;
 struct pxd_context;
@@ -27,6 +28,7 @@ struct node_cpu_map {
 
 // Added metadata for each bio
 struct pxd_io_tracker {
+	struct pxd_device *pxd_dev; // back pointer to pxd device
 	struct pxd_io_tracker *head; // back pointer to head copy [ALL]
 	struct list_head replicas; // only replica needs this
 	struct list_head item; // only HEAD needs this
@@ -44,11 +46,11 @@ struct pxd_io_tracker {
 
 struct pxd_device;
 struct thread_context {
-	struct pxd_device  *pxd_dev;
-	struct task_struct *pxd_thread;
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
-	struct bio_list  bio_list;
+
+	struct list_head iot_heads;
+	struct task_struct *iothread[PXD_MAX_THREAD_PER_CPU];
 };
 
 struct pxd_fastpath_extension {
