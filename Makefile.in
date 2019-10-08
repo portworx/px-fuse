@@ -30,7 +30,7 @@ endif
 
 ifeq ($(shell test -f "/usr/bin/bc"; echo $$?),0)
 MINKVER=3.10
-KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
+KERNELVER=$(shell echo $(CHK_KVER) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
 ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif
@@ -40,10 +40,10 @@ ifdef KERNELOTHER
 KERNELOTHEROPT=O=$(KERNELOTHER)
 endif
 
-MAJOR=$(shell echo $(KVERSION) | awk -F. '{print $$1}')
-MINOR=$(shell echo $(KVERSION) | awk -F. '{print $$2}')
-PATCH=$(shell echo $(KVERSION) | awk -F. '{print $$3}' | awk -F- '{print $$1}')
-export REVISION=$(shell echo $(KVERSION) | awk -F. '{print $$3}' |  awk -F- '{print $$2}')
+MAJOR=$(shell echo $(CHK_KVER) | awk -F. '{print $$1}')
+MINOR=$(shell echo $(CHK_KVER) | awk -F. '{print $$2}')
+PATCH=$(shell echo $(CHK_KVER) | awk -F. '{print $$3}' | awk -F- '{print $$1}')
+export REVISION=$(shell echo $(CHK_KVER) | awk -F. '{print $$3}' |  awk -F- '{print $$2}')
 export VERSION=$(MAJOR).$(MINOR).$(PATCH)
 export KERNELPATH
 export OUTPATH
