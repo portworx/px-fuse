@@ -960,6 +960,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 	fp->nfd = 0; // will take slow path, if additional info not provided.
 
 	pxd_printk("Number of cpu ids %d\n", MAX_THREADS);
+#if 0
+	// configure bg flush based on passed mode of operation
 	if (pxd_dev->mode & O_DIRECT) {
 		fp->bg_flush_enabled = false; // avoids high latency
 		printk("For pxd device %llu background flush disabled\n", pxd_dev->dev_id);
@@ -967,6 +969,10 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 		fp->bg_flush_enabled = true; // introduces high latency
 		printk("For pxd device %llu background flush enabled\n", pxd_dev->dev_id);
 	}
+#else
+	// force bg flush to disable always
+	fp->bg_flush_enabled = false; // avoids high latency
+#endif
 
 	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 

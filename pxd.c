@@ -1151,6 +1151,16 @@ static ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
+static ssize_t pxd_mode_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	char modestr[32];
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	decode_mode(pxd_dev->mode, modestr);
+	return sprintf(buf, "mode: %#x/%s\n", pxd_dev->mode, modestr);
+}
+
 static ssize_t pxd_wrsegment_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
@@ -1320,6 +1330,7 @@ static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
+static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -1331,6 +1342,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_congested.attr,
 	&dev_attr_writesegment.attr,
 	&dev_attr_fastpath.attr,
+	&dev_attr_mode.attr,
 	NULL
 };
 
