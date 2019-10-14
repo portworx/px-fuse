@@ -13,8 +13,10 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-#define MAX_THREADS (nr_cpu_ids)
-#define PXD_MAX_THREAD_PER_CPU (1)
+// atleast 2 per cpu
+// first thread, dedicated for writes pinned on that cpu
+// second (and rest) are readers pinned on the numa node
+#define PXD_MAX_THREAD_PER_CPU (2)
 
 struct pxd_device;
 struct pxd_context;
@@ -49,7 +51,9 @@ struct thread_context {
 	wait_queue_head_t   pxd_event;
 	spinlock_t  		lock;
 
-	struct list_head iot_heads;
+	struct list_head iot_writers;
+	struct list_head iot_readers;
+
 	struct task_struct *iothread[PXD_MAX_THREAD_PER_CPU];
 };
 
@@ -89,11 +93,8 @@ struct pxd_fastpath_extension {
 	atomic_t ncomplete; // [global] total completed requests
 	atomic_t ncongested; // [global] total number of times queue congested
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
-	atomic_t index[MAX_NUMNODES];
+	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
-
-// helpers
-struct file* getFile(struct pxd_device *pxd_dev, int index);
 
 // global initialization during module init for fastpath
 int fastpath_init(void);

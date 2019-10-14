@@ -5,6 +5,9 @@
 #include "pxd_core.h"
 #include "pxd_compat.h"
 
+// cached info at px loadtime, to gracefully handle hot plugging cpus
+static int __px_ncpus;
+
 // A one-time built, static lookup table to distribute requests to cpu
 // within same numa node
 static struct node_cpu_map *node_cpu_map;
@@ -28,9 +31,13 @@ static struct bio_set* ppxd_bio_set;
 static struct thread_context *g_tc;
 
 // forward decl
-static int pxd_io_thread(void *data);
+static int pxd_io_writer(void *data);
+static int pxd_io_reader(void *data);
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head);
-static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc);
+static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw);
+#define pxd_get_writeio(tc)  pxd_get_io(tc, WRITE)
+#define pxd_get_readio(tc)   pxd_get_io(tc, READ)
+
 
 static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid) {
 	int i;
@@ -39,10 +46,17 @@ static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid) 
 
 	spin_lock_init(&tc->lock);
 	init_waitqueue_head(&tc->pxd_event);
-	INIT_LIST_HEAD(&tc->iot_heads);
+	INIT_LIST_HEAD(&tc->iot_writers);
+	INIT_LIST_HEAD(&tc->iot_readers);
 
 	for (i=0; i<PXD_MAX_THREAD_PER_CPU;i++) {
-		tc->iothread[i] = kthread_create_on_node(pxd_io_thread, tc,
+		// set dedicated thread function
+		int (*fn)(void*) = pxd_io_writer;
+		if (i) {
+			fn = pxd_io_reader;
+		}
+
+		tc->iothread[i] = kthread_create_on_node(fn, tc,
 				node, "pxd%d(%d)", i, node);
 		if (IS_ERR(tc->iothread[i])) {
 			pxd_printk("Init global kthread for cpu %d failed %lu\n",
@@ -51,12 +65,12 @@ static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid) 
 			goto fail;
 		}
 
-		//
-		// Fastpath driver creates a 'cpu' number of threads, that
-		// are bound to its numa node mask.
-		// So atleast one thread per cpu is guaranteed for io processing.
-		//
-		set_cpus_allowed_ptr(tc->iothread[i], cpumask_of_node(node));
+		//  bind first thread on the same cpu, while others on the same numa node
+		if (i) {
+			set_cpus_allowed_ptr(tc->iothread[i], cpumask_of_node(node));
+		} else {
+			kthread_bind(tc->iothread[i], cpuid);
+		}
 		set_user_nice(tc->iothread[i], MIN_NICE);
 		wake_up_process(tc->iothread[i]);
 	}
@@ -77,14 +91,19 @@ static void fastpath_global_threadctx_cleanup(void) {
 
 	if (!g_tc) return;
 
-	for (i=0;i<nr_cpu_ids;i++) {
+	for (i=0;i<__px_ncpus;i++) {
 		tc = &g_tc[i];
 		for (t=0;t<PXD_MAX_THREAD_PER_CPU; t++) {
 			if (tc->iothread[t]) kthread_stop(tc->iothread[t]);
 		}
 
 		// fail all enqueue'd IOs
-		while ((head = pxd_get_io(tc)) != NULL) {
+		while ((head = pxd_get_readio(tc)) != NULL) {
+			if (head->orig) BIO_ENDIO(head->orig, -ENXIO);
+			__pxd_cleanup_block_io(head);
+		}
+
+		while ((head = pxd_get_writeio(tc)) != NULL) {
 			if (head->orig) BIO_ENDIO(head->orig, -ENXIO);
 			__pxd_cleanup_block_io(head);
 		}
@@ -94,14 +113,18 @@ static void fastpath_global_threadctx_cleanup(void) {
 int fastpath_init(void) {
 	int i, err;
 
-	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", nr_cpu_ids, NR_CPUS, nr_node_ids, MAX_NUMNODES);
+	// cache the count of cpu information at module load time.
+	// if there is any subsequent hot plugging of cpus, will still handle gracefully.
+	__px_ncpus = nr_cpu_ids;
+
+	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", __px_ncpus, NR_CPUS, nr_node_ids, MAX_NUMNODES);
 	node_cpu_map = kzalloc(sizeof(struct node_cpu_map) * nr_node_ids, GFP_KERNEL);
 	if (!node_cpu_map) {
 		printk(KERN_ERR "pxd: failed to initialize node_cpu_map: -ENOMEM\n");
 		return -ENOMEM;
 	}
 
-	g_tc = kzalloc(sizeof(struct thread_context) * nr_cpu_ids, GFP_KERNEL);
+	g_tc = kzalloc(sizeof(struct thread_context) * __px_ncpus, GFP_KERNEL);
 	if (!g_tc) {
 		printk(KERN_ERR "pxd: failed to initialize global thread context: -ENOMEM\n");
 		kfree(node_cpu_map);
@@ -109,7 +132,7 @@ int fastpath_init(void) {
 	}
 
 	// capturing all the cpu's on a given numa node during run-time
-	for (i=0;i<nr_cpu_ids;i++) {
+	for (i=0;i<__px_ncpus;i++) {
 		struct node_cpu_map *map=&node_cpu_map[cpu_to_node(i)];
 		map->cpu[map->ncpu++] = i;
 
@@ -810,47 +833,62 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 	}
 }
 
-static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head) {
+static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw) {
 	atomic_inc(&head->pxd_dev->fp.ncount);
 
 	spin_lock_irq(&tc->lock);
-	list_add(&head->item, &tc->iot_heads);
+	if (rw == WRITE) {
+		list_add(&head->item, &tc->iot_writers);
+	} else {
+		list_add(&head->item, &tc->iot_readers);
+	}
 	spin_unlock_irq(&tc->lock);
 }
 
-static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc) {
+static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw) {
 	struct pxd_io_tracker* head = NULL;
 
 	spin_lock_irq(&tc->lock);
-	if (!list_empty(&tc->iot_heads)) {
-		head = list_first_entry(&tc->iot_heads, struct pxd_io_tracker, item);
-		list_del(&head->item);
+	if (rw == WRITE) {
+		if (!list_empty(&tc->iot_writers)) {
+			head = list_first_entry(&tc->iot_writers, struct pxd_io_tracker, item);
+			list_del(&head->item);
+		}
+	} else {
+		if (!list_empty(&tc->iot_readers)) {
+			head = list_first_entry(&tc->iot_readers, struct pxd_io_tracker, item);
+			list_del(&head->item);
+		}
 	}
 	spin_unlock_irq(&tc->lock);
 
 	return head;
 }
 
-static int pxd_io_empty(struct thread_context *tc) {
+static int pxd_io_empty(struct thread_context *tc, int rw) {
 	int empty;
 
 	spin_lock_irq(&tc->lock);
-	empty = list_empty(&tc->iot_heads);
+	if (rw == WRITE) {
+		empty = list_empty(&tc->iot_writers);
+	} else {
+		empty = list_empty(&tc->iot_readers);
+	}
 	spin_unlock_irq(&tc->lock);
 
 	return empty;
 }
 
-static int pxd_io_thread(void *data) {
+static int pxd_io_thread(void *data, int rw) {
 	struct thread_context *tc = data;
 	struct pxd_device *pxd_dev;
 	struct pxd_io_tracker *head;
 
 	while (!kthread_should_stop()) {
 		wait_event_interruptible(tc->pxd_event,
-                             !pxd_io_empty(tc) || kthread_should_stop());
+                             !pxd_io_empty(tc, rw) || kthread_should_stop());
 
-		head = pxd_get_io(tc);
+		head = pxd_get_io(tc, rw);
 		if (!head) {
 			continue;
 		}
@@ -867,6 +905,14 @@ static int pxd_io_thread(void *data) {
 		pxd_handle_io(tc, head);
 	}
 	return 0;
+}
+
+static int pxd_io_reader(void *data) {
+	return pxd_io_thread(data, READ);
+}
+
+static int pxd_io_writer(void *data) {
+	return pxd_io_thread(data, WRITE);
 }
 
 static void pxd_suspend_io(struct pxd_device *pxd_dev) {
@@ -1002,7 +1048,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 
 	fp->nfd = 0; // will take slow path, if additional info not provided.
 
-	pxd_printk("Number of cpu ids %d\n", MAX_THREADS);
+	pxd_printk("Number of cpu ids %d\n", __px_ncpus);
 	// configure bg flush based on passed mode of operation
 	if (pxd_dev->mode & O_DIRECT) {
 		fp->bg_flush_enabled = false; // avoids high latency
@@ -1069,7 +1115,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	unsigned int rw = bio_rw(bio);
 #endif
 	int cpu = smp_processor_id();
-	int thread = cpu % MAX_THREADS;
+	int thread = cpu % __px_ncpus;
 
 	struct pxd_io_tracker *head;
 	struct thread_context *tc;
@@ -1145,6 +1191,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		thread = getnextcpu(node, atomic_add_return(1, &pxd_dev->fp.index[node]));
 	}
 
+
 	head = __pxd_init_block_head(pxd_dev, bio);
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
@@ -1153,7 +1200,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	tc = &g_tc[thread];
 	BUG_ON(!tc);
-	pxd_add_io(tc, head);
+	pxd_add_io(tc, head, rw);
 
 	wake_up(&tc->pxd_event);
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
