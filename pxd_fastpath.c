@@ -1,4 +1,5 @@
 #include <linux/types.h>
+#include <linux/delay.h>
 
 #include "pxd.h"
 #include "pxd_core.h"
@@ -498,6 +499,7 @@ static void pxd_complete_io(struct bio* bio) {
 
 	__pxd_cleanup_block_io(head);
 
+	atomic_dec(&pxd_dev->fp.ncount);
 	atomic_inc(&pxd_dev->fp.ncomplete);
 
 	/* free up from any prior congestion wait */
@@ -628,12 +630,6 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	unsigned int op = bio_op(bio);
 	int ret;
 
-	// NOTE NOTE NOTE accessing out of lock
-	if (!pxd_dev->connected) {
-		printk(KERN_ERR"px is disconnected, failing IO.\n");
-		bio_io_error(bio);
-		return -EIO;
-	}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
@@ -779,6 +775,7 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		__pxd_cleanup_block_io(head);
 		BIO_ENDIO(bio, -ENXIO);
+		atomic_dec(&pxd_dev->fp.ncount);
 		return;
 	}
 
@@ -828,7 +825,6 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc) {
 	if (!list_empty(&tc->iot_heads)) {
 		head = list_first_entry(&tc->iot_heads, struct pxd_io_tracker, item);
 		list_del(&head->item);
-		atomic_dec(&head->pxd_dev->fp.ncount);
 	}
 	spin_unlock_irq(&tc->lock);
 
@@ -873,6 +869,43 @@ static int pxd_io_thread(void *data) {
 	return 0;
 }
 
+static void pxd_suspend_io(struct pxd_device *pxd_dev) {
+	int need_flush = 0;
+	spin_lock_irq(&pxd_dev->fp.suspend_lock);
+	if (!pxd_dev->fp.suspend++) {
+		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
+		need_flush = 1;
+	} else {
+		printk("For pxd device %llu IO already suspended\n", pxd_dev->dev_id);
+	}
+	spin_unlock_irq(&pxd_dev->fp.suspend_lock);
+
+	// need to wait for inflight IOs to complete
+	if (need_flush) {
+		do {
+			int nactive = atomic_read(&pxd_dev->fp.ncount);
+			if (!nactive) break;
+			printk(KERN_WARNING"pxd device %llu still has %d active IO, waiting completion to suspend",
+					pxd_dev->dev_id, nactive);
+			msleep_interruptible(100);
+		} while (1);
+	}
+
+}
+
+static void pxd_resume_io(struct pxd_device *pxd_dev) {
+	spin_lock_irq(&pxd_dev->fp.suspend_lock);
+	pxd_dev->fp.suspend--;
+	if (!pxd_dev->fp.suspend) {
+		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
+		wake_up(&pxd_dev->fp.suspend_wait);
+	} else {
+		printk("For pxd device %llu IO still suspended(%d)\n",
+				pxd_dev->dev_id, pxd_dev->fp.suspend);
+	}
+	spin_unlock_irq(&pxd_dev->fp.suspend_lock);
+}
+
 /*
  * shall get called last when new device is added/updated or when fuse connection is lost
  * and re-estabilished.
@@ -885,6 +918,8 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force) {
 	int nfd = fp->nfd;
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
+
+	pxd_suspend_io(pxd_dev);
 
 	decode_mode(mode, modestr);
 	printk("device %llu mode %s\n", pxd_dev->dev_id, modestr);
@@ -926,6 +961,8 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force) {
 		}
 	}
 
+	pxd_resume_io(pxd_dev);
+
 	printk(KERN_INFO"pxd_dev %llu mode %#x setting up with %d backing volumes, [%p,%p,%p]\n",
 		pxd_dev->dev_id, mode, fp->nfd,
 		fp->file[0], fp->file[1], fp->file[2]);
@@ -939,6 +976,8 @@ out_file_failed:
 	}
 	memset(fp->file, 0, sizeof(fp->file));
 	memset(fp->device_path, 0, sizeof(fp->device_path));
+
+	pxd_resume_io(pxd_dev);
 	printk(KERN_INFO"Device %llu no backing volume setup, will take slow path\n",
 		pxd_dev->dev_id);
 }
@@ -947,10 +986,14 @@ void disableFastPath(struct pxd_device *pxd_dev) {
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
+	pxd_suspend_io(pxd_dev);
+
 	for (i=0; i<fp->nfd; i++) {
 		filp_close(fp->file[i], NULL);
 	}
 	fp->nfd=0;
+
+	pxd_resume_io(pxd_dev);
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev) {
@@ -970,6 +1013,11 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 	}
 
 	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
+
+	// device temporary IO suspend
+	init_waitqueue_head(&fp->suspend_wait);
+	spin_lock_init(&fp->suspend_lock);
+	fp->suspend = 0;
 
 	// congestion init
 	// hard coded congestion limits within driver
@@ -1042,6 +1090,19 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
+	}
+
+	// If IO suspended, then hang IO onto the suspend wait queue
+	{
+		spin_lock_irq(&pxd_dev->fp.suspend_lock);
+		if (pxd_dev->fp.suspend) {
+			printk("pxd device %llu is suspended, IO blocked until device activated[bio %p, wr %d]\n",
+				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
+			wait_event_lock_irq(pxd_dev->fp.suspend_wait, !pxd_dev->fp.suspend, pxd_dev->fp.suspend_lock);
+			printk("pxd device %llu re-activated, IO resumed[bio %p, wr %d]\n",
+				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
+		}
+		spin_unlock_irq(&pxd_dev->fp.suspend_lock);
 	}
 
 	if (!pxd_dev->fp.nfd) {

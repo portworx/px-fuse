@@ -67,6 +67,11 @@ struct pxd_fastpath_extension {
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
+	// if set, then newer IOs shall block, until reactivated.
+	int suspend;
+	wait_queue_head_t  suspend_wait;
+	spinlock_t suspend_lock;
+
 	wait_queue_head_t   congestion_wait;
 	wait_queue_head_t   sync_event;
 	spinlock_t   	sync_lock;
