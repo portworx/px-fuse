@@ -14,9 +14,10 @@
 #include <linux/bio.h>
 
 // atleast 2 per cpu
-// first thread, dedicated for writes pinned on that cpu
-// second (and rest) are readers pinned on the numa node
-#define PXD_MAX_THREAD_PER_CPU (2)
+// create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
+// writer threads are pinned on the same cpu.
+// reader threads are pinned on the same numa node
+#define PXD_MAX_THREAD_PER_CPU (4)
 
 struct pxd_device;
 struct pxd_context;
@@ -48,13 +49,15 @@ struct pxd_io_tracker {
 
 struct pxd_device;
 struct thread_context {
-	wait_queue_head_t   pxd_event;
-	spinlock_t  		lock;
-
-	struct list_head iot_writers;
+	spinlock_t  	    read_lock;
+	wait_queue_head_t   read_event;
 	struct list_head iot_readers;
+	struct task_struct *reader[PXD_MAX_THREAD_PER_CPU];
 
-	struct task_struct *iothread[PXD_MAX_THREAD_PER_CPU];
+	spinlock_t  	    write_lock;
+	wait_queue_head_t   write_event;
+	struct list_head iot_writers;
+	struct task_struct *writer[PXD_MAX_THREAD_PER_CPU];
 };
 
 struct pxd_fastpath_extension {

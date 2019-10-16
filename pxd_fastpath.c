@@ -12,7 +12,7 @@ static int __px_ncpus;
 // within same numa node
 static struct node_cpu_map *node_cpu_map;
 
-static
+static inline
 int getnextcpu(int node, int pos) {
 	const struct node_cpu_map *map = &node_cpu_map[node];
 	if (map->ncpu == 0) { return 0; }
@@ -38,48 +38,93 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw);
 #define pxd_get_writeio(tc)  pxd_get_io(tc, WRITE)
 #define pxd_get_readio(tc)   pxd_get_io(tc, READ)
 
+static inline
+int pxd_io_empty(struct thread_context *tc, int rw) {
+	int empty;
+
+	if (rw == WRITE) {
+		spin_lock_irq(&tc->write_lock);
+		empty = list_empty(&tc->iot_writers);
+		spin_unlock_irq(&tc->write_lock);
+	} else {
+		spin_lock_irq(&tc->read_lock);
+		empty = list_empty(&tc->iot_readers);
+		spin_unlock_irq(&tc->read_lock);
+	}
+
+	return empty;
+}
+
+static inline
+void pxd_wait_io(struct thread_context *tc, int rw) {
+	if (rw == READ) {
+		wait_event_interruptible(tc->read_event,
+                            !pxd_io_empty(tc, rw) || kthread_should_stop());
+	} else {
+		wait_event_interruptible(tc->write_event,
+                            !pxd_io_empty(tc, rw) || kthread_should_stop());
+	}
+}
 
 static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid) {
 	int i;
 	int err;
 	int node = cpu_to_node(cpuid);
 
-	spin_lock_init(&tc->lock);
-	init_waitqueue_head(&tc->pxd_event);
-	INIT_LIST_HEAD(&tc->iot_writers);
+	spin_lock_init(&tc->read_lock);
+	init_waitqueue_head(&tc->read_event);
 	INIT_LIST_HEAD(&tc->iot_readers);
 
+	spin_lock_init(&tc->write_lock);
+	init_waitqueue_head(&tc->write_event);
+	INIT_LIST_HEAD(&tc->iot_writers);
+
+	// setup readers
 	for (i=0; i<PXD_MAX_THREAD_PER_CPU;i++) {
 		// set dedicated thread function
-		int (*fn)(void*) = pxd_io_writer;
-		if (i) {
-			fn = pxd_io_reader;
-		}
-
-		tc->iothread[i] = kthread_create_on_node(fn, tc,
-				node, "pxd%d(%d)", i, node);
-		if (IS_ERR(tc->iothread[i])) {
-			pxd_printk("Init global kthread for cpu %d failed %lu\n",
-				cpuid, PTR_ERR(tc->iothread[i]));
+		tc->reader[i] = kthread_create_on_node(pxd_io_reader, tc,
+				node, "pxwr%d:%d:%d", node, cpuid, i);
+		if (IS_ERR(tc->reader[i])) {
+			pxd_printk("Init global reader kthread for cpu %d failed %lu\n",
+				cpuid, PTR_ERR(tc->reader[i]));
 			err = -EINVAL;
-			goto fail;
+			goto fail_rd;
 		}
 
-		//  bind first thread on the same cpu, while others on the same numa node
-		if (i) {
-			set_cpus_allowed_ptr(tc->iothread[i], cpumask_of_node(node));
-		} else {
-			kthread_bind(tc->iothread[i], cpuid);
+		//  bind readers on any cpu but on same numa node
+		set_cpus_allowed_ptr(tc->reader[i], cpumask_of_node(node));
+		set_user_nice(tc->reader[i], MIN_NICE);
+		wake_up_process(tc->reader[i]);
+	}
+
+	// setup writers
+	for (i=0; i<PXD_MAX_THREAD_PER_CPU;i++) {
+		// set dedicated thread function
+		tc->writer[i] = kthread_create_on_node(pxd_io_writer, tc,
+				node, "pxrd%d:%d:%d", node, cpuid, i);
+		if (IS_ERR(tc->writer[i])) {
+			pxd_printk("Init global writer kthread for cpu %d failed %lu\n",
+				cpuid, PTR_ERR(tc->writer[i]));
+			err = -EINVAL;
+			goto fail_wr;
 		}
-		set_user_nice(tc->iothread[i], MIN_NICE);
-		wake_up_process(tc->iothread[i]);
+
+		//  bind all writers on the same cpu
+		kthread_bind(tc->writer[i], cpuid);
+		set_user_nice(tc->writer[i], MIN_NICE);
+		wake_up_process(tc->writer[i]);
 	}
 
 	return 0;
 
-fail:
+fail_wr:
 	for(;i>=0; i--) {
-		if (tc->iothread[i]) kthread_stop(tc->iothread[i]);
+		if (tc->writer[i]) kthread_stop(tc->writer[i]);
+	}
+	i = PXD_MAX_THREAD_PER_CPU;
+fail_rd:
+	for(;i>=0; i--) {
+		if (tc->reader[i]) kthread_stop(tc->reader[i]);
 	}
 	return err;
 }
@@ -94,7 +139,8 @@ static void fastpath_global_threadctx_cleanup(void) {
 	for (i=0;i<__px_ncpus;i++) {
 		tc = &g_tc[i];
 		for (t=0;t<PXD_MAX_THREAD_PER_CPU; t++) {
-			if (tc->iothread[t]) kthread_stop(tc->iothread[t]);
+			if (tc->writer[t]) kthread_stop(tc->writer[t]);
+			if (tc->reader[t]) kthread_stop(tc->reader[t]);
 		}
 
 		// fail all enqueue'd IOs
@@ -836,47 +882,41 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw) {
 	atomic_inc(&head->pxd_dev->fp.ncount);
 
-	spin_lock_irq(&tc->lock);
-	if (rw == WRITE) {
+	if (rw != READ) {
+		spin_lock_irq(&tc->write_lock);
 		list_add(&head->item, &tc->iot_writers);
+		spin_unlock_irq(&tc->write_lock);
+
+		wake_up(&tc->write_event);
 	} else {
+		spin_lock_irq(&tc->read_lock);
 		list_add(&head->item, &tc->iot_readers);
+		spin_unlock_irq(&tc->read_lock);
+
+		wake_up(&tc->read_event);
 	}
-	spin_unlock_irq(&tc->lock);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw) {
 	struct pxd_io_tracker* head = NULL;
 
-	spin_lock_irq(&tc->lock);
-	if (rw == WRITE) {
+	if (rw != READ) {
+		spin_lock_irq(&tc->write_lock);
 		if (!list_empty(&tc->iot_writers)) {
 			head = list_first_entry(&tc->iot_writers, struct pxd_io_tracker, item);
 			list_del(&head->item);
 		}
+		spin_unlock_irq(&tc->write_lock);
 	} else {
+		spin_lock_irq(&tc->read_lock);
 		if (!list_empty(&tc->iot_readers)) {
 			head = list_first_entry(&tc->iot_readers, struct pxd_io_tracker, item);
 			list_del(&head->item);
 		}
+		spin_unlock_irq(&tc->read_lock);
 	}
-	spin_unlock_irq(&tc->lock);
 
 	return head;
-}
-
-static int pxd_io_empty(struct thread_context *tc, int rw) {
-	int empty;
-
-	spin_lock_irq(&tc->lock);
-	if (rw == WRITE) {
-		empty = list_empty(&tc->iot_writers);
-	} else {
-		empty = list_empty(&tc->iot_readers);
-	}
-	spin_unlock_irq(&tc->lock);
-
-	return empty;
 }
 
 static int pxd_io_thread(void *data, int rw) {
@@ -885,8 +925,7 @@ static int pxd_io_thread(void *data, int rw) {
 	struct pxd_io_tracker *head;
 
 	while (!kthread_should_stop()) {
-		wait_event_interruptible(tc->pxd_event,
-                             !pxd_io_empty(tc, rw) || kthread_should_stop());
+		pxd_wait_io(tc, rw);
 
 		head = pxd_get_io(tc, rw);
 		if (!head) {
@@ -896,11 +935,9 @@ static int pxd_io_thread(void *data, int rw) {
 		pxd_dev = head->pxd_dev;
 		pxd_printk("pxd_io_thread new head %p for device %llu, pending %u\n",
 				head, pxd_dev->dev_id, atomic_read(&pxd_dev->fp.ncount));
-		spin_lock_irq(&pxd_dev->lock);
 		if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
 			wake_up(&pxd_dev->fp.congestion_wait);
 		}
-		spin_unlock_irq(&pxd_dev->lock);
 
 		pxd_handle_io(tc, head);
 	}
@@ -936,7 +973,6 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev) {
 			msleep_interruptible(100);
 		} while (1);
 	}
-
 }
 
 static void pxd_resume_io(struct pxd_device *pxd_dev) {
@@ -1189,11 +1225,13 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 	#endif
 
+#if 0
 	/* keep writes on same cpu, but allow reads to spread but within same numa node */
 	if (rw == READ) {
 		int node = cpu_to_node(cpu);
 		thread = getnextcpu(node, atomic_add_return(1, &pxd_dev->fp.index[node]));
 	}
+#endif
 
 
 	head = __pxd_init_block_head(pxd_dev, bio);
@@ -1206,7 +1244,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	BUG_ON(!tc);
 	pxd_add_io(tc, head, rw);
 
-	wake_up(&tc->pxd_event);
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
