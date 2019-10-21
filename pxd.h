@@ -48,6 +48,7 @@ enum pxd_opcode {
 	PXD_WRITE_SAME,		/**< write_same operation */
 	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
 	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
+	PXD_GET_FEATURES,   /**< get features */
 	PXD_LAST,
 };
 
@@ -141,6 +142,15 @@ struct pxd_fastpath_out {
 	uint64_t dev_id;
 	int enable;
 	int cleanup; // only meaningful while disabling
+};
+
+/**
+ * PXD_GET_FEATURES request from user space
+ * response contains feature set
+ */
+#define PXD_FEATURE_FASTPATH (0x1)
+struct pxd_features_out {
+	int dummy;
 };
 
 /**

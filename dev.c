@@ -758,6 +758,17 @@ static int fuse_notify_set_fastpath(struct fuse_conn *conn, unsigned int size,
 	return pxd_set_fastpath(conn, &fp);
 }
 
+static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	int features = 0;
+
+#ifdef __PX_FASTPATH__
+	features |= PXD_FEATURE_FASTPATH;
+#endif
+
+	return features;
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -774,6 +785,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_update_path(fc, size, iter);
 	case PXD_SET_FASTPATH:
 		return fuse_notify_set_fastpath(fc, size, iter);
+	case PXD_GET_FEATURES:
+		return fuse_notify_get_features(fc, size, iter);
 	default:
 		return -EINVAL;
 	}
