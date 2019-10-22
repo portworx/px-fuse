@@ -16,4 +16,11 @@ void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {}
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force) {}
 void disableFastPath(struct pxd_device *pxd_dev) {}
+int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
+{
+	// unsupported
+	printk(KERN_WARNING"px driver does not support fastpath - kernel version not supported\n");
+	return -1;
+}
+
 #endif

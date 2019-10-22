@@ -53,7 +53,6 @@ module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
-static int __pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
@@ -751,7 +750,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	if (add->enable_fp) {
 		printk(KERN_INFO"Device %llu enabling fastpath %d (paths: %lu)\n",
 				add->dev_id, add->enable_fp, add->paths.size);
-		err = __pxd_init_fastpath_target(pxd_dev, &add->paths);
+		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
 		if (err)
 			goto out_id;
 	}
@@ -893,59 +892,11 @@ out:
 	return err;
 }
 
-static int __pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
-{
-	mode_t mode = 0;
-	int err = 0;
-	int i;
-	struct file* f;
-
-	mode = open_mode(pxd_dev->mode);
-	for (i=0; i<update_path->size; i++) {
-		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
-			// if previous paths are same.. then skip anymore config
-			printk(KERN_INFO"pxd%llu already configured for path %s\n",
-				pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
-			continue;
-		}
-
-		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
-		f = filp_open(update_path->devpath[i], mode, 0600);
-		if (IS_ERR_OR_NULL(f)) {
-			printk(KERN_ERR"Failed attaching path: device %llu, path %s, err %ld\n",
-				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
-			err = PTR_ERR(f);
-			goto out_file_failed;
-		}
-		pxd_dev->fp.file[i] = f;
-		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
-		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
-	}
-	pxd_dev->fp.nfd = update_path->size;
-
-	/* setup whether access is block or file access */
-	enableFastPath(pxd_dev, false);
-
-	return 0;
-
-out_file_failed:
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
-		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
-	}
-	pxd_dev->fp.nfd = 0;
-	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
-	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
-
-	// even if there are errors setting up fastpath, initialize to take slow path,
-	// do not report failure outside
-	return 0;
-}
-
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
 	/// This seems risky to update paths on the fly while the px device is active
 	/// Need to confirm behavior while IOs are active and handle it right!!!!
-	__pxd_init_fastpath_target(pxd_dev, update_path);
+	pxd_init_fastpath_target(pxd_dev, update_path);
 	return 0;
 
 }

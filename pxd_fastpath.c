@@ -1141,6 +1141,54 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev) {
 	disableFastPath(pxd_dev);
 }
 
+int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
+{
+	mode_t mode = 0;
+	int err = 0;
+	int i;
+	struct file* f;
+
+	mode = open_mode(pxd_dev->mode);
+	for (i=0; i<update_path->size; i++) {
+		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
+			// if previous paths are same.. then skip anymore config
+			printk(KERN_INFO"pxd%llu already configured for path %s\n",
+				pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
+			continue;
+		}
+
+		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
+		f = filp_open(update_path->devpath[i], mode, 0600);
+		if (IS_ERR_OR_NULL(f)) {
+			printk(KERN_ERR"Failed attaching path: device %llu, path %s, err %ld\n",
+				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
+			err = PTR_ERR(f);
+			goto out_file_failed;
+		}
+		pxd_dev->fp.file[i] = f;
+		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
+		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
+	}
+	pxd_dev->fp.nfd = update_path->size;
+
+	/* setup whether access is block or file access */
+	enableFastPath(pxd_dev, false);
+
+	return 0;
+
+out_file_failed:
+	for (i=0; i<pxd_dev->fp.nfd; i++) {
+		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
+	}
+	pxd_dev->fp.nfd = 0;
+	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
+	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
+
+	// even if there are errors setting up fastpath, initialize to take slow path,
+	// do not report failure outside
+	return 0;
+}
+
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)

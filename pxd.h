@@ -148,10 +148,9 @@ struct pxd_fastpath_out {
  * PXD_GET_FEATURES request from user space
  * response contains feature set
  */
+// No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
-struct pxd_features_out {
-	int dummy;
-};
+
 
 /**
  * PXD_READ/PXD_WRITE kernel request structure
