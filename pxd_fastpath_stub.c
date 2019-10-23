@@ -20,7 +20,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 {
 	// unsupported
 	printk(KERN_WARNING"px driver does not support fastpath - kernel version not supported\n");
-	return -1;
+	return 0; // cannot fail
 }
 
 #endif
