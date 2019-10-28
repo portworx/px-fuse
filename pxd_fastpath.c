@@ -828,7 +828,7 @@ out:
 
 #endif
 
-static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker *head)
+static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker *head)
 {
 	struct pxd_device *pxd_dev = head->pxd_dev;
 	struct bio *bio = head->orig;
@@ -845,7 +845,7 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		__pxd_cleanup_block_io(head);
 		BIO_ENDIO(bio, -ENXIO);
-		goto wake_up;
+		return -ENXIO;
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
@@ -877,6 +877,8 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 	} else {
 		__do_bio_filebacked(pxd_dev, head);
 	}
+
+	return 0; // all good
 }
 
 static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw) {
@@ -929,7 +931,22 @@ static int pxd_io_thread(void *data, int rw) {
 			continue;
 		}
 
-		pxd_handle_io(tc, head);
+		if (unlikely(pxd_handle_io(tc, head) != 0)) {
+			/* if early fail, then force wakeup */
+
+			struct pxd_device *pxd_dev = head->pxd_dev;
+			BUG_ON(!pxd_dev);
+
+			spin_lock_irq(&pxd_dev->lock);
+
+			atomic_dec(&pxd_dev->fp.ncount);
+			atomic_inc(&pxd_dev->fp.ncomplete);
+
+			if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
+				wake_up(&pxd_dev->fp.congestion_wait);
+			}
+			spin_unlock_irq(&pxd_dev->lock);
+		}
 	}
 	return 0;
 }
