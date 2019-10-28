@@ -90,7 +90,7 @@ struct pxd_fastpath_extension {
 	atomic_t nio_flush_nop;
 	atomic_t nio_fua;
 	atomic_t nio_write;
-	atomic_t ncount; // [global] total active requests
+	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests

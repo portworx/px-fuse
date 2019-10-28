@@ -568,11 +568,12 @@ static void pxd_complete_io(struct bio* bio) {
 
 	__pxd_cleanup_block_io(head);
 
+	/* free up from any prior congestion wait */
+	spin_lock_irq(&pxd_dev->lock);
+
 	atomic_dec(&pxd_dev->fp.ncount);
 	atomic_inc(&pxd_dev->fp.ncomplete);
 
-	/* free up from any prior congestion wait */
-	spin_lock_irq(&pxd_dev->lock);
 	if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
 		wake_up(&pxd_dev->fp.congestion_wait);
 	}
@@ -844,8 +845,7 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		__pxd_cleanup_block_io(head);
 		BIO_ENDIO(bio, -ENXIO);
-		atomic_dec(&pxd_dev->fp.ncount);
-		return;
+		goto wake_up;
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
@@ -880,8 +880,6 @@ static inline void pxd_handle_io(struct thread_context *tc, struct pxd_io_tracke
 }
 
 static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw) {
-	atomic_inc(&head->pxd_dev->fp.ncount);
-
 	if (rw != READ) {
 		spin_lock_irq(&tc->write_lock);
 		list_add(&head->item, &tc->iot_writers);
@@ -921,7 +919,6 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw) {
 
 static int pxd_io_thread(void *data, int rw) {
 	struct thread_context *tc = data;
-	struct pxd_device *pxd_dev;
 	struct pxd_io_tracker *head;
 
 	while (!kthread_should_stop()) {
@@ -930,13 +927,6 @@ static int pxd_io_thread(void *data, int rw) {
 		head = pxd_get_io(tc, rw);
 		if (!head) {
 			continue;
-		}
-
-		pxd_dev = head->pxd_dev;
-		pxd_printk("pxd_io_thread new head %p for device %llu, pending %u\n",
-				head, pxd_dev->dev_id, atomic_read(&pxd_dev->fp.ncount));
-		if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
-			wake_up(&pxd_dev->fp.congestion_wait);
 		}
 
 		pxd_handle_io(tc, head);
@@ -1256,7 +1246,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			(bio->bi_opf & REQ_OP_MASK),
 			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
 
-	#if 0
+	#if 1
 	{ /* add congestion handling */
 		spin_lock_irq(&pxd_dev->lock);
 		if (atomic_read(&pxd_dev->fp.ncount) >= pxd_dev->fp.nr_congestion_on) {
@@ -1268,6 +1258,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			pxd_printk("congestion cleared\n");
 		}
 
+		atomic_inc(&pxd_dev->fp.ncount);
 		spin_unlock_irq(&pxd_dev->lock);
 
 	}
@@ -1285,6 +1276,12 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	head = __pxd_init_block_head(pxd_dev, bio);
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
+
+		// non-trivial high memory pressure failing IO
+		spin_lock_irq(&pxd_dev->lock);
+		atomic_dec(&pxd_dev->fp.ncount);
+		spin_unlock_irq(&pxd_dev->lock);
+
 		return BLK_QC_RETVAL;
 	}
 
