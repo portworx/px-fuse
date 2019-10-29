@@ -235,9 +235,6 @@ void fastpath_cleanup(void) {
 	node_cpu_map = NULL;
 }
 
-// forward decl
-void disableFastPath(struct pxd_device *pxd_dev);
-
 static int _pxd_flush(struct pxd_device *pxd_dev, struct file *file) {
 	int ret = 0;
 
