@@ -522,23 +522,6 @@ static ssize_t fuse_dev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 }
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,14,0)
-static int fuse_dev_pipe_buf_steal(struct pipe_inode_info *pipe,
-                                   struct pipe_buffer *buf)
-{
-        return 1;
-}
-static const struct pipe_buf_operations fuse_dev_pipe_buf_ops = {
-         .can_merge = 0,
-         .map = generic_pipe_buf_map,
-         .unmap = generic_pipe_buf_unmap,
-         .confirm = generic_pipe_buf_confirm,
-         .release = generic_pipe_buf_release,
-         .steal = fuse_dev_pipe_buf_steal,
-         .get = generic_pipe_buf_get,
-};
-#endif
-
 static ssize_t fuse_dev_splice_read(struct file *in, loff_t *ppos,
 				    struct pipe_inode_info *pipe,
 				    size_t len, unsigned int flags)

@@ -1,7 +1,7 @@
 px-objs = pxd.o dev.o iov_iter.o px_version.o
 obj-m = px.o
 
-KBUILD_CPPFLAGS := -D__KERNEL__
+KBUILD_CPPFLAGS := -D__KERNEL__ -fno-pic  -mfentry
 PXDEFINES := -D__PXKERNEL__
 
 KVERSION=$(shell uname -r)

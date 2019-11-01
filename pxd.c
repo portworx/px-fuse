@@ -33,7 +33,7 @@ static struct workqueue_struct *pxd_wq;
 #define KTIME_GET_TS(t)
 #endif
 
-#define pxd_printk(args...)
+#define pxd_printk(args...) no_printk(KERN_ERR args)
 //#define pxd_printk(args...) printk(KERN_ERR args)
 
 #ifndef SECTOR_SIZE
