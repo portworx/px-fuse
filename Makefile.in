@@ -1,6 +1,11 @@
 px-objs = pxd.o dev.o iov_iter.o px_version.o
 obj-m = px.o
 
+CONTAINERGCCDIR=/local/system/gcc-7.4.0-install
+ifeq ($(shell test -d "$(CONTAINERGCCDIR)/bin"; echo $$?),0)
+export PATH := $(CONTAINERGCCDIR)/bin:$(PATH)
+endif
+
 KBUILD_CPPFLAGS := -D__KERNEL__ -fno-pic  -mfentry
 PXDEFINES := -D__PXKERNEL__
 

@@ -496,7 +496,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			pxd_dev->minor, pxd_dev->dev_id,
 			rq_data_dir(rq) == WRITE ? "wr" : "rd",
 			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
-			rq->nr_phys_segments, rq->cmd_flags);
+			rq->nr_phys_segments, (long long unsigned int)rq->cmd_flags);
 
 		req = pxd_fuse_req(pxd_dev, 0);
 		if (IS_ERR(req)) {
