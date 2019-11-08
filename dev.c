@@ -49,7 +49,7 @@ static struct fuse_conn *fuse_get_conn(struct file *file)
 	return file->private_data;
 }
 
-static void fuse_request_init(struct fuse_req *req)
+void fuse_request_init(struct fuse_req *req)
 {
 	memset(req, 0, sizeof(*req));
 	INIT_LIST_HEAD(&req->list);
@@ -82,7 +82,7 @@ void fuse_request_free(struct fuse_req *req)
 	kmem_cache_free(fuse_req_cachep, req);
 }
 
-static void fuse_req_init_context(struct fuse_req *req)
+void fuse_req_init_context(struct fuse_req *req)
 {
 	req->in.h.uid = from_kuid_munged(&init_user_ns, current_fsuid());
 	req->in.h.gid = from_kgid_munged(&init_user_ns, current_fsgid());
@@ -195,7 +195,9 @@ __releases(fc->lock)
 	spin_unlock(&fc->lock);
 	if (req->end)
 		req->end(fc, req);
+#ifndef __PX_BLKMQ__
 	fuse_request_free(req);
+#endif
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,

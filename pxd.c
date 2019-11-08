@@ -188,7 +188,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
         struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#ifdef __PX_BLKMQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
         part_stat_lock();
         part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
         part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
@@ -264,7 +264,7 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	pxd_request_complete(fc, req);
 }
 
-static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
+static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 {
 	int eintr = 0;
 	struct fuse_req *req = NULL;
@@ -279,13 +279,13 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 		}
 	}
 	if (eintr > 0) {
-		printk_ratelimited(KERN_INFO "%s: alloc (%d pages) EINTR retries %d",
-			 __func__, nr_pages, eintr);
+		printk_ratelimited(KERN_INFO "%s: alloc EINTR retries %d",
+			 __func__, eintr);
 	}
 	status = IS_ERR(req) ? PTR_ERR(req) : 0;
 	if (status != 0) {
-		printk_ratelimited(KERN_ERR "%s: request alloc (%d pages) failed: %d",
-			 __func__, nr_pages, status);
+		printk_ratelimited(KERN_ERR "%s: request alloc failed: %d",
+			 __func__, status);
 	}
 	return req;
 }
@@ -439,7 +439,7 @@ static void pxd_make_request(struct request_queue *q, struct bio *bio)
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, flags, get_op_flags(bio));
 
-	req = pxd_fuse_req(pxd_dev, bio->bi_vcnt);
+	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR(req)) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
@@ -488,7 +488,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 			rq->nr_phys_segments, rq->cmd_flags);
 
-		req = pxd_fuse_req(pxd_dev, 0);
+		req = pxd_fuse_req(pxd_dev);
 		if (IS_ERR(req)) {
   			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
@@ -518,11 +518,14 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 {
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
-	struct fuse_req *req = NULL;
+	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq)) {
+	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
-	}
+
+	if (!fc->connected && !fc->allow_disconnected)
+		return BLK_STS_IOERR;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 		   "flags  %llx\n", __func__,
@@ -531,10 +534,8 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 		rq->nr_phys_segments, rq->cmd_flags);
 
-	req = pxd_fuse_req(pxd_dev, 0);
-	if (IS_ERR(req)) {
-		return BLK_STS_IOERR;
-	}
+	fuse_request_init(req);
+	fuse_req_init_context(req);
 
 	blk_mq_start_request(rq);
 
@@ -594,7 +595,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	  pxd_dev->tag_set.nr_hw_queues = 8;
 	  pxd_dev->tag_set.queue_depth = 128;
-	  pxd_dev->tag_set.cmd_size = sizeof(struct work_struct);
+	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
 	  if (err)
