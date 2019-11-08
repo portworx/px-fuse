@@ -263,14 +263,8 @@ struct fuse_req {
 	 * fuse_conn->lock
 	 */
 
-	/** Request is sent in the background */
-	unsigned background:1;
-
 	/** Request page descriptor is struct request *rq */
 	unsigned bio_pages:1;
-
-	/** State of the request */
-	enum fuse_req_state state;
 
 	/** The request input */
 	struct fuse_in in;
@@ -311,9 +305,6 @@ struct fuse_req {
 
 	/** page-descriptor vector */
 	struct fuse_page_desc *page_descs;
-
-	/** size of the 'pages' array */
-	unsigned max_pages;
 
 	/** inline page vector */
 	struct page *inline_pages[FUSE_REQ_INLINE_PAGES];
@@ -391,24 +382,8 @@ struct fuse_conn {
 	/** rbtree of fuse_files waiting for poll events indexed by ph */
 	struct rb_root polled_files;
 
-	/** Maximum number of outstanding background requests */
-	unsigned max_background;
-
-	/** Number of background requests at which congestion starts */
-	unsigned congestion_threshold;
-
-	/** Number of requests currently in the background */
-	unsigned num_background;
-
-	/** Number of background requests currently queued for userspace */
-	unsigned active_background;
-
 	/** hash table of pending requests */
 	struct hlist_head *hash;
-
-	/** Flag indicating that INIT reply has been received. Allocating
-	 * any fuse request will be suspended until the flag is set */
-	int initialized;
 
 	/** The next unique request id */
 	u64 reqctr;
@@ -436,9 +411,6 @@ struct fuse_conn {
 
 	/** Filesystem supports NFS exporting.  Only set in INIT */
 	unsigned export_support:1;
-
-	/** Set if bdi is valid */
-	unsigned bdi_initialized:1;
 
 	/** write-back cache policy (default is write-through) */
 	unsigned writeback_cache:1;
@@ -519,9 +491,6 @@ struct fuse_conn {
 
 	/** Negotiated minor version */
 	unsigned minor;
-
-	/** Backing dev info */
-	struct backing_dev_info bdi;
 
 	/** Entry on the fuse_conn_list */
 	struct list_head entry;
