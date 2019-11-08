@@ -17,11 +17,8 @@
 
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
-#include <linux/workqueue.h>
 
 #define SECTOR_SHIFT    9
-
-static struct workqueue_struct *pxd_wq;
 
 #endif
 
@@ -522,31 +519,31 @@ static void pxd_rq_fn(struct request_queue *q)
 	}
 }
 #else
-static void pxd_queue_workfn(struct work_struct *work)
+
+static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
+		const struct blk_mq_queue_data *bd)
 {
-	struct request *rq = blk_mq_rq_from_pdu(work);
+	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = NULL;
-	blk_status_t error = BLK_STS_OK;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq)) {
-		goto err;
+		return BLK_STS_IOERR;
 	}
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-		"flags  %llx\n", __func__,
+		   "flags  %llx\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
 		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 		rq->nr_phys_segments, rq->cmd_flags);
 
-	blk_mq_start_request(rq);
-
 	req = pxd_fuse_req(pxd_dev, 0);
 	if (IS_ERR(req)) {
-		error = BLK_STS_IOERR;
-		goto err;
+		return BLK_STS_IOERR;
 	}
+
+	blk_mq_start_request(rq);
 
 	pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
@@ -557,34 +554,12 @@ static void pxd_queue_workfn(struct work_struct *work)
 	req->misc.pxd_rdwr_in.pad = 0;
 	req->rq = rq;
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
-	return;
 
-err:
-	blk_mq_end_request(rq, error);
-}
-
-static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
-		const struct blk_mq_queue_data *bd)
-{
-	struct request *rq = bd->rq;
-	struct work_struct *work = blk_mq_rq_to_pdu(rq);
-
-	queue_work(pxd_wq, work);
 	return BLK_STS_OK;
-}
-
-static int pxd_init_request(struct blk_mq_tag_set *set, struct request *rq,
-			    unsigned int hctx_idx, unsigned int numa_node)
-{
-	struct work_struct *work = blk_mq_rq_to_pdu(rq);
-
-	INIT_WORK(work, pxd_queue_workfn);
-	return 0;
 }
 
 static const struct blk_mq_ops pxd_mq_ops = {
 	.queue_rq       = pxd_queue_rq,
-	.init_request   = pxd_init_request,
 };
 #endif
 
@@ -1334,18 +1309,11 @@ int pxd_init(void)
 			pxd_miscdev.name, err);
 		goto out_fuse;
 	}
-#ifdef __PX_BLKMQ__
-        pxd_wq = alloc_workqueue("pxd", WQ_MEM_RECLAIM, 0);
-        if (!pxd_wq) {
-                err = -ENOMEM;
-                goto out_misc;
-        }
-#endif
 	pxd_major = register_blkdev(0, "pxd");
 	if (pxd_major < 0) {
 		err = pxd_major;
 		printk(KERN_ERR "pxd: failed to register dev pxd: %d\n", err);
-		goto out_wq;
+		goto out_misc;
 	}
 
 	err = pxd_sysfs_init();
@@ -1364,11 +1332,7 @@ int pxd_init(void)
 
 out_blkdev:
 	unregister_blkdev(0, "pxd");
-out_wq:
-#ifdef __PX_BLKMQ__
-        destroy_workqueue(pxd_wq);
 out_misc:
-#endif
 	misc_deregister(&pxd_miscdev);
 out_fuse:
 	for (j = 0; j < i; ++j) {
@@ -1387,9 +1351,6 @@ void pxd_exit(void)
 
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
-#ifdef __PX_BLKMQ__
-        destroy_workqueue(pxd_wq);
-#endif
 	misc_deregister(&pxd_miscdev);
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
