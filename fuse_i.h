@@ -293,26 +293,6 @@ struct fuse_conn {
 	/** Lock protecting accessess to  members of this structure */
 	spinlock_t lock;
 
-	/** Refcount */
-	atomic_t count;
-
-	struct rcu_head rcu;
-
-	/** The user id for this mount */
-	kuid_t user_id;
-
-	/** The group id for this mount */
-	kgid_t group_id;
-
-	/** The fuse mount flags for this mount */
-	unsigned flags;
-
-	/** Maximum read size */
-	unsigned max_read;
-
-	/** Maximum write size */
-	unsigned max_write;
-
 	/** Readers of the connection are waiting on this */
 	wait_queue_head_t waitq;
 
@@ -322,15 +302,6 @@ struct fuse_conn {
 	/** The list of requests being processed */
 	struct list_head processing;
 
-	/** The list of requests under I/O */
-	struct list_head io;
-
-	/** The next unique kernel file handle */
-	u64 khctr;
-
-	/** rbtree of fuse_files waiting for poll events indexed by ph */
-	struct rb_root polled_files;
-
 	/** hash table of pending requests */
 	struct hlist_head *hash;
 
@@ -339,143 +310,27 @@ struct fuse_conn {
 
 	/** Connection established, cleared on umount, connection
 	    abort and device release */
-	unsigned connected;
+	bool connected;
 
 	/** open in progress, cleared on completion */
-	unsigned pend_open:1;
+	bool pend_open;
 
-	/** Connection failed (version mismatch).  Cannot race with
-	    setting other bitfields since it is only set once in INIT
-	    reply, before any other request, and never cleared */
-	unsigned conn_error:1;
+	/* Alow operations on disconnected fuse conenction. */
+	bool allow_disconnected;
 
-	/** Connection successful.  Only set in INIT */
-	unsigned conn_init:1;
-
-	/** Do readpages asynchronously?  Only set in INIT */
-	unsigned async_read:1;
-
-	/** Do not send separate SETATTR request before open(O_TRUNC)  */
-	unsigned atomic_o_trunc:1;
-
-	/** Filesystem supports NFS exporting.  Only set in INIT */
-	unsigned export_support:1;
-
-	/** write-back cache policy (default is write-through) */
-	unsigned writeback_cache:1;
-
-	/*
-	 * The following bitfields are only for optimization purposes
-	 * and hence races in setting them will not cause malfunction
-	 */
-
-	/** Is open/release not implemented by fs? */
-	unsigned no_open:1;
-
-	/** Is fsync not implemented by fs? */
-	unsigned no_fsync:1;
-
-	/** Is fsyncdir not implemented by fs? */
-	unsigned no_fsyncdir:1;
-
-	/** Is flush not implemented by fs? */
-	unsigned no_flush:1;
-
-	/** Is setxattr not implemented by fs? */
-	unsigned no_setxattr:1;
-
-	/** Is getxattr not implemented by fs? */
-	unsigned no_getxattr:1;
-
-	/** Is listxattr not implemented by fs? */
-	unsigned no_listxattr:1;
-
-	/** Is removexattr not implemented by fs? */
-	unsigned no_removexattr:1;
-
-	/** Are posix file locking primitives not implemented by fs? */
-	unsigned no_lock:1;
-
-	/** Is access not implemented by fs? */
-	unsigned no_access:1;
-
-	/** Is create not implemented by fs? */
-	unsigned no_create:1;
-
-	/** Is interrupt not implemented by fs? */
-	unsigned no_interrupt:1;
-
-	/** Is bmap not implemented by fs? */
-	unsigned no_bmap:1;
-
-	/** Is poll not implemented by fs? */
-	unsigned no_poll:1;
-
-	/** Do multi-page cached writes */
-	unsigned big_writes:1;
-
-	/** Don't apply umask to creation modes */
-	unsigned dont_mask:1;
-
-	/** Are BSD file locking primitives not implemented by fs? */
-	unsigned no_flock:1;
-
-	/** Is fallocate not implemented by fs? */
-	unsigned no_fallocate:1;
-
-	/** Is rename with flags implemented by fs? */
-	unsigned no_rename2:1;
-
-	/** Use enhanced/automatic page cache invalidation. */
-	unsigned auto_inval_data:1;
-
-	/** Does the filesystem support readdirplus? */
-	unsigned do_readdirplus:1;
-
-	/** Does the filesystem want adaptive readdirplus? */
-	unsigned readdirplus_auto:1;
-
-	/** Does the filesystem support asynchronous direct-IO submission? */
-	unsigned async_dio:1;
-
-	/** Negotiated minor version */
-	unsigned minor;
+	/** Refcount */
+	atomic_t count;
 
 	/** Entry on the fuse_conn_list */
 	struct list_head entry;
 
-	/** Device ID from super block */
-	dev_t dev;
-
-	/** Dentries in the control filesystem */
-	struct dentry *ctl_dentry[FUSE_CTL_NUM_DENTRIES];
-
-	/** number of dentries used in the above array */
-	int ctl_ndents;
-
 	/** O_ASYNC requests */
 	struct fasync_struct *fasync;
-
-	/** Key for lock owner ID scrambling */
-	u32 scramble_key[4];
-
-	/** Reserved request for the DESTROY message */
-	struct fuse_req *destroy_req;
-
-	/** Version counter for attribute changes */
-	u64 attr_version;
 
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
 
-	/** Super block for this connection. */
-	struct super_block *sb;
 
-	/** Read/write semaphore to hold when accessing sb. */
-	struct rw_semaphore killsb;
-
-	/* Alow operations on disconnected fuse conenction. */
-	int allow_disconnected;
 };
 
 static inline struct fuse_conn *get_fuse_conn_super(struct super_block *sb)
