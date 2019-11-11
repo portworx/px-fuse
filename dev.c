@@ -47,9 +47,6 @@
 /** Maximum number of outstanding background requests */
 #define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
 
-/** Congestion starts at 75% of maximum */
-#define FUSE_DEFAULT_CONGESTION_THRESHOLD (FUSE_DEFAULT_MAX_BACKGROUND * 3 / 4)
-
 #define FUSE_HASH_SIZE FUSE_DEFAULT_MAX_BACKGROUND
 
 static struct kmem_cache *fuse_req_cachep;
@@ -74,7 +71,6 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	INIT_HLIST_NODE(&req->hash_entry);
 	req->pages = pages;
 	req->page_descs = page_descs;
-	req->max_pages = npages;
 }
 
 static struct fuse_req *__fuse_request_alloc(unsigned npages, gfp_t flags)
@@ -151,7 +147,6 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc, unsigned npages,
 	}
 
 	fuse_req_init_context(req);
-	req->background = for_background;
 	return req;
 
  out:
@@ -208,7 +203,6 @@ void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
-	req->state = FUSE_REQ_PENDING;
 	spin_lock(&fc->lock);
 	req->in.h.unique = fuse_get_unique(fc);
 	list_add(&req->list, &fc->pending);
@@ -240,17 +234,7 @@ __releases(fc->lock)
 	if (!hlist_unhashed(&req->hash_entry))
 		hlist_del_init(&req->hash_entry);
 	list_del(&req->list);
-	if (req->background) {
-		if (fc->num_background == fc->congestion_threshold &&
-		    fc->connected && fc->bdi_initialized) {
-			clear_bdi_congested(&fc->bdi, BLK_RW_SYNC);
-			clear_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
-		}
-		fc->num_background--;
-		fc->active_background--;
-	}
 	spin_unlock(&fc->lock);
-	req->state = FUSE_REQ_FINISHED;
 	if (req->end)
 		req->end(fc, req);
 	fuse_request_free(req);
@@ -259,14 +243,6 @@ __releases(fc->lock)
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 					    struct fuse_req *req)
 {
-	BUG_ON(!req->background);
-	fc->num_background++;
-	if (fc->num_background == fc->congestion_threshold &&
-	    fc->bdi_initialized) {
-		set_bdi_congested(&fc->bdi, BLK_RW_SYNC);
-		set_bdi_congested(&fc->bdi, BLK_RW_ASYNC);
-	}
-	fc->active_background++;
 	req->in.h.unique = fuse_get_unique(fc);
 	queue_request(fc, req);
 }
@@ -275,7 +251,6 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
-	req->state = FUSE_REQ_PENDING;
 	spin_lock(&fc->lock);
 	if (fc->connected || fc->allow_disconnected) {
 		if (unlikely(!fc->connected)) {
@@ -434,7 +409,6 @@ retry:
 	while (entry != &fc->pending) {
 		req = list_entry(entry, struct fuse_req, list);
 		if (req->in.h.len <= remain) {
-			req->state = FUSE_REQ_SENT;
 			last = entry;
 			remain -= req->in.h.len;
 			entry = entry->next;
@@ -778,7 +752,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 
 	list_del_init(&req->list);
 	spin_unlock(&fc->lock);
-	req->state = FUSE_REQ_WRITING;
 	req->out.h = oh;
 
 	if (req->bio_pages && req->out.numargs && iter->count > 0) {
@@ -884,7 +857,6 @@ static void end_queued_requests(struct fuse_conn *fc)
 __releases(fc->lock)
 __acquires(fc->lock)
 {
-	fc->max_background = UINT_MAX;
 	end_requests(fc, &fc->pending);
 	end_requests(fc, &fc->processing);
 }
@@ -917,16 +889,15 @@ int fuse_conn_init(struct fuse_conn *fc)
 	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->entry);
 	fc->hash = kmalloc(FUSE_HASH_SIZE * sizeof(*fc->hash), GFP_KERNEL);
-	if (!fc->hash)
+	if (!fc->hash) {
+		printk(KERN_ERR "failed to allocate hash");
 		return -ENOMEM;
+	}
 	for (i = 0; i < FUSE_HASH_SIZE; ++i)
 		INIT_HLIST_HEAD(&fc->hash[i]);
-	fc->max_background = FUSE_DEFAULT_MAX_BACKGROUND;
-	fc->congestion_threshold = FUSE_DEFAULT_CONGESTION_THRESHOLD;
 	fc->khctr = 0;
 	fc->polled_files = RB_ROOT;
 	fc->reqctr = 0;
-	fc->initialized = 0;
 	fc->attr_version = 1;
 	get_random_bytes(&fc->scramble_key, sizeof(fc->scramble_key));
 	return 0;
@@ -973,7 +944,6 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	spin_lock(&fc->lock);
 	if (fc->connected) {
 		fc->connected = 0;
-		fc->initialized = 1;
 		end_queued_requests(fc);
 		end_polls(fc);
 		wake_up_all(&fc->waitq);
@@ -988,7 +958,6 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	if (fc) {
 		spin_lock(&fc->lock);
 		fc->connected = 0;
-		fc->initialized = 1;
 		end_queued_requests(fc);
 		end_polls(fc);
 		spin_unlock(&fc->lock);
@@ -1000,11 +969,7 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 
 void fuse_restart_requests(struct fuse_conn *fc)
 {
-	struct fuse_req *req;
-
 	spin_lock(&fc->lock);
-	list_for_each_entry(req, &fc->processing, list)
-		req->state = FUSE_REQ_PENDING;
 	list_splice_init(&fc->processing, &fc->pending);
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
