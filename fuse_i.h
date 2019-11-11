@@ -170,9 +170,6 @@ struct fuse_in {
 	/** The request header */
 	struct fuse_in_header h;
 
-	/** True if the data for the last argument is in req->pages */
-	unsigned argpages:1;
-
 	/** Number of arguments */
 	unsigned numargs;
 
@@ -299,12 +296,6 @@ struct fuse_req {
 		struct pxd_init_out pxd_init_out;
 		struct pxd_rdwr_in pxd_rdwr_in;
 	} misc;
-
-	/** page vector */
-	struct page **pages;
-
-	/** page-descriptor vector */
-	struct fuse_page_desc *page_descs;
 
 	/** inline page vector */
 	struct page *inline_pages[FUSE_REQ_INLINE_PAGES];
@@ -801,5 +792,7 @@ int fuse_do_setattr(struct inode *inode, struct iattr *attr,
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
+ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
+ssize_t pxd_process_init_reply(struct fuse_conn *fc, struct fuse_out_header *hdr);
 
 #endif /* _FS_FUSE_I_H */
