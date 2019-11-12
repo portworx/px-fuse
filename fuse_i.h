@@ -22,6 +22,18 @@
 #include <linux/poll.h>
 #include <linux/workqueue.h>
 #include <linux/hash.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
+#include "iov_iter.h"
+
+#define iov_iter_advance __iov_iter_advance
+#define iov_iter __iov_iter
+#define iov_iter_init __iov_iter_init
+#define copy_page_to_iter __copy_page_to_iter
+#define copy_page_from_iter __copy_page_from_iter
+
+#endif
 
 #include "fuse.h"
 #include "pxd.h"

@@ -25,17 +25,6 @@
 #include <linux/blkdev.h>
 #include "pxd_compat.h"
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
-#include "iov_iter.h"
-
-#define iov_iter_advance __iov_iter_advance
-#define iov_iter __iov_iter
-#define iov_iter_init __iov_iter_init
-#define copy_page_to_iter __copy_page_to_iter
-#define copy_page_from_iter __copy_page_from_iter
-
-#endif
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
 #define PAGE_CACHE_RELEASE(page) put_page(page)
