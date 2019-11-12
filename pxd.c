@@ -1045,6 +1045,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;
 	struct fuse_conn *fc;
+	int rc;
 
 	if (!((uintptr_t)pxd_contexts <= (uintptr_t)file->f_op &&
 		(uintptr_t)file->f_op < (uintptr_t)(pxd_contexts + pxd_num_contexts))) {
@@ -1064,6 +1065,10 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 
+	rc = fuse_restart_requests(fc);
+	if (rc != 0)
+		return rc;
+
 	del_timer_sync(&ctx->timer);
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_MAX;
@@ -1072,8 +1077,6 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	fc->allow_disconnected = 1;
 	file->private_data = fc;
-
-	fuse_restart_requests(fc);
 
 	++ctx->open_seq;
 
