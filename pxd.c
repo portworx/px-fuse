@@ -60,6 +60,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	struct timer_list timer;
+	uint64_t open_seq;
 };
 
 struct pxd_context *pxd_contexts;
@@ -1057,8 +1058,8 @@ ssize_t pxd_process_init_reply(struct fuse_conn *fc, struct fuse_out_header *hdr
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 
-	printk(KERN_INFO "%s: pxd-control-%d init status %d\n",
-		__func__, ctx->id, hdr->error);
+	printk(KERN_INFO "%s: pxd-control-%d(%lld) init status %d\n",
+		__func__, ctx->id, ctx->open_seq, hdr->error);
 
 	if (hdr->error != 0)
 		fc->connected = 0;
@@ -1089,7 +1090,8 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 	if (fc->connected == 1) {
-		printk(KERN_ERR "%s: pxd-control-%d already open\n", __func__, ctx->id);
+		printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
+			ctx->id, ctx->open_seq);
 		return -EINVAL;
 	}
 
@@ -1105,7 +1107,10 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	fuse_restart_requests(fc);
 
-	printk(KERN_INFO "%s: pxd-control-%d open OK\n", __func__, ctx->id);
+	++ctx->open_seq;
+
+	printk(KERN_INFO "%s: pxd-control-%d(%lld) open OK\n", __func__, ctx->id,
+		ctx->open_seq);
 
 	return 0;
 }
@@ -1128,7 +1133,8 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
 	spin_unlock(&ctx->lock);
 
-	printk(KERN_INFO "%s: pxd-control-%d close OK\n", __func__, ctx->id);
+	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
+		ctx->open_seq);
 	return 0;
 }
 
@@ -1170,6 +1176,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	int err;
 	spin_lock_init(&ctx->lock);
 	ctx->id = i;
+	ctx->open_seq = 0;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
