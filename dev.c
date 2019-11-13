@@ -78,9 +78,9 @@ void fuse_request_free(struct fuse_req *req)
 
 void fuse_req_init_context(struct fuse_req *req)
 {
-	req->in.h.uid = from_kuid_munged(&init_user_ns, current_fsuid());
-	req->in.h.gid = from_kgid_munged(&init_user_ns, current_fsgid());
-	req->in.h.pid = current->pid;
+	req->in.uid = from_kuid_munged(&init_user_ns, current_fsuid());
+	req->in.gid = from_kgid_munged(&init_user_ns, current_fsgid());
+	req->in.pid = current->pid;
 }
 
 static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
@@ -114,17 +114,6 @@ struct fuse_req *fuse_get_req(struct fuse_conn *fc)
 struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc)
 {
 	return __fuse_get_req(fc);
-}
-
-static unsigned len_args(unsigned numargs, struct fuse_arg *args)
-{
-	unsigned nbytes = 0;
-	unsigned i;
-
-	for (i = 0; i < numargs; i++)
-		nbytes += args[i].size;
-
-	return nbytes;
 }
 
 static u64 fuse_get_unique(struct fuse_conn *fc)
@@ -225,7 +214,7 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
  */
 static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 {
-	u64 uid = req->in.h.unique;
+	u64 uid = req->in.unique;
 	if (req->end)
 		req->end(fc, req);
 	fuse_put_unique(fc, uid);
@@ -236,11 +225,9 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
-	req->in.h.len = sizeof(struct fuse_in_header) +
-		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
-
-	req->in.h.unique = fuse_get_unique(fc);
-	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
+	req->in.len = sizeof(struct fuse_in_header) + sizeof(struct pxd_rdwr_in);
+	req->in.unique = fuse_get_unique(fc);
+	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	/*
 	 * Ensures checking the value of allow_disconnected and adding request to
@@ -299,20 +286,11 @@ __acquires(fc->lock)
 
 ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
-	size_t copied, len;
-
-	copied = sizeof(req->in.h);
-	if (copy_to_iter(&req->in.h, copied, iter) != copied) {
+	size_t copied = sizeof(req->in) + sizeof(req->pxd_rdwr_in);
+	if (copy_to_iter(&req->in, copied, iter) != copied) {
 		printk(KERN_ERR "%s: copy header error\n", __func__);
 		return -EFAULT;
 	}
-
-	len = req->in.args[0].size;
-	if (copy_to_iter((void *)req->in.args[0].value, len, iter) != len) {
-		printk(KERN_ERR "%s: copy arg error\n", __func__);
-		return -EFAULT;
-	}
-	copied += len;
 
 	return copied;
 }
@@ -365,7 +343,7 @@ static void __fuse_convert_zero_writes_slowpath(struct fuse_req *req)
 		}
 		kunmap_atomic(kaddr);
 	}
-	req->in.h.opcode = PXD_DISCARD;
+	req->in.opcode = PXD_DISCARD;
 }
 
 static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
@@ -390,7 +368,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 		}
 		kunmap_atomic(kaddr);
 	}
-	req->in.h.opcode = PXD_DISCARD;
+	req->in.opcode = PXD_DISCARD;
 }
 
 static void fuse_convert_zero_writes(struct fuse_req *req)
@@ -440,15 +418,14 @@ retry:
 
 	while (read != write) {
 		req = fc->queue.r.requests[read];
-
-		if (req->in.h.len > remain)
+		if (req->in.len > remain)
 			break;
 
 		fc->queue.r.requests[read] = NULL;
 		read = (read + 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
 
 		/* Check if a write request is writing zeroes */
-		if (pxd_detect_zero_writes && (req->in.h.opcode == PXD_WRITE) &&
+		if (pxd_detect_zero_writes && (req->in.opcode == PXD_WRITE) &&
 		    req->pxd_rdwr_in.size &&
 		    !(req->pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
 			fuse_convert_zero_writes(req);
@@ -568,8 +545,8 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 		printk(KERN_ERR "no request unique %llx", unique);
 		return req;
 	}
-	if (req->in.h.unique != unique) {
-		printk(KERN_ERR "id mismatch got %llx need %llx", req->in.h.unique, unique);
+	if (req->in.unique != unique) {
+		printk(KERN_ERR "id mismatch got %llx need %llx", req->in.unique, unique);
 		return NULL;
 	}
 	return req;
@@ -753,8 +730,8 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	}
 	spin_unlock(&conn->lock);
 
-	if (req->in.h.opcode != PXD_WRITE &&
-	    req->in.h.opcode != PXD_WRITE_SAME) {
+	if (req->in.opcode != PXD_WRITE &&
+	    req->in.opcode != PXD_WRITE_SAME) {
 		printk(KERN_ERR "%s: request is not a write\n", __func__);
 		return -EINVAL;
 	}
@@ -865,7 +842,7 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
-	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
+	if (req->in.opcode == PXD_READ && iter->count > 0) {
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
 #else
@@ -909,7 +886,7 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 	int bvec_iter;
 #endif
 
-	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
+	if (req->in.opcode == PXD_READ && iter->count > 0) {
 		if (nsegs) {
 			int i = 0;
 			bio_for_each_segment(bvec, breq, bvec_iter) {

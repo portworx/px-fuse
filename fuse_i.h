@@ -45,18 +45,6 @@ struct fuse_in_arg {
 	const void *value;
 };
 
-/** The request input */
-struct fuse_in {
-	/** The request header */
-	struct fuse_in_header h;
-
-	/** Number of arguments */
-	unsigned numargs;
-
-	/** Array of arguments */
-	struct fuse_in_arg args[3];
-};
-
 /** One output argument of a request */
 struct fuse_arg {
 	unsigned size;
@@ -77,12 +65,12 @@ struct fuse_req {
 	unsigned fastpath:1;
 
 	/** The request input */
-	struct fuse_in in;
+	struct fuse_in_header in;
+
+	struct pxd_rdwr_in pxd_rdwr_in;
 
 	/** The request output */
 	struct fuse_out out;
-
-	struct pxd_rdwr_in pxd_rdwr_in;
 
 	union {
 		/** Associated request structrure. */
@@ -161,18 +149,18 @@ struct fuse_conn {
 	/** number of free ids in stack */
 	u32 num_free_ids;
 
-	/** per cpu id allocators */
-	struct fuse_per_cpu_ids __percpu *per_cpu_ids;
-
-	/** The next unique request id */
-	u64 reqctr;
-
 	/** Connection established, cleared on umount, connection
 	    abort and device release */
 	bool connected;
 
 	/* Alow operations on disconnected fuse conenction. */
 	bool allow_disconnected;
+
+	/** per cpu id allocators */
+	struct fuse_per_cpu_ids __percpu *per_cpu_ids;
+
+	/** The next unique request id */
+	u64 reqctr;
 
 	/** Refcount */
 	atomic_t count;
