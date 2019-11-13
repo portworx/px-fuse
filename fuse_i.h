@@ -245,12 +245,7 @@ struct fuse_req {
 	/** The request output */
 	struct fuse_out out;
 
-	/** Data for asynchronous requests */
-	union {
-		struct pxd_init_in pxd_init_in;
-		struct pxd_init_out pxd_init_out;
-		struct pxd_rdwr_in pxd_rdwr_in;
-	} misc;
+	struct pxd_rdwr_in pxd_rdwr_in;
 
 	union {
 		/** Associated request structrure. */

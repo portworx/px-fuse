@@ -301,13 +301,13 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	req->in.numargs = 1;
 	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
-	req->in.args[0].value = &req->misc.pxd_rdwr_in;
+	req->in.args[0].value = &req->pxd_rdwr_in;
 	req->in.h.pid = current->pid;
-	req->misc.pxd_rdwr_in.minor = minor;
-	req->misc.pxd_rdwr_in.offset = off;
-	req->misc.pxd_rdwr_in.size = size;
+	req->pxd_rdwr_in.minor = minor;
+	req->pxd_rdwr_in.offset = off;
+	req->pxd_rdwr_in.size = size;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	req->misc.pxd_rdwr_in.flags =
+	req->pxd_rdwr_in.flags =
 		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #else
@@ -547,8 +547,8 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
 		REQCTR(&pxd_dev->ctx->fc));
 
-	req->misc.pxd_rdwr_in.chksum = 0;
-	req->misc.pxd_rdwr_in.pad = 0;
+	req->pxd_rdwr_in.chksum = 0;
+	req->pxd_rdwr_in.pad = 0;
 	req->rq = rq;
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 
