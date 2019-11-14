@@ -886,8 +886,6 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	printk(KERN_INFO "%s: pxd-control-%d init OK %d devs version %d\n", __func__,
 		ctx->id, pxd_init.num_devices, pxd_init.version);
 
-	fc->pend_open = 0;
-
 	return copied;
 
 copy_error:
@@ -1067,10 +1065,6 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	fc = &ctx->fc;
-	if (fc->pend_open == 1) {
-		printk(KERN_ERR "%s: too many outstanding opened\n", __func__);
-		return -EINVAL;
-	}
 	if (fc->connected == 1) {
 		printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
 			ctx->id, ctx->open_seq);
@@ -1083,7 +1077,6 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	fc->connected = 1;
 	spin_unlock(&ctx->lock);
 
-	fc->pend_open = 1;
 	fc->allow_disconnected = 1;
 	file->private_data = fc;
 
@@ -1111,7 +1104,6 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		pxd_printk("%s: not opened\n", __func__);
 	else
 		ctx->fc.connected = 0;
-	ctx->fc.pend_open = 0;
 	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
 	spin_unlock(&ctx->lock);
 

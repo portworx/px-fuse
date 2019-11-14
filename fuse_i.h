@@ -300,9 +300,6 @@ struct fuse_conn {
 	    abort and device release */
 	bool connected;
 
-	/** open in progress, cleared on completion */
-	bool pend_open;
-
 	/* Alow operations on disconnected fuse conenction. */
 	bool allow_disconnected;
 
