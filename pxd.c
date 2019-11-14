@@ -260,8 +260,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
-	req->in.pid = current->pid;
-	req->pxd_rdwr_in.minor = minor;
+	req->pxd_rdwr_in.dev_minor = minor;
 	req->pxd_rdwr_in.offset = off;
 	req->pxd_rdwr_in.size = size;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
@@ -538,7 +537,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		rq->nr_phys_segments, rq->cmd_flags);
 
 	fuse_request_init(req);
-	fuse_req_init_context(req);
 
 	blk_mq_start_request(rq);
 
@@ -548,8 +546,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 	}
 
-	req->pxd_rdwr_in.chksum = 0;
-	req->pxd_rdwr_in.pad = 0;
 	req->rq = rq;
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 

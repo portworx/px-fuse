@@ -225,5 +225,4 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
 
 void fuse_request_init(struct fuse_req *req);
-void fuse_req_init_context(struct fuse_req *req);
 #endif /* _FS_FUSE_I_H */

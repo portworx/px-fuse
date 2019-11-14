@@ -19,7 +19,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 9				/**< driver version */
+#define PXD_VERSION 10				/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -64,6 +64,7 @@ enum pxd_opcode {
 #define PXD_FLAGS_FUA	0x2	/**< REQ_FUA set on bio */
 #define PXD_FLAGS_META	0x4	/**< REQ_META set on bio */
 #define PXD_FLAGS_SYNC (PXD_FLAGS_FLUSH | PXD_FLAGS_FUA)
+#define PXD_FLAGS_LAST PXD_FLAGS_META
 
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
@@ -175,15 +176,22 @@ struct pxd_fastpath_out {
  */
 struct pxd_rdwr_in {
 #ifdef __cplusplus
-	pxd_rdwr_in(uint32_t i_minor, uint32_t i_size, uint64_t i_offset,
-		uint64_t i_chksum, uint32_t i_flags) : size(i_size),
-			flags(i_flags), chksum(i_chksum), offset(i_offset) {
-		minor = i_minor;
+	static_assert(PXD_FLAGS_LAST <= 1 << 15, "flags do not fit in 16 bits");
+
+	pxd_rdwr_in(uint16_t minor, uint32_t size, uint64_t offset, uint16_t flags) :
+		dev_minor(minor), flags(flags), size(size), offset(offset) {
 	}
 
 	pxd_rdwr_in() = default;
 #endif
-	uint32_t minor;		/**< minor device number */
+	uint16_t dev_minor;		/**< minor device number */
+	uint16_t flags;		/**< bio flags */
+	uint32_t size;		/**< read/write/discard size in bytes */
+	uint64_t offset;	/**< device offset in bytes */
+};
+
+struct pxd_rdwr_in_v1 {
+	uint32_t dev_minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
 	uint64_t chksum;	/**< buffer checksum */
@@ -196,22 +204,24 @@ struct pxd_rdwr_in {
  */
 struct rdwr_in {
 #ifdef __cplusplus
-	rdwr_in(uint32_t opcode, uint32_t i_minor, uint32_t i_size,
-		uint64_t i_offset, uint64_t i_chksum, uint32_t i_flags) :
-		rdwr(i_minor, i_size, i_offset, i_chksum, i_flags) {
-		memset(&in, 0, sizeof(in));
+	rdwr_in(uint32_t opcode, uint32_t minor, uint32_t size,
+		uint64_t offset, uint32_t flags) :
+		rdwr(minor, size, offset, flags) {
 		in.opcode = opcode;
 	}
-	rdwr_in(uint32_t i_minor, uint32_t i_size,
-		uint64_t i_offset, uint64_t i_chksum, uint32_t i_flags) :
-		rdwr(i_minor, i_size, i_offset, i_chksum, i_flags) {
-		memset(&in, 0, sizeof(in));
+	rdwr_in(uint32_t minor, uint32_t size, uint64_t offset, uint32_t flags) :
+		rdwr(minor, size, offset, flags) {
 	}
 
 	rdwr_in() = default;
 #endif
 	struct fuse_in_header in;	/**< fuse header */
 	struct pxd_rdwr_in rdwr;	/**< read/write request */
+};
+
+struct rdwr_in_v1 {
+	struct fuse_in_header_v1 in;	/**< fuse header */
+	struct pxd_rdwr_in_v1 rdwr;	/**< read/write request */
 };
 
 static inline uint64_t pxd_aligned_offset(uint64_t offset)

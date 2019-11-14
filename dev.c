@@ -76,13 +76,6 @@ void fuse_request_free(struct fuse_req *req)
 	kmem_cache_free(fuse_req_cachep, req);
 }
 
-void fuse_req_init_context(struct fuse_req *req)
-{
-	req->in.uid = from_kuid_munged(&init_user_ns, current_fsuid());
-	req->in.gid = from_kgid_munged(&init_user_ns, current_fsgid());
-	req->in.pid = current->pid;
-}
-
 static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 {
 	struct fuse_req *req;
@@ -99,7 +92,6 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 		goto out;
 	}
 
-	fuse_req_init_context(req);
 	return req;
 
  out:
@@ -226,7 +218,6 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
-	req->in.len = sizeof(struct fuse_in_header) + sizeof(struct pxd_rdwr_in);
 	req->in.unique = fuse_get_unique(fc);
 	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
@@ -407,7 +398,7 @@ retry:
 
 	while (read != write) {
 		req = fc->queue.r.requests[read];
-		if (req->in.len > remain)
+		if (sizeof(req->in) + sizeof(req->pxd_rdwr_in) > remain)
 			break;
 
 		fc->queue.r.requests[read] = NULL;
