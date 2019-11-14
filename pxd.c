@@ -184,15 +184,17 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 			req->pxd_rdwr_in.offset, req->out.h.error);
 }
 
-static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req)
+static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
 {
 	trace_pxd_reply(REQCTR(fc), req->in.unique, 0u);
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
-	BIO_ENDIO(req->bio, req->out.h.error);
+	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
 }
 
-static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
+static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	trace_pxd_reply(REQCTR(fc), req->in.unique, REQ_OP_WRITE);
@@ -200,29 +202,30 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 	trace_pxd_reply(REQCTR(fc), req->in.unique, REQ_WRITE);
 #endif
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
-	BIO_ENDIO(req->bio, req->out.h.error);
+	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
+static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
 {
 #ifndef __PX_BLKMQ__
-	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
 #else
-	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
+	blk_mq_end_request(req->rq, errno_to_blk_status(status));
 #endif
 	pxd_request_complete(fc, req);
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req)
+static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
 {
-
 #ifndef __PX_BLKMQ__
-	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
+	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
 #else
-	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
+	blk_mq_end_request(req->rq, errno_to_blk_status(status));
 #endif
 	pxd_request_complete(fc, req);
 }

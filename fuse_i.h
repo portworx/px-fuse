@@ -39,24 +39,6 @@
 
 struct fuse_conn;
 
-/** One input argument of a request */
-struct fuse_in_arg {
-	unsigned size;
-	const void *value;
-};
-
-/** One output argument of a request */
-struct fuse_arg {
-	unsigned size;
-	void *value;
-};
-
-/** The request output */
-struct fuse_out {
-	/** Header returned from userspace */
-	struct fuse_out_header h;
-};
-
 /**
  * A request to the client
  */
@@ -70,9 +52,6 @@ struct fuse_req {
 	/** Read/write request */
 	struct pxd_rdwr_in pxd_rdwr_in;
 
-	/** The request output */
-	struct fuse_out out;
-
 	union {
 		/** Associated request structrure. */
 		struct request *rq;
@@ -82,7 +61,7 @@ struct fuse_req {
 	};
 
 	/** Request completion callback */
-	void (*end)(struct fuse_conn *, struct fuse_req *);
+	void (*end)(struct fuse_conn *, struct fuse_req *, int status);
 
 	/** Associate request queue */
 	struct request_queue *queue;

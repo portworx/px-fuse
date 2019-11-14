@@ -212,11 +212,12 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
  * the 'end' callback is called if given, else the reference to the
  * request is released
  */
-static void request_end(struct fuse_conn *fc, struct fuse_req *req)
+static void request_end(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
 {
 	u64 uid = req->in.unique;
 	if (req->end)
-		req->end(fc, req);
+		req->end(fc, req, status);
 	fuse_put_unique(fc, uid);
 #ifndef __PX_BLKMQ__
 	fuse_request_free(req);
@@ -242,9 +243,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		fuse_conn_wakeup(fc);
 	} else {
 		rcu_read_unlock();
-
-		req->out.h.error = -ENOTCONN;
-		request_end(fc, req);
+		request_end(fc, req, -ENOTCONN);
 	}
 }
 
@@ -424,8 +423,7 @@ retry:
 		copied_this_time = fuse_copy_req_read(req, iter);
 
 		if (copied_this_time < 0) {
-			req->out.h.error = -EIO;
-			request_end(fc, req);
+			request_end(fc, req, -EIO);
 		} else {
 			copied += copied_this_time;
 			remain -= copied_this_time;
@@ -857,7 +855,6 @@ static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req);
 	return 0;
 }
 
@@ -892,7 +889,6 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req);
 	return 0;
 }
 
@@ -928,15 +924,11 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	if (oh.error <= -1000 || oh.error > 0)
 		return -EINVAL;
 
-	err = -ENOENT;
-
 	req = request_find(fc, oh.unique);
 	if (!req) {
 		printk(KERN_ERR "%s: request %lld not found\n", __func__, oh.unique);
 		return -ENOENT;
 	}
-
-	req->out.h = oh;
 
 	if (req->fastpath) {
 		err = __fuse_dev_do_write_fastpath(fc, req, iter);
@@ -944,7 +936,10 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		err = __fuse_dev_do_write_slowpath(fc, req, iter);
 	}
 
-	if (err) return err;
+	if (err)
+		return err;
+
+	request_end(fc, req, oh.error);
 
 	return nbytes;
 }
@@ -1007,8 +1002,7 @@ __acquires(fc->lock)
 	for (i = 0; i < FUSE_REQUEST_QUEUE_SIZE; ++i) {
 		struct fuse_req *req = fc->request_map[i];
 		if (req != NULL) {
-			req->out.h.error = -ECONNABORTED;
-			request_end(fc, req);
+			request_end(fc, req, -ECONNABORTED);
 		}
 	}
 }
