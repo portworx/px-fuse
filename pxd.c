@@ -5,6 +5,7 @@
 #include <linux/miscdevice.h>
 #include "fuse_i.h"
 #include "pxd.h"
+#include <linux/uio.h>
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -59,8 +60,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	struct timer_list timer;
-	bool init_sent;
-	uint64_t unique;
+	uint64_t open_seq;
 };
 
 struct pxd_context *pxd_contexts;
@@ -842,6 +842,64 @@ out:
 	return err;
 }
 
+ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
+{
+	size_t copied;
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	struct pxd_device *pxd_dev;
+
+	struct fuse_in in;
+	struct pxd_init_in pxd_init;
+
+	memset(&in, 0, sizeof(in));
+
+	spin_lock(&fc->lock);
+
+	in.h.opcode = PXD_INIT;
+	in.h.len = sizeof(in.h) + sizeof(struct pxd_init_in) +
+		sizeof(struct pxd_dev_id) * ctx->num_devices;
+	in.h.unique = (u64)-1;
+
+	copied = sizeof(in.h);
+	if (copy_to_iter(&in.h, copied, iter) != copied) {
+		printk(KERN_ERR "%s: copy header error\n", __func__);
+		goto copy_error;
+	}
+
+	pxd_init.num_devices = ctx->num_devices;
+	pxd_init.version = PXD_VERSION;
+
+	if (copy_to_iter(&pxd_init, sizeof(pxd_init), iter) != sizeof(pxd_init)) {
+		printk(KERN_ERR "%s: copy pxd_init error\n", __func__);
+		goto copy_error;
+	}
+	copied += sizeof(pxd_init);
+
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		struct pxd_dev_id id;
+		id.dev_id = pxd_dev->dev_id;
+		id.local_minor = pxd_dev->minor;
+		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
+			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
+				copied);
+			goto copy_error;
+		}
+		copied += sizeof(id);
+	}
+
+	spin_unlock(&fc->lock);
+
+	printk(KERN_INFO "%s: ctx %d %ld devs total %ld", __func__, ctx->id,
+		ctx->num_devices, copied);
+
+	return copied;
+
+copy_error:
+	spin_unlock(&fc->lock);
+	return -EFAULT;
+}
+
+
 static struct bus_type pxd_bus_type = {
 	.name		= "pxd",
 };
@@ -996,130 +1054,22 @@ static void pxd_sysfs_exit(void)
 	device_unregister(&pxd_root_dev);
 }
 
-static void pxd_fill_init_desc(struct fuse_page_desc *desc, int num_ids)
-{
-	desc->length = num_ids * sizeof(struct pxd_dev_id);
-	desc->offset = 0;
-}
-
-static void pxd_fill_init(struct fuse_conn *fc, struct fuse_req *req,
-	struct pxd_init_in *in)
-{
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	int i = 0, j = 0;
-	int num_per_page = PAGE_SIZE / sizeof(struct pxd_dev_id);
-	struct pxd_device *pxd_dev;
-	struct pxd_dev_id *ids = NULL;
-
-	in->version = PXD_VERSION;
-
-	if (!req->num_pages)
-		return;
-
-	spin_lock(&ctx->lock);
-	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if (i == 0)
-			ids = kmap_atomic(req->pages[j]);
-		ids[i].dev_id = pxd_dev->dev_id;
-		ids[i].local_minor = pxd_dev->minor;
-		++i;
-		if (i == num_per_page) {
-			pxd_fill_init_desc(&req->page_descs[j], i);
-			kunmap_atomic(ids);
-			++j;
-			i = 0;
-		}
-	}
-	in->num_devices = ctx->num_devices;
-	spin_unlock(&ctx->lock);
-
-	if (i < num_per_page) {
-		pxd_fill_init_desc(&req->page_descs[j], i);
-		kunmap_atomic(ids);
-	}
-}
-
-static void pxd_process_init_reply(struct fuse_conn *fc,
-		struct fuse_req *req)
+ssize_t pxd_process_init_reply(struct fuse_conn *fc, struct fuse_out_header *hdr)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 
-	printk(KERN_INFO "%s: pxd-control-%d:%llu init OK\n",
-		__func__, ctx->id, req->out.h.unique);
-	pxd_printk("%s: req %p err %d len %d un %lld\n",
-		__func__, req, req->out.h.error,
-		req->out.h.len, req->out.h.unique);
+	printk(KERN_INFO "%s: pxd-control-%d(%lld) init status %d\n",
+		__func__, ctx->id, ctx->open_seq, hdr->error);
 
-	ctx->unique = req->out.h.unique;
-	if (req->out.h.error != 0)
+	if (hdr->error != 0)
 		fc->connected = 0;
 	fc->pend_open = 0;
-}
 
-static int pxd_send_init(struct fuse_conn *fc)
-{
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	int rc;
-	struct fuse_req *req;
-	struct pxd_init_in *arg;
-	void *outarg;
-	int i;
-	int num_per_page = PAGE_SIZE / sizeof(struct pxd_dev_id);
-	int num_pages = (sizeof(struct pxd_dev_id) * ctx->num_devices +
-				num_per_page - 1) / num_per_page;
-
-	req = fuse_get_req(fc, num_pages);
-	if (IS_ERR(req)) {
-		rc = PTR_ERR(req);
-		printk(KERN_ERR "%s: get req error %d\n", __func__, rc);
-		goto err;
-	}
-
-	req->num_pages = num_pages;
-
-	rc = -ENOMEM;
-	for (i = 0; i < req->num_pages; ++i) {
-		req->pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
-		if (!req->pages[i])
-			goto err_free_pages;
-	}
-
-	arg = &req->misc.pxd_init_in;
-	pxd_fill_init(fc, req, arg);
-
-	outarg = kzalloc(sizeof(struct pxd_init_out), GFP_KERNEL);
-	if (!outarg)
-		goto err_free_pages;
-
-	req->in.h.opcode = PXD_INIT;
-	req->in.numargs = 2;
-	req->in.args[0].size = sizeof(struct pxd_init_in);
-	req->in.args[0].value = arg;
-	req->in.args[1].size = sizeof(struct pxd_dev_id) * ctx->num_devices;
-	req->in.args[1].value = NULL;
-	req->in.argpages = 1;
-	req->end = pxd_process_init_reply;
-
-	fuse_request_send_oob(fc, req);
-
-	pxd_printk("%s: version %d num devices %ld(%d)\n", __func__, arg->version,
-		ctx->num_devices, arg->num_devices);
-	return 0;
-
-err_free_pages:
-	printk(KERN_ERR "%s: mem alloc\n", __func__);
-	for (i = 0; i < req->num_pages; ++i) {
-		if (req->pages[i])
-			put_page(req->pages[i]);
-	}
-	fuse_request_free(req);
-err:
-	return rc;
+	return sizeof(*hdr);
 }
 
 static int pxd_control_open(struct inode *inode, struct file *file)
 {
-	int rc;
 	struct pxd_context *ctx;
 	struct fuse_conn *fc;
 
@@ -1140,7 +1090,8 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 	if (fc->connected == 1) {
-		printk(KERN_ERR "%s: pxd-control-%d already open\n", __func__, ctx->id);
+		printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
+			ctx->id, ctx->open_seq);
 		return -EINVAL;
 	}
 
@@ -1156,11 +1107,11 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	fuse_restart_requests(fc);
 
-	rc = pxd_send_init(fc);
-	if (rc)
-		return rc;
+	++ctx->open_seq;
 
-	printk(KERN_INFO "%s: pxd-control-%d open OK\n", __func__, ctx->id);
+	printk(KERN_INFO "%s: pxd-control-%d(%lld) open OK\n", __func__, ctx->id,
+		ctx->open_seq);
+
 	return 0;
 }
 
@@ -1182,8 +1133,8 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
 	spin_unlock(&ctx->lock);
 
-	printk(KERN_INFO "%s: pxd-control-%d:%llu close OK\n", __func__,
-		ctx->id, ctx->unique);
+	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
+		ctx->open_seq);
 	return 0;
 }
 
@@ -1216,8 +1167,8 @@ static void pxd_timeout(unsigned long args)
 	fc->connected = true;
 	fc->allow_disconnected = 0;
 	fuse_abort_conn(fc);
-	printk(KERN_INFO "PXD_TIMEOUT (%s:%llu): Aborting all requests...",
-		ctx->name, ctx->unique);
+	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
+		ctx->name, ctx->id);
 }
 
 int pxd_context_init(struct pxd_context *ctx, int i)
@@ -1225,6 +1176,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	int err;
 	spin_lock_init(&ctx->lock);
 	ctx->id = i;
+	ctx->open_seq = 0;
 	ctx->fops = fuse_dev_operations;
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;

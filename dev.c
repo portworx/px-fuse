@@ -25,17 +25,6 @@
 #include <linux/blkdev.h>
 #include "pxd_compat.h"
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
-#include "iov_iter.h"
-
-#define iov_iter_advance __iov_iter_advance
-#define iov_iter __iov_iter
-#define iov_iter_init __iov_iter_init
-#define copy_page_to_iter __copy_page_to_iter
-#define copy_page_from_iter __copy_page_from_iter
-
-#endif
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
 #define PAGE_CACHE_RELEASE(page) put_page(page)
@@ -69,8 +58,6 @@ static void fuse_request_init(struct fuse_req *req, struct page **pages,
 	memset(page_descs, 0, sizeof(*page_descs) * npages);
 	INIT_LIST_HEAD(&req->list);
 	INIT_HLIST_NODE(&req->hash_entry);
-	req->pages = pages;
-	req->page_descs = page_descs;
 }
 
 static struct fuse_req *__fuse_request_alloc(unsigned npages, gfp_t flags)
@@ -115,10 +102,6 @@ struct fuse_req *fuse_request_alloc_nofs(unsigned npages)
 
 void fuse_request_free(struct fuse_req *req)
 {
-	if (req->pages != req->inline_pages) {
-		kfree(req->pages);
-		kfree(req->page_descs);
-	}
 	kmem_cache_free(fuse_req_cachep, req);
 }
 
@@ -294,7 +277,6 @@ __acquires(fc->lock)
 
 ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
-	struct request *breq = req->rq;
 	size_t copied, len;
 
 	copied = sizeof(req->in.h);
@@ -309,21 +291,6 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 		return -EFAULT;
 	}
 	copied += len;
-
-	if (unlikely(req->num_pages)) {
-		int i;
-		for (i = 0; i < req->num_pages; ++i) {
-			len = req->page_descs[i].length;
-			if (copy_page_to_iter(req->pages[i],
-					      req->page_descs[i].offset,
-					      len, iter) != len) {
-				printk(KERN_ERR "%s: copy page arg %d of %d error\n",
-				       __func__, i, breq->nr_phys_segments);
-				return -EFAULT;
-			}
-			copied += len;
-		}
-	}
 
 	return copied;
 }
@@ -385,6 +352,9 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	struct list_head *entry, *first, *last, tmp, *next;
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
+
+	if (unlikely(fc->pend_open))
+		return pxd_read_init(fc, iter);
 
 	INIT_LIST_HEAD(&tmp);
 
@@ -737,6 +707,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), iter);
 		return err ? err : nbytes;
 	}
+
+	if (unlikely(oh.unique == (u64)-1))
+		return pxd_process_init_reply(fc, &oh);
 
 	if (oh.error <= -1000 || oh.error > 0)
 		return -EINVAL;
