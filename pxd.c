@@ -272,7 +272,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 	int status;
 
 	while (req == NULL) {
-		req = fuse_get_req_for_background(fc, nr_pages);
+		req = fuse_get_req_for_background(fc);
 		if (IS_ERR(req) && PTR_ERR(req) == -EINTR) {
 			req = NULL;
 			++eintr;
@@ -317,8 +317,6 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	req->in.h.opcode = PXD_READ;
 	req->out.numargs = 1;
-	req->out.argpages = 1;
-	req->out.args[0].size = size;
 	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
@@ -544,7 +542,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
 		REQCTR(&pxd_dev->ctx->fc));
 
-	req->num_pages = 0;
 	req->misc.pxd_rdwr_in.chksum = 0;
 	req->misc.pxd_rdwr_in.pad = 0;
 	req->rq = rq;

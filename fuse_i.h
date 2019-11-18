@@ -200,29 +200,8 @@ struct fuse_out {
 	/** Header returned from userspace */
 	struct fuse_out_header h;
 
-	/*
-	 * The following bitfields are not changed during the request
-	 * processing
-	 */
-
-	/** Last argument is variable length (can be shorter than
-	    arg->size) */
-	unsigned argvar:1;
-
-	/** Last argument is a list of pages to copy data to */
-	unsigned argpages:1;
-
-	/** Zero partially or not copied pages */
-	unsigned page_zeroing:1;
-
-	/** Pages may be replaced with new ones */
-	unsigned page_replace:1;
-
 	/** Number or arguments */
 	unsigned numargs;
-
-	/** Array of arguments */
-	struct fuse_arg args[3];
 };
 
 /** FUSE page descriptor */
@@ -283,45 +262,12 @@ struct fuse_req {
 
 	/** Data for asynchronous requests */
 	union {
-		struct {
-			union {
-				struct fuse_release_in in;
-				struct work_struct work;
-			};
-			struct path path;
-		} release;
-		struct fuse_init_in init_in;
-		struct fuse_init_out init_out;
-		struct cuse_init_in cuse_init_in;
-		struct {
-			struct fuse_read_in in;
-			u64 attr_ver;
-		} read;
-		struct {
-			struct fuse_write_in in;
-			struct fuse_write_out out;
-			struct fuse_req *next;
-		} write;
-		struct fuse_notify_retrieve_in retrieve_in;
-		struct fuse_lk_in lk_in;
 		struct pxd_init_in pxd_init_in;
 		struct pxd_init_out pxd_init_out;
 		struct pxd_rdwr_in pxd_rdwr_in;
 	} misc;
 
-	/** inline page vector */
-	struct page *inline_pages[FUSE_REQ_INLINE_PAGES];
-
-	/** inline page-descriptor vector */
-	struct fuse_page_desc inline_page_descs[FUSE_REQ_INLINE_PAGES];
-
-	/** number of pages in vector */
-	unsigned num_pages;
-
 	union {
-		/** AIO control block */
-		struct fuse_io_priv *io;
-
 		/** Associated request structrure. */
 		struct request *rq;
 
@@ -654,9 +600,9 @@ void __exit fuse_ctl_cleanup(void);
 /**
  * Allocate a request
  */
-struct fuse_req *fuse_request_alloc(unsigned npages);
+struct fuse_req *fuse_request_alloc(void);
 
-struct fuse_req *fuse_request_alloc_nofs(unsigned npages);
+struct fuse_req *fuse_request_alloc_nofs(void);
 
 /**
  * Free a request
@@ -665,20 +611,9 @@ void fuse_request_free(struct fuse_req *req);
 
 /**
  * Get a request, may fail with -ENOMEM,
- * caller should specify # elements in req->pages[] explicitly
  */
-struct fuse_req *fuse_get_req(struct fuse_conn *fc, unsigned npages);
-struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc,
-					     unsigned npages);
-
-/**
- * Get a request, may fail with -ENOMEM,
- * useful for callers who doesn't use req->pages[]
- */
-static inline struct fuse_req *fuse_get_req_nopages(struct fuse_conn *fc)
-{
-	return fuse_get_req(fc, 0);
-}
+struct fuse_req *fuse_get_req(struct fuse_conn *fc);
+struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc);
 
 /**
  * Send a request to head of pending queue.
