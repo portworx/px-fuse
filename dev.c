@@ -29,10 +29,12 @@
 
 uint64_t nrpool_total;
 uint64_t nrpool_differ;
+uint64_t nrpool_default;
 ssize_t fuse_rpool_show(struct device *dev,
 		     struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%llu/%llu\n", nrpool_differ,nrpool_total);
+	return sprintf(buf, "%llu[%llu]/%llu\n",
+			nrpool_differ, nrpool_default, nrpool_total);
 }
 
 
@@ -1048,6 +1050,7 @@ void fuse_response_enqueue(struct fuse_req *req) {
 	if(req->reqcpu >= NR_CPUS || !rpool[req->reqcpu]) {
 		// suboptimal but route to the default cpu.
 		pool = rpool_default;
+		nrpool_default++;
 	} else {
 		pool = rpool[req->reqcpu];
 	}
