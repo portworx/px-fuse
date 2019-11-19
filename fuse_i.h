@@ -604,6 +604,8 @@ void __exit fuse_ctl_cleanup(void);
 /**
  * Get response pool statistics on req/resp flow vs cpu
  */
+struct device;
+struct device_attribute;
 ssize_t fuse_rpool_show(struct device *dev,
 		     struct device_attribute *attr, char *buf);
 /**

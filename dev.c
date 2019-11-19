@@ -1074,6 +1074,9 @@ struct fuse_response_thread_pool* fuse_response_threadpool_init_item(unsigned in
 	BUG_ON(IS_ERR(pool->thread));
 
 	kthread_bind(pool->thread, cpu);
+#ifndef MIN_NICE
+#define MIN_NICE (-20)
+#endif
 	set_user_nice(pool->thread, MIN_NICE);
 	wake_up_process(pool->thread);
 
