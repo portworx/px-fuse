@@ -809,28 +809,12 @@ __acquires(fc->lock)
 	end_requests(fc, &fc->processing);
 }
 
-static void end_polls(struct fuse_conn *fc)
-{
-	struct rb_node *p;
-
-	p = rb_first(&fc->polled_files);
-
-	while (p) {
-		struct fuse_file *ff;
-		ff = rb_entry(p, struct fuse_file, polled_node);
-		wake_up_interruptible_all(&ff->poll_wait);
-
-		p = rb_next(p);
-	}
-}
-
 int fuse_conn_init(struct fuse_conn *fc)
 {
 	int i;
 
 	memset(fc, 0, sizeof(*fc));
 	spin_lock_init(&fc->lock);
-	init_rwsem(&fc->killsb);
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
 	INIT_LIST_HEAD(&fc->pending);
@@ -843,19 +827,13 @@ int fuse_conn_init(struct fuse_conn *fc)
 	}
 	for (i = 0; i < FUSE_HASH_SIZE; ++i)
 		INIT_HLIST_HEAD(&fc->hash[i]);
-	fc->khctr = 0;
-	fc->polled_files = RB_ROOT;
 	fc->reqctr = 0;
-	fc->attr_version = 1;
-	get_random_bytes(&fc->scramble_key, sizeof(fc->scramble_key));
 	return 0;
 }
 
 void fuse_conn_put(struct fuse_conn *fc)
 {
 	if (atomic_dec_and_test(&fc->count)) {
-		if (fc->destroy_req)
-			fuse_request_free(fc->destroy_req);
 		if (fc->hash)
 			kfree(fc->hash);
 		fc->release(fc);
@@ -893,7 +871,6 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	if (fc->connected) {
 		fc->connected = 0;
 		end_queued_requests(fc);
-		end_polls(fc);
 		wake_up_all(&fc->waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	}
@@ -907,7 +884,6 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 		spin_lock(&fc->lock);
 		fc->connected = 0;
 		end_queued_requests(fc);
-		end_polls(fc);
 		spin_unlock(&fc->lock);
 		fuse_conn_put(fc);
 	}
