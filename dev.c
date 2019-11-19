@@ -1012,7 +1012,7 @@ int fuse_response_wrapper(void *data) {
 	while (!kthread_should_stop()) {
 		spin_lock(&self->lock);
 		wait_event_lock_irq(self->waitQ,
-				!list_empty(&self->items),
+				(!list_empty(&self->items) || kthread_should_stop()),
 				self->lock);
 
 		// pull out all responses and empty queue.
