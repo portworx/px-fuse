@@ -1010,14 +1010,14 @@ int fuse_response_wrapper(void *data) {
 
 	INIT_LIST_HEAD(&items);
 	while (!kthread_should_stop()) {
-		spin_lock(&self->lock);
+		spin_lock_irq(&self->lock);
 		wait_event_lock_irq(self->waitQ,
 				(!list_empty(&self->items) || kthread_should_stop()),
 				self->lock);
 
 		// pull out all responses and empty queue.
 		list_replace_init(&self->items, &items);
-		spin_unlock(&self->lock);
+		spin_unlock_irq(&self->lock);
 
 		// handle all response
 		list_for_each_entry_safe(req, next, &items, rpool) {
