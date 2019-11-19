@@ -977,12 +977,14 @@ static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
+static DEVICE_ATTR(rpool, S_IRUGO, fuse_rpool_show, NULL);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
 	&dev_attr_major.attr,
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
+	&dev_attr_rpool.attr,
 	NULL
 };
 

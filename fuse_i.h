@@ -242,6 +242,10 @@ struct fuse_req {
 	    fuse_conn */
 	struct list_head list;
 
+	struct fuse_conn *fc;
+	struct list_head rpool;
+	unsigned int reqcpu;
+
 	/** hash table entry */
 	struct hlist_node hash_entry;
 
@@ -597,6 +601,11 @@ void fuse_dev_cleanup(void);
 int fuse_ctl_init(void);
 void __exit fuse_ctl_cleanup(void);
 
+/**
+ * Get response pool statistics on req/resp flow vs cpu
+ */
+ssize_t fuse_rpool_show(struct device *dev,
+		     struct device_attribute *attr, char *buf);
 /**
  * Allocate a request
  */

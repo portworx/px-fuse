@@ -8,6 +8,7 @@
 
 #include "fuse_i.h"
 
+#include <linux/smp.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/poll.h>
@@ -23,7 +24,21 @@
 #include <linux/random.h>
 #include <linux/version.h>
 #include <linux/blkdev.h>
+#include <linux/kthread.h>
 #include "pxd_compat.h"
+
+uint64_t nrpool_total;
+uint64_t nrpool_differ;
+ssize_t fuse_rpool_show(struct device *dev,
+		     struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%llu/%llu\n", nrpool_differ,nrpool_total);
+}
+
+
+#ifdef PXRESP_PIN_CPU
+static void fuse_response_enqueue(struct fuse_req *req);
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -106,6 +121,12 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 	}
 
 	fuse_req_init_context(req);
+
+	req->fc = fc;
+	INIT_LIST_HEAD(&req->rpool);
+	req->reqcpu = smp_processor_id();
+	nrpool_total++;
+
 	return req;
 
  out:
@@ -193,9 +214,16 @@ __releases(fc->lock)
 		hlist_del_init(&req->hash_entry);
 	list_del(&req->list);
 	spin_unlock(&fc->lock);
+
+	if (req->reqcpu != smp_processor_id()) nrpool_differ++;
+
+#ifdef PXRESP_PIN_CPU
+	fuse_response_enqueue(req);
+#else
 	if (req->end)
 		req->end(fc, req);
 	fuse_request_free(req);
+#endif
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
@@ -963,6 +991,127 @@ const struct file_operations fuse_dev_operations = {
 };
 #endif
 
+struct fuse_response_thread_pool {
+	struct task_struct* thread;
+	wait_queue_head_t waitQ;
+	spinlock_t lock;
+	struct list_head items;
+};
+struct fuse_response_thread_pool *rpool[NR_CPUS];
+struct fuse_response_thread_pool *rpool_default;
+
+static
+int fuse_response_wrapper(void *data) {
+	struct fuse_response_thread_pool *self = data;
+	struct list_head items;
+	struct fuse_req *req, *next;
+
+	INIT_LIST_HEAD(&items);
+	while (!kthread_should_stop()) {
+		spin_lock(&self->lock);
+		wait_event_lock_irq(self->waitQ,
+				!list_empty(&self->items),
+				self->lock);
+
+		// pull out all responses and empty queue.
+		list_replace_init(&self->items, &items);
+		spin_unlock(&self->lock);
+
+		// handle all response
+		list_for_each_entry_safe(req, next, &items, rpool) {
+			list_del(&req->rpool);
+			if (req->end) req->end(req->fc, req);
+			fuse_request_free(req);
+		}
+	}
+
+	return 0;
+}
+
+#ifdef PXRESP_PIN_CPU
+static
+void fuse_response_enqueue(struct fuse_req *req) {
+	struct fuse_response_thread_pool* pool;
+
+	if (!req->end) {
+		fuse_request_free(req);
+		return;
+	}
+
+	if (req->reqcpu == smp_processor_id()) {
+		req->end(req->fc, req);
+		fuse_request_free(req);
+		return;
+	}
+
+	// likely hot plug cpu
+	if(req->reqcpu >= NR_CPUS || !rpool[req->reqcpu]) {
+		// suboptimal but route to the default cpu.
+		pool = rpool_default;
+	} else {
+		pool = rpool[req->reqcpu];
+	}
+
+	spin_lock(&pool->lock);
+	list_add(&req->rpool, &pool->items);
+	wake_up(&pool->waitQ);
+	spin_unlock(&pool->lock);
+}
+#endif
+
+static
+struct fuse_response_thread_pool* fuse_response_threadpool_init_item(unsigned int cpu) {
+	struct fuse_response_thread_pool *pool =
+		kzalloc(sizeof(struct fuse_response_thread_pool), GFP_KERNEL);
+	if (!pool) {
+		return NULL;
+	}
+
+	spin_lock_init(&pool->lock);
+	init_waitqueue_head(&pool->waitQ);
+	pool->thread = kthread_create_on_node(fuse_response_wrapper, pool,
+			cpu_to_node(cpu), "pxrpool%d", cpu);
+	BUG_ON(IS_ERR(pool->thread));
+
+	kthread_bind(pool->thread, cpu);
+	set_user_nice(pool->thread, MIN_NICE);
+	wake_up_process(pool->thread);
+
+	return pool;
+}
+
+static
+void fuse_response_threadpool_init(void) {
+	unsigned int i;
+	struct fuse_response_thread_pool *pool;
+
+	for (i=0; i<NR_CPUS; i++) {
+		rpool[i] = NULL;
+		if (cpu_online(i)) {
+			pool = fuse_response_threadpool_init_item(i);
+			BUG_ON(!pool);
+			rpool[i] = pool;
+
+			if (!rpool_default) rpool_default = pool;
+		}
+	}
+
+	// atleast one cpu should be online!
+	BUG_ON(!rpool_default);
+}
+
+static void fuse_response_threadpool_cleanup(void) {
+	int i;
+
+	for (i=0; i<NR_CPUS; i++) {
+		if (rpool[i]) {
+			kthread_stop(rpool[i]->thread);
+			kfree(rpool[i]);
+			rpool[i] = NULL;
+		}
+	}
+}
+
 int fuse_dev_init(void)
 {
 	int err = -ENOMEM;
@@ -979,13 +1128,16 @@ int fuse_dev_init(void)
 	if (!fuse_req_cachep)
 		goto out;
 
+	fuse_response_threadpool_init();
 	return 0;
 
  out:
+	fuse_response_threadpool_cleanup();
 	return err;
 }
 
 void fuse_dev_cleanup(void)
 {
+	fuse_response_threadpool_cleanup();
 	kmem_cache_destroy(fuse_req_cachep);
 }
