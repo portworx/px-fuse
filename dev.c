@@ -1067,6 +1067,7 @@ struct fuse_response_thread_pool* fuse_response_threadpool_init_item(unsigned in
 		return NULL;
 	}
 
+	INIT_LIST_HEAD(&pool->items);
 	spin_lock_init(&pool->lock);
 	init_waitqueue_head(&pool->waitQ);
 	pool->thread = kthread_create_on_node(fuse_response_wrapper, pool,
