@@ -597,4 +597,7 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 ssize_t pxd_process_init_reply(struct fuse_conn *fc, struct fuse_out_header *hdr);
 
+void fuse_request_init(struct fuse_req *req);
+void fuse_req_init_context(struct fuse_req *req);
+
 #endif /* _FS_FUSE_I_H */
