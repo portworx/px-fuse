@@ -702,7 +702,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	spin_unlock(&fc->lock);
 	req->out.h = oh;
 
-	if (req->bio_pages && req->out.numargs && iter->count > 0) {
+	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
 		struct request *breq = req->rq;
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
@@ -710,7 +710,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		struct bio_vec *bvec = NULL;
 #endif
 		struct req_iterator breq_iter;
-		if (breq->nr_phys_segments && req->in.h.opcode == PXD_READ) {
+		if (breq->nr_phys_segments) {
 			int i = 0;
 			rq_for_each_segment(bvec, breq, breq_iter) {
 				len = BVEC(bvec).bv_len;

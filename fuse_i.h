@@ -199,9 +199,6 @@ struct fuse_arg {
 struct fuse_out {
 	/** Header returned from userspace */
 	struct fuse_out_header h;
-
-	/** Number or arguments */
-	unsigned numargs;
 };
 
 /** FUSE page descriptor */
@@ -244,15 +241,6 @@ struct fuse_req {
 
 	/** hash table entry */
 	struct hlist_node hash_entry;
-
-	/*
-	 * The following bitfields are either set once before the
-	 * request is queued or setting/clearing them is protected by
-	 * fuse_conn->lock
-	 */
-
-	/** Request page descriptor is struct request *rq */
-	unsigned bio_pages:1;
 
 	/** The request input */
 	struct fuse_in in;
