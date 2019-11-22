@@ -188,7 +188,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
         struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || __EL8__
         part_stat_lock();
         part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
         part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
