@@ -269,6 +269,9 @@ struct fuse_req {
 	/** Request page descriptor is struct request *rq */
 	unsigned bio_pages:1;
 
+	/** Request to use fastpath */
+	unsigned fastpath:1;
+
 	/** State of the request */
 	enum fuse_req_state state;
 

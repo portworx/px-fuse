@@ -207,7 +207,6 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-#ifndef __PX_FASTPATH__
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
 #ifndef __PX_BLKMQ__
@@ -229,7 +228,6 @@ static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 #endif
 	pxd_request_complete(fc, req);
 }
-#endif
 
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 {
@@ -254,6 +252,8 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 		printk_ratelimited(KERN_ERR "%s: request alloc (%d pages) failed: %d",
 			 __func__, nr_pages, status);
 	}
+
+	if (req) req->fastpath = pxd_dev->fastpath;
 	return req;
 }
 
@@ -287,11 +287,12 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->out.numargs = 1;
 	req->out.argpages = 1;
 	req->out.args[0].size = size;
-#ifdef __PX_FASTPATH__
-	req->end = pxd_process_read_reply;
-#else
-	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
-#endif
+
+	if (req->fastpath) {
+		req->end = pxd_process_read_reply;
+	} else {
+		req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
+	}
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -300,11 +301,11 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
-#ifdef __PX_FASTPATH__
-	req->end = pxd_process_write_reply;
-#else
-	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
-#endif
+	if (req->fastpath) {
+		req->end = pxd_process_write_reply;
+	} else {
+		req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+	}
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -313,11 +314,11 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_DISCARD;
-#ifdef __PX_FASTPATH__
-	req->end = pxd_process_write_reply;
-#else
-	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
-#endif
+	if (req->fastpath) {
+		req->end = pxd_process_write_reply;
+	} else {
+		req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+	}
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -326,11 +327,11 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE_SAME;
-#ifdef __PX_FASTPATH__
-	req->end = pxd_process_write_reply;
-#else
-	req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
-#endif
+	if (req->fastpath) {
+		req->end = pxd_process_write_reply;
+	} else {
+		req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
+	}
 
 	pxd_req_misc(req, size, off, minor, flags);
 }
@@ -413,8 +414,6 @@ static inline unsigned int get_op_flags(struct bio *bio)
 }
 
 // fastpath uses this path to punt requests to slowpath
-#if !defined(USE_REQUESTQ_MODEL) || defined(__PX_FASTPATH__)
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
@@ -457,7 +456,8 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
 }
-#elif !defined(__PX_BLKMQ__)
+
+#if !defined(__PX_BLKMQ__)
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -599,19 +599,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	/* cannot choose io processing model dynamically based on queue size.
 	 * Because other files also need to know how requests are to be processed.
 	 */
-#if !defined(USE_REQUESTQ_MODEL)
-	q = blk_alloc_queue(GFP_KERNEL);
-	if (!q) {
-		err = -ENOMEM;
-		goto out_disk;
-	}
-#ifdef __PX_FASTPATH__
-	blk_queue_make_request(q, pxd_make_request_fastpath);
-#else
-	blk_queue_make_request(q, pxd_make_request_slowpath);
-#endif
-
-#else
+	if (pxd_dev->fastpath) {
+		q = blk_alloc_queue(GFP_KERNEL);
+		if (!q) {
+			err = -ENOMEM;
+			goto out_disk;
+		}
+		blk_queue_make_request(q, pxd_make_request_fastpath);
+	} else {
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
@@ -639,7 +634,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	  	goto out_disk;
 	  }
 #endif
-#endif
+	}
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
@@ -739,15 +734,16 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 	pxd_dev->connected = true; // fuse slow path connection
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
+	pxd_dev->fastpath = add->enable_fp;
 
 	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, add->open_mode, add->enable_fp, add->paths.size);
 
-	err = pxd_fastpath_init(pxd_dev);
-	if (err)
-		goto out_id;
+	if (pxd_dev->fastpath) {
+		err = pxd_fastpath_init(pxd_dev);
+		if (err)
+			goto out_id;
 
-	if (add->enable_fp) {
 		printk(KERN_INFO"Device %llu enabling fastpath %d (paths: %lu)\n",
 				add->dev_id, add->enable_fp, add->paths.size);
 		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
@@ -757,7 +753,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 
 	err = pxd_init_disk(pxd_dev, add);
 	if (err) {
-		pxd_fastpath_cleanup(pxd_dev);
+		if (pxd_dev->fastpath) pxd_fastpath_cleanup(pxd_dev);
 		goto out_id;
 	}
 

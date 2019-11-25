@@ -36,6 +36,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
+	bool fastpath;
 #ifdef __PX_BLKMQ__
         struct blk_mq_tag_set tag_set;
 #endif
