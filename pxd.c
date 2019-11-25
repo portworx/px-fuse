@@ -596,9 +596,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 
-	/* cannot choose io processing model dynamically based on queue size.
-	 * Because other files also need to know how requests are to be processed.
-	 */
+#ifndef __PX_FASTPATH__
+	if (pxd_dev->fastpath) {
+		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it.");
+		pxd_dev->fastpath = false;
+	}
+#endif
+
 	if (pxd_dev->fastpath) {
 		q = blk_alloc_queue(GFP_KERNEL);
 		if (!q) {
