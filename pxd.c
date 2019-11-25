@@ -609,6 +609,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 			err = -ENOMEM;
 			goto out_disk;
 		}
+
+		// add hooks to control congestion only while using fastpath
+		q->backing_dev_info->congested_fn = pxd_device_congested;
+		q->backing_dev_info->congested_data = pxd_dev;
+
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 	} else {
 #ifdef __PX_BLKMQ__
@@ -1141,17 +1146,32 @@ static ssize_t pxd_congestion_show(struct device *dev,
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
-	bool congested = atomic_read(&pxd_dev->fp.ncount) >= pxd_dev->fp.nr_congestion_on;
-	return sprintf(buf, "congested: %d/%d\n", congested, atomic_read(&pxd_dev->fp.ncongested));
+	return sprintf(buf, "congested: %s (%d/%d)\n",
+			pxd_dev->fp.congested ? "yes" : "no",
+			pxd_dev->fp.nr_congestion_on,
+			pxd_dev->fp.nr_congestion_off);
 }
 
-static ssize_t pxd_congestion_clear(struct device *dev, struct device_attribute *attr,
+static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int thresh;
 
-	// debug interface to force wakeup of congestion wait threads
-	wake_up(&pxd_dev->fp.congestion_wait);
+	sscanf(buf, "%d", &thresh);
+
+	if (thresh < 0) {
+		thresh = pxd_dev->fp.qdepth;
+	}
+
+	if (thresh > MAX_CONGESTION_THRESHOLD) {
+		thresh = MAX_CONGESTION_THRESHOLD;
+	}
+
+	spin_lock_irq(&pxd_dev->lock);
+	pxd_dev->fp.qdepth = thresh;
+	spin_unlock_irq(&pxd_dev->lock);
+
 	return count;
 }
 
@@ -1278,7 +1298,7 @@ static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
-static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_clear);
+static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);

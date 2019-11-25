@@ -38,6 +38,41 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw);
 #define pxd_get_writeio(tc)  pxd_get_io(tc, WRITE)
 #define pxd_get_readio(tc)   pxd_get_io(tc, READ)
 
+// congestion callback from kernel writeback module
+int pxd_device_congested(void *data, int bits)
+{
+	struct pxd_device *pxd_dev = data;
+	int ncount = atomic_read(&pxd_dev->fp.ncount);
+
+	// TODO can notify congested if device is suspended as well.
+
+	// does not care about async or sync request.
+	if (ncount > pxd_dev->fp.qdepth) {
+		spin_lock_irq(&pxd_dev->lock);
+		if (!pxd_dev->fp.congested) {
+			pxd_dev->fp.congested = true;
+			pxd_dev->fp.nr_congestion_on++;
+		}
+		spin_unlock_irq(&pxd_dev->lock);
+		return 1;
+	}
+
+	if (pxd_dev->fp.congested) {
+		if (ncount < (3*pxd_dev->fp.qdepth)/4) {
+			spin_lock_irq(&pxd_dev->lock);
+			if (pxd_dev->fp.congested) {
+				pxd_dev->fp.congested = false;
+				pxd_dev->fp.nr_congestion_off++;
+			}
+			spin_unlock_irq(&pxd_dev->lock);
+			return 0;
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
 static inline
 int pxd_io_empty(struct thread_context *tc, int rw) {
 	int empty;
@@ -565,16 +600,8 @@ static void pxd_complete_io(struct bio* bio) {
 
 	__pxd_cleanup_block_io(head);
 
-	/* free up from any prior congestion wait */
-	spin_lock_irq(&pxd_dev->lock);
-
 	atomic_dec(&pxd_dev->fp.ncount);
 	atomic_inc(&pxd_dev->fp.ncomplete);
-
-	if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
-		wake_up(&pxd_dev->fp.congestion_wait);
-	}
-	spin_unlock_irq(&pxd_dev->lock);
 }
 
 static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_dev,
@@ -934,15 +961,8 @@ static int pxd_io_thread(void *data, int rw) {
 			struct pxd_device *pxd_dev = head->pxd_dev;
 			BUG_ON(!pxd_dev);
 
-			spin_lock_irq(&pxd_dev->lock);
-
 			atomic_dec(&pxd_dev->fp.ncount);
 			atomic_inc(&pxd_dev->fp.ncomplete);
-
-			if (atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off) {
-				wake_up(&pxd_dev->fp.congestion_wait);
-			}
-			spin_unlock_irq(&pxd_dev->lock);
 		}
 	}
 	return 0;
@@ -1111,10 +1131,11 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev) {
 
 	// congestion init
 	// hard coded congestion limits within driver
-	fp->nr_congestion_on = 128;
-	fp->nr_congestion_off = 3/4*128;
+	fp->congested = false;
+	fp->qdepth = DEFAULT_CONGESTION_THRESHOLD;
+	fp->nr_congestion_on = 0;
+	fp->nr_congestion_off = 0;
 
-	init_waitqueue_head(&fp->congestion_wait);
 	init_waitqueue_head(&fp->sync_event);
 	spin_lock_init(&fp->sync_lock);
 
@@ -1259,24 +1280,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			bio->bi_vcnt, bio->bi_flags,
 			(bio->bi_opf & REQ_OP_MASK),
 			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
-
-	#if 1
-	{ /* add congestion handling */
-		spin_lock_irq(&pxd_dev->lock);
-		if (atomic_read(&pxd_dev->fp.ncount) >= pxd_dev->fp.nr_congestion_on) {
-			pxd_printk("Hit congestion... wait until clear\n");
-			atomic_inc(&pxd_dev->fp.ncongested);
-			wait_event_lock_irq(pxd_dev->fp.congestion_wait,
-				atomic_read(&pxd_dev->fp.ncount) < pxd_dev->fp.nr_congestion_off,
-				pxd_dev->lock);
-			pxd_printk("congestion cleared\n");
-		}
-
-		atomic_inc(&pxd_dev->fp.ncount);
-		spin_unlock_irq(&pxd_dev->lock);
-
-	}
-	#endif
 
 #if 0
 	/* keep writes on same cpu, but allow reads to spread but within same numa node */
