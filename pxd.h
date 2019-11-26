@@ -46,7 +46,7 @@ enum pxd_opcode {
 	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
-	PXD_UPDATE_PATH,        /**< pdate backing file/device path for a volume */
+	PXD_UPDATE_PATH,        /**< update backing file/device path for a volume */
 	PXD_LAST,
 };
 
