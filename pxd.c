@@ -886,7 +886,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	}
 
 	mode = open_mode(pxd_dev->mode);
-	for (i=0; i<update_path->size; i++) {
+	for (i = 0; i < update_path->size; i++) {
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
 			// if previous paths are same.. then skip anymore config
 			printk(KERN_INFO"pxd%llu already configured for path %s\n",
@@ -916,7 +916,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	return 0;
 
 out_file_failed:
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
+	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 	}
 	pxd_dev->fp.nfd = 0;
