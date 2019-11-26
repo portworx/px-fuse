@@ -44,7 +44,11 @@ int pxd_device_congested(void *data, int bits)
 	struct pxd_device *pxd_dev = data;
 	int ncount = atomic_read(&pxd_dev->fp.ncount);
 
-	// TODO can notify congested if device is suspended as well.
+	// notify congested if device is suspended as well.
+	// modified under lock, read outside lock.
+	if (pxd_dev->fp.suspend) {
+		return 1;
+	}
 
 	// does not care about async or sync request.
 	if (ncount > pxd_dev->fp.qdepth) {
