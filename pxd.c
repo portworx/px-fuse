@@ -901,7 +901,7 @@ static int __pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_upd
 	struct file* f;
 
 	mode = open_mode(pxd_dev->mode);
-	for (i=0; i<update_path->size; i++) {
+	for (i = 0; i < update_path->size; i++) {
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
 			// if previous paths are same.. then skip anymore config
 			printk(KERN_INFO"pxd%llu already configured for path %s\n",
@@ -929,7 +929,7 @@ static int __pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_upd
 	return 0;
 
 out_file_failed:
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
+	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 	}
 	pxd_dev->fp.nfd = 0;
