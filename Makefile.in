@@ -20,6 +20,7 @@ endif
 
 MINKVER=3.10
 FPATH_MINKVER=4.0
+BLKMQ_MINKVER=4.18
 KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
 ifeq ($(shell expr $(KERNELVER) \>= $(MINKVER)),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
@@ -37,7 +38,11 @@ endif
 # EL8 Specific kernel checks
 ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__
-$(warning enabling slow path with BLKMQ support)
+$(warning enabling BLKMQ support)
+endif
+ifeq ($(shell expr $(KERNELVER) \>= $(BLKMQ_MINKVER)),1)
+PXDEFINES += -D__PX_BLKMQ__
+$(warning enabling BLKMQ support)
 endif
 
 

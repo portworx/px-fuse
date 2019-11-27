@@ -2,6 +2,9 @@
 #define _PXD_CORE_H_
 
 #include <linux/miscdevice.h>
+#ifdef __PX_BLKMQ__
+#include <linux/blk-mq.h>
+#endif
 
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
