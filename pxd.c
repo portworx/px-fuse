@@ -601,8 +601,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it.");
 		pxd_dev->fastpath = false;
 	}
-#endif
-
+#else
 	if (pxd_dev->fastpath) {
 		q = blk_alloc_queue(GFP_KERNEL);
 		if (!q) {
@@ -616,6 +615,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 	} else {
+#endif
+
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
@@ -643,7 +644,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 	  	goto out_disk;
 	  }
 #endif
+
+#ifdef __PX_FASTPATH__
 	}
+#endif
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
