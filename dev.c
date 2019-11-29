@@ -899,11 +899,9 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
  * it from the list and copy the rest of the buffer to the request.
  * The request is finished by calling request_end()
  */
-static ssize_t __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
+static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
-	size_t nbytes = iter->count;
-
 	if (req->bio_pages && req->out.numargs && iter->count > 0) {
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
@@ -930,13 +928,12 @@ static ssize_t __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 		}
 	}
 	request_end(fc, req, true);
-	return nbytes;
+	return 0;
 }
 
-static ssize_t __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
+static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
-	size_t nbytes = iter->count;
 #if defined(HAVE_BVEC_ITER)
 	struct bio_vec bvec;
 	struct bio *breq = req->bio;
@@ -966,7 +963,7 @@ static ssize_t __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 		}
 	}
 	request_end(fc, req, true);
-	return nbytes;
+	return 0;
 }
 
 static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
@@ -1020,7 +1017,12 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	req->state = FUSE_REQ_WRITING;
 	req->out.h = oh;
 	if (req->fastpath) {
-		return  __fuse_dev_do_write_fastpath(fc, req, iter);
+		err = __fuse_dev_do_write_fastpath(fc, req, iter);
+	} else {
+		err = __fuse_dev_do_write_slowpath(fc, req, iter);
+	}
+	if (err) {
+		return err;
 	}
 
 	return __fuse_dev_do_write_slowpath(fc, req, iter);
