@@ -1025,7 +1025,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return err;
 	}
 
-	return __fuse_dev_do_write_slowpath(fc, req, iter);
+	return 0;
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
