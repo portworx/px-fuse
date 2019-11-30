@@ -1022,7 +1022,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		err = __fuse_dev_do_write_slowpath(fc, req, iter);
 	}
 
-	if (err) return err
+	if (err) return err;
 	return nbytes;
 }
 
