@@ -643,32 +643,40 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 }
 
 static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
-		struct fuse_req *req, unsigned int size, struct iov_iter *iter)
+		struct fuse_req *req,
+		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
 {
-	struct pxd_read_data_out read_data;
-	size_t len = sizeof(read_data);
+	size_t len;
 	struct iovec iov[IOV_BUF_SIZE];
+	struct iov_iter data_iter;
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 #else
 	struct bio_vec *bvec = NULL;
 #endif
-
 	struct req_iterator breq_iter;
-	struct iov_iter data_iter;
 	size_t copied, skipped = 0;
 	int ret;
+
+	ret = copy_in_read_data_iovec(iter, read_data_p, iov, &data_iter);
+	if (ret)
+		return ret;
+
+	/* advance the iterator if data is unaligned */
+	if (unlikely(req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK))
+		iov_iter_advance(&data_iter,
+				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		copied = 0;
 		len = BVEC(bvec).bv_len;
-		if (skipped < read_data.offset) {
-			if (read_data.offset - skipped >= len) {
+		if (skipped < read_data_p->offset) {
+			if (read_data_p->offset - skipped >= len) {
 				skipped += len;
 				copied = len;
 			} else {
-				copied = read_data.offset - skipped;
-				skipped = read_data.offset;
+				copied = read_data_p->offset - skipped;
+				skipped = read_data_p->offset;
 			}
 		}
 		if (copied < len) {
@@ -680,7 +688,7 @@ static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
 					return 0;
 
 				/* out of space in destination, copy more iovec */
-				ret = copy_in_read_data_iovec(iter, &read_data,
+				ret = copy_in_read_data_iovec(iter, read_data_p,
 					iov, &data_iter);
 				if (ret)
 					return ret;
@@ -701,11 +709,12 @@ static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
 }
 
 static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
-		struct fuse_req *req, unsigned int size, struct iov_iter *iter)
+		struct fuse_req *req,
+		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
 {
-	struct pxd_read_data_out read_data;
-	size_t len = sizeof(read_data);
+	size_t len;
 	struct iovec iov[IOV_BUF_SIZE];
+	struct iov_iter data_iter;
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 	struct bvec_iter bvec_iter;
@@ -713,20 +722,28 @@ static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
 	struct bio_vec *bvec = NULL;
 	int bvec_iter;
 #endif
-	struct iov_iter data_iter;
 	size_t copied, skipped = 0;
 	int ret;
+
+	ret = copy_in_read_data_iovec(iter, read_data_p, iov, &data_iter);
+	if (ret)
+		return ret;
+
+	/* advance the iterator if data is unaligned */
+	if (unlikely(req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK))
+		iov_iter_advance(&data_iter,
+				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
 	bio_for_each_segment(bvec, req->bio, bvec_iter) {
 		copied = 0;
 		len = BVEC(bvec).bv_len;
-		if (skipped < read_data.offset) {
-			if (read_data.offset - skipped >= len) {
+		if (skipped < read_data_p->offset) {
+			if (read_data_p->offset - skipped >= len) {
 				skipped += len;
 				copied = len;
 			} else {
-				copied = read_data.offset - skipped;
-				skipped = read_data.offset;
+				copied = read_data_p->offset - skipped;
+				skipped = read_data_p->offset;
 			}
 		}
 		if (copied < len) {
@@ -738,7 +755,7 @@ static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
 					return 0;
 
 				/* out of space in destination, copy more iovec */
-				ret = copy_in_read_data_iovec(iter, &read_data,
+				ret = copy_in_read_data_iovec(iter, read_data_p,
 					iov, &data_iter);
 				if (ret)
 					return ret;
@@ -764,9 +781,6 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	struct pxd_read_data_out read_data;
 	size_t len = sizeof(read_data);
 	struct fuse_req *req;
-	struct iovec iov[IOV_BUF_SIZE];
-	struct iov_iter data_iter;
-	int ret;
 
 	if (copy_from_iter(&read_data, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy read_data arg\n", __func__);
@@ -789,20 +803,11 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	ret = copy_in_read_data_iovec(iter, &read_data, iov, &data_iter);
-	if (ret)
-		return ret;
-
-	/* advance the iterator if data is unaligned */
-	if (unlikely(req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK))
-		iov_iter_advance(&data_iter,
-				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
-
 	if (req->fastpath) {
-		return __fuse_notify_read_data_fastpath(conn, req, size, iter);
+		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
-	return __fuse_notify_read_data_slowpath(conn, req, size, iter);
+	return __fuse_notify_read_data_slowpath(conn, req, &read_data, iter);
 }
 
 
