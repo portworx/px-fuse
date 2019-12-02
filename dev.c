@@ -646,7 +646,6 @@ static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
 		struct fuse_req *req,
 		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
 {
-	size_t len;
 	struct iovec iov[IOV_BUF_SIZE];
 	struct iov_iter data_iter;
 #ifdef HAVE_BVEC_ITER
@@ -668,8 +667,8 @@ static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
+		ssize_t len = BVEC(bvec).bv_len;
 		copied = 0;
-		len = BVEC(bvec).bv_len;
 		if (skipped < read_data_p->offset) {
 			if (read_data_p->offset - skipped >= len) {
 				skipped += len;
@@ -712,7 +711,6 @@ static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
 		struct fuse_req *req,
 		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
 {
-	size_t len;
 	struct iovec iov[IOV_BUF_SIZE];
 	struct iov_iter data_iter;
 #ifdef HAVE_BVEC_ITER
@@ -735,8 +733,8 @@ static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
 				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
 
 	bio_for_each_segment(bvec, req->bio, bvec_iter) {
+		ssize_t len = BVEC(bvec).bv_len;
 		copied = 0;
-		len = BVEC(bvec).bv_len;
 		if (skipped < read_data_p->offset) {
 			if (read_data_p->offset - skipped >= len) {
 				skipped += len;
