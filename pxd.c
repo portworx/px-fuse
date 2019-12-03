@@ -759,9 +759,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
 
 		printk(KERN_INFO"Device %llu enabling fastpath %d (paths: %lu)\n",
 				add->dev_id, add->enable_fp, add->paths.size);
-		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
-		if (err)
-			goto out_id;
 	}
 
 	err = pxd_init_disk(pxd_dev, add);
@@ -964,7 +961,6 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	}
 
 	/* setup whether access is block or file access */
-	/* TODO temporary suspend/resume not done yet */
 	if (fp->enable) {
 		enableFastPath(pxd_dev, false);
 	} else {
