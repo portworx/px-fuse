@@ -239,9 +239,6 @@ struct fuse_req {
 	    fuse_conn */
 	struct list_head list;
 
-	/** hash table entry */
-	struct hlist_node hash_entry;
-
 	/** The request input */
 	struct fuse_in in;
 
@@ -270,6 +267,18 @@ struct fuse_req {
 	struct request_queue *queue;
 };
 
+#define FUSE_MAX_PER_CPU_IDS 256
+
+struct ____cacheline_aligned fuse_per_cpu_ids {
+	/** number of free ids in stack */
+	u32 num_free_ids;
+
+	/** followed by list of free ids */
+	u64 free_ids[FUSE_MAX_PER_CPU_IDS];
+
+	u64 pad[7];
+};
+
 /**
  * A Fuse connection.
  *
@@ -290,8 +299,17 @@ struct fuse_conn {
 	/** The list of requests being processed */
 	struct list_head processing;
 
-	/** hash table of pending requests */
-	struct hlist_head *hash;
+	/** maps request ids to requests */
+	struct fuse_req **request_map;
+
+	/** stack of free ids */
+	u64 *free_ids;
+
+	/** number of free ids in stack */
+	u32 num_free_ids;
+
+	/** per cpu id allocators */
+	struct fuse_per_cpu_ids __percpu *per_cpu_ids;
 
 	/** The next unique request id */
 	u64 reqctr;
@@ -457,11 +475,6 @@ void fuse_request_free(struct fuse_req *req);
  */
 struct fuse_req *fuse_get_req(struct fuse_conn *fc);
 struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc);
-
-/**
- * Send a request to head of pending queue.
- */
-void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req);
 
 /**
  * Send a request in the background

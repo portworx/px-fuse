@@ -36,7 +36,7 @@
 /** Maximum number of outstanding background requests */
 #define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
 
-#define FUSE_HASH_SIZE FUSE_DEFAULT_MAX_BACKGROUND
+#define FUSE_MAX_REQUEST_IDS (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
 static struct kmem_cache *fuse_req_cachep;
 
@@ -53,7 +53,6 @@ void fuse_request_init(struct fuse_req *req)
 {
 	memset(req, 0, sizeof(*req));
 	INIT_LIST_HEAD(&req->list);
-	INIT_HLIST_NODE(&req->hash_entry);
 }
 
 static struct fuse_req *__fuse_request_alloc(gfp_t flags)
@@ -135,41 +134,76 @@ static unsigned len_args(unsigned numargs, struct fuse_arg *args)
 
 static u64 fuse_get_unique(struct fuse_conn *fc)
 {
-	fc->reqctr++;
-	/* zero is special */
-	if (unlikely(fc->reqctr == 0))
-		fc->reqctr = 1;
+	struct fuse_per_cpu_ids *my_ids;
+	u64 uid;
+	int num_alloc;
 
-	return fc->reqctr;
+	int cpu = get_cpu();
+
+	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
+
+	if (unlikely(my_ids->num_free_ids == 0)) {
+		spin_lock(&fc->lock);
+		BUG_ON(fc->num_free_ids == 0);
+		num_alloc = min(fc->num_free_ids, (u32)FUSE_MAX_PER_CPU_IDS / 2);
+		memcpy(my_ids->free_ids, &fc->free_ids[fc->num_free_ids - num_alloc],
+			num_alloc * sizeof(u64));
+		fc->num_free_ids -= num_alloc;
+		spin_unlock(&fc->lock);
+
+		my_ids->num_free_ids = num_alloc;
+	}
+
+	uid = my_ids->free_ids[--my_ids->num_free_ids];
+
+	put_cpu();
+
+	uid += FUSE_MAX_REQUEST_IDS;
+
+	/* zero is special */
+	if (uid == 0)
+		uid += FUSE_MAX_REQUEST_IDS;
+
+	return uid;
+}
+
+static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
+{
+	struct fuse_per_cpu_ids *my_ids;
+	int num_free;
+	int cpu = get_cpu();
+
+	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
+
+	if (unlikely(my_ids->num_free_ids == FUSE_MAX_PER_CPU_IDS)) {
+		num_free = FUSE_MAX_PER_CPU_IDS / 2;
+		spin_lock(&fc->lock);
+		BUG_ON(fc->num_free_ids + num_free > FUSE_MAX_REQUEST_IDS);
+		memcpy(&fc->free_ids[fc->num_free_ids],
+			&my_ids->free_ids[my_ids->num_free_ids - num_free],
+			num_free * sizeof(u64));
+		fc->num_free_ids += num_free;
+		spin_unlock(&fc->lock);
+
+		my_ids->num_free_ids -= num_free;
+	}
+
+	my_ids->free_ids[my_ids->num_free_ids++] = uid;
+
+	fc->request_map[uid & (FUSE_MAX_REQUEST_IDS - 1)] = NULL;
+
+	put_cpu();
 }
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
 	list_add_tail(&req->list, &fc->pending);
-	if (hlist_unhashed(&req->hash_entry))
-		hlist_add_head(&req->hash_entry,
-			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
 {
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
-}
-
-void fuse_request_send_oob(struct fuse_conn *fc, struct fuse_req *req)
-{
-	req->in.h.len = sizeof(struct fuse_in_header) +
-		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
-	spin_lock(&fc->lock);
-	req->in.h.unique = fuse_get_unique(fc);
-	list_add(&req->list, &fc->pending);
-	if (hlist_unhashed(&req->hash_entry))
-		hlist_add_head(&req->hash_entry,
-			       &fc->hash[req->in.h.unique % FUSE_HASH_SIZE]);
-	spin_unlock(&fc->lock);
-
-	fuse_conn_wakeup(fc);
 }
 
 /*
@@ -186,15 +220,17 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
                         bool lock)
 __releases(fc->lock)
 {
+	u64 uid;
+
 	if (likely(lock)) {
 		spin_lock(&fc->lock);
 	}
-	if (!hlist_unhashed(&req->hash_entry))
-		hlist_del_init(&req->hash_entry);
 	list_del(&req->list);
 	spin_unlock(&fc->lock);
+	uid = req->in.h.unique;
 	if (req->end)
 		req->end(fc, req);
+	fuse_put_unique(fc, uid);
 #ifndef __PX_BLKMQ__
 	fuse_request_free(req);
 #endif
@@ -203,7 +239,6 @@ __releases(fc->lock)
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 					    struct fuse_req *req)
 {
-	req->in.h.unique = fuse_get_unique(fc);
 	queue_request(fc, req);
 }
 
@@ -211,7 +246,12 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
+
+	req->in.h.unique = fuse_get_unique(fc);
+	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
+
 	spin_lock(&fc->lock);
+
 	if (fc->connected || fc->allow_disconnected) {
 		if (unlikely(!fc->connected)) {
 			printk(KERN_INFO "%s: Request on disconnected FC", __func__);
@@ -480,14 +520,17 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 /* Look up request on processing list by unique ID */
 static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 {
-	struct fuse_req *req;
-
-	hlist_for_each_entry(req, &fc->hash[unique % FUSE_HASH_SIZE],
-			     hash_entry)
-		if (req->in.h.unique == unique)
-			return req;
-
-	return NULL;
+	u32 index = unique & (FUSE_MAX_REQUEST_IDS - 1);
+	struct fuse_req *req = fc->request_map[index];
+	if (req == NULL) {
+		printk(KERN_ERR "no request unique %llx", unique);
+		return req;
+	}
+	if (req->in.h.unique != unique) {
+		printk(KERN_ERR "id mismatch got %llx need %llx", req->in.h.unique, unique);
+		return NULL;
+	}
+	return req;
 }
 
 #define IOV_BUF_SIZE 64
@@ -537,15 +580,12 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EFAULT;
 	}
 
-	spin_lock(&conn->lock);
 	req = request_find(conn, read_data.unique);
 	if (!req) {
-		spin_unlock(&conn->lock);
 		printk(KERN_ERR "%s: request %lld not found\n", __func__,
 		       read_data.unique);
 		return -ENOENT;
 	}
-	spin_unlock(&conn->lock);
 
 	if (req->in.h.opcode != PXD_WRITE &&
 	    req->in.h.opcode != PXD_WRITE_SAME) {
@@ -686,16 +726,20 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return -EINVAL;
 
 	err = -ENOENT;
+
+	req = request_find(fc, oh.unique);
+	if (!req) {
+		printk(KERN_ERR "%s: request %lld not found\n", __func__, oh.unique);
+		return -ENOENT;
+	}
+
 	spin_lock(&fc->lock);
 	if (!fc->connected)
 		goto err_unlock;
 
-	req = request_find(fc, oh.unique);
-	if (!req)
-		goto err_unlock;
-
 	list_del_init(&req->list);
 	spin_unlock(&fc->lock);
+
 	req->out.h = oh;
 
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
@@ -805,9 +849,20 @@ __acquires(fc->lock)
 	end_requests(fc, &fc->processing);
 }
 
+static void fuse_conn_free_allocs(struct fuse_conn *fc)
+{
+	if (fc->per_cpu_ids)
+		free_percpu(fc->per_cpu_ids);
+	if (fc->free_ids)
+		kfree(fc->free_ids);
+	if (fc->request_map)
+		kfree(fc->request_map);
+}
+
 int fuse_conn_init(struct fuse_conn *fc)
 {
-	int i;
+	int i, rc;
+	int cpu;
 
 	memset(fc, 0, sizeof(*fc));
 	spin_lock_init(&fc->lock);
@@ -816,22 +871,49 @@ int fuse_conn_init(struct fuse_conn *fc)
 	INIT_LIST_HEAD(&fc->pending);
 	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->entry);
-	fc->hash = kmalloc(FUSE_HASH_SIZE * sizeof(*fc->hash), GFP_KERNEL);
-	if (!fc->hash) {
-		printk(KERN_ERR "failed to allocate hash");
-		return -ENOMEM;
+	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
+		GFP_KERNEL);
+
+	rc = -ENOMEM;
+	if (!fc->request_map) {
+		printk(KERN_ERR "failed to allocate request map");
+		goto err_out;
 	}
-	for (i = 0; i < FUSE_HASH_SIZE; ++i)
-		INIT_HLIST_HEAD(&fc->hash[i]);
+	memset(fc->request_map, 0,
+		FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*));
+
+	fc->free_ids = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(u64), GFP_KERNEL);
+	if (!fc->free_ids) {
+		printk(KERN_ERR "failed to allocate free requests");
+		goto err_out;
+	}
+	for (i = 0; i < FUSE_MAX_REQUEST_IDS; ++i) {
+		fc->free_ids[i] = FUSE_MAX_REQUEST_IDS - i - 1;
+	}
+	fc->num_free_ids = FUSE_MAX_REQUEST_IDS;
+
+	fc->per_cpu_ids = alloc_percpu(struct fuse_per_cpu_ids);
+	if (!fc->per_cpu_ids) {
+		printk(KERN_ERR "failed to allocate per cpu ids");
+		goto err_out;
+	}
+
+	for_each_possible_cpu(cpu) {
+		struct fuse_per_cpu_ids *my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
+		memset(my_ids, 0, sizeof(*my_ids));
+	}
+
 	fc->reqctr = 0;
 	return 0;
+err_out:
+	fuse_conn_free_allocs(fc);
+	return rc;
 }
 
 void fuse_conn_put(struct fuse_conn *fc)
 {
 	if (atomic_dec_and_test(&fc->count)) {
-		if (fc->hash)
-			kfree(fc->hash);
+		fuse_conn_free_allocs(fc);
 		fc->release(fc);
 	}
 }
