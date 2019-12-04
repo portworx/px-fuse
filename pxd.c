@@ -296,7 +296,6 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->in.numargs = 1;
 	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
 	req->in.args[0].value = &req->misc.pxd_rdwr_in;
-	req->bio_pages = true;
 	req->in.h.pid = current->pid;
 	req->misc.pxd_rdwr_in.minor = minor;
 	req->misc.pxd_rdwr_in.offset = off;
@@ -316,7 +315,6 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_READ;
-	req->out.numargs = 1;
 	req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
