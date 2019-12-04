@@ -18,7 +18,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 8				/**< driver version */
+#define PXD_VERSION 9				/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -26,6 +26,7 @@
 #define PXD_IOCTL_MAGIC			(('P' << 8) | 'X')
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
 #define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
+#define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -189,6 +190,13 @@ static inline uint64_t pxd_rd_blocks(const struct rdwr_in *rdwr)
 struct pxd_ioctl_version_args {
 	int piv_len;
 	char piv_data[64];
+};
+
+struct pxd_ioctl_init_args {
+	struct pxd_init_in hdr;
+
+	/** list of devices */
+	struct pxd_dev_id devices[PXD_MAX_DEVICES];
 };
 
 #endif /* PXD_H_ */

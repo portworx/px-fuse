@@ -330,9 +330,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
 
-	if (unlikely(fc->pend_open))
-		return pxd_read_init(fc, iter);
-
 	INIT_LIST_HEAD(&tmp);
 
 	spin_lock(&fc->lock);
@@ -684,9 +681,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), iter);
 		return err ? err : nbytes;
 	}
-
-	if (unlikely(oh.unique == (u64)-1))
-		return pxd_process_init_reply(fc, &oh);
 
 	if (oh.error <= -1000 || oh.error > 0)
 		return -EINVAL;

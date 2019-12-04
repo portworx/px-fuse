@@ -131,8 +131,18 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	put_device(&pxd_dev->dev);
 }
 
-static long pxd_control_ioctl(
-	struct file *file, unsigned int cmd, unsigned long arg)
+static long pxd_ioctl_init(struct file *file, void __user *argp)
+{
+	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
+	struct iov_iter iter;
+	struct iovec iov = {argp, sizeof(struct pxd_ioctl_init_args)};
+
+	iov_iter_init(&iter, WRITE, &iov, 1, sizeof(struct pxd_ioctl_init_args));
+
+	return pxd_read_init(&ctx->fc, &iter);
+}
+
+static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
 	struct pxd_context *ctx = NULL;
@@ -171,6 +181,9 @@ static long pxd_control_ioctl(
 		}
 		printk(KERN_INFO "pxd driver at version: %s\n", gitversion);
 		status = 0;
+		break;
+	case PXD_IOC_INIT:
+		status = pxd_ioctl_init(file, argp);
 		break;
 	default:
 		break;
@@ -840,27 +853,12 @@ out:
 
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 {
-	size_t copied;
+	size_t copied = 0;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev;
-
-	struct fuse_in in;
 	struct pxd_init_in pxd_init;
 
-	memset(&in, 0, sizeof(in));
-
 	spin_lock(&fc->lock);
-
-	in.h.opcode = PXD_INIT;
-	in.h.len = sizeof(in.h) + sizeof(struct pxd_init_in) +
-		sizeof(struct pxd_dev_id) * ctx->num_devices;
-	in.h.unique = (u64)-1;
-
-	copied = sizeof(in.h);
-	if (copy_to_iter(&in.h, copied, iter) != copied) {
-		printk(KERN_ERR "%s: copy header error\n", __func__);
-		goto copy_error;
-	}
 
 	pxd_init.num_devices = ctx->num_devices;
 	pxd_init.version = PXD_VERSION;
@@ -885,8 +883,10 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 
 	spin_unlock(&fc->lock);
 
-	printk(KERN_INFO "%s: ctx %d %ld devs total %ld", __func__, ctx->id,
-		ctx->num_devices, copied);
+	printk(KERN_INFO "%s: pxd-control-%d init OK %d devs version %d\n", __func__,
+		ctx->id, pxd_init.num_devices, pxd_init.version);
+
+	fc->pend_open = 0;
 
 	return copied;
 
@@ -1050,20 +1050,6 @@ static void pxd_sysfs_exit(void)
 	device_unregister(&pxd_root_dev);
 }
 
-ssize_t pxd_process_init_reply(struct fuse_conn *fc, struct fuse_out_header *hdr)
-{
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-
-	printk(KERN_INFO "%s: pxd-control-%d(%lld) init status %d\n",
-		__func__, ctx->id, ctx->open_seq, hdr->error);
-
-	if (hdr->error != 0)
-		fc->connected = 0;
-	fc->pend_open = 0;
-
-	return sizeof(*hdr);
-}
-
 static int pxd_control_open(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;
@@ -1170,6 +1156,7 @@ static void pxd_timeout(unsigned long args)
 int pxd_context_init(struct pxd_context *ctx, int i)
 {
 	int err;
+
 	spin_lock_init(&ctx->lock);
 	ctx->id = i;
 	ctx->open_seq = 0;
@@ -1177,14 +1164,14 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops.owner = THIS_MODULE;
 	ctx->fops.open = pxd_control_open;
 	ctx->fops.release = pxd_control_release;
+	ctx->fops.unlocked_ioctl = pxd_control_ioctl;
 
 	if (ctx->id < pxd_num_contexts_exported) {
 		err = fuse_conn_init(&ctx->fc);
 		if (err)
 			return err;
-	} else {
-		ctx->fops.unlocked_ioctl = pxd_control_ioctl;
 	}
+
 	ctx->fc.release = pxd_fuse_conn_release;
 	ctx->fc.allow_disconnected = 1;
 	INIT_LIST_HEAD(&ctx->list);
