@@ -32,6 +32,11 @@
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
+// use by fastpath for congestion control
+#define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
+// NOTE: nvme devices can go upto 1023 queue depth
+#define MAX_CONGESTION_THRESHOLD (1024)
+
 #define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
 #define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
 

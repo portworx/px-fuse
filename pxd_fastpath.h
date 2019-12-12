@@ -71,8 +71,6 @@ struct pxd_fastpath_extension {
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
 	struct thread_context *tc;
-#define DEFAULT_CONGESTION_THRESHOLD (256)
-#define MAX_CONGESTION_THRESHOLD (1024)
 	unsigned int qdepth;
 	bool congested;
 	unsigned int nr_congestion_on;
