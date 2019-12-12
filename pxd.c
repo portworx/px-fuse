@@ -318,7 +318,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
 			uint64_t reqctr)
 {
@@ -343,13 +343,15 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
 			req->in.h.unique, op, size, off, minor, flags);
-		BUG();
+		return -1;
 	}
+
+	return 0;
 }
 
 #else
 
-static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
 {
 	trace_pxd_request(reqctr, req->in.h.unique, size, off, minor, flags);
@@ -374,8 +376,10 @@ static void pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
 			req->in.h.unique, flags, size, off, minor, flags);
-		BUG();
+		return -1;
 	}
+
+	return 0;
 }
 #endif
 
@@ -425,13 +429,17 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc));
+	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc))) {
 #else
-	pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
+	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		    pxd_dev->minor, bio->bi_rw, false,
-		    REQCTR(&pxd_dev->ctx->fc));
+		    REQCTR(&pxd_dev->ctx->fc))) {
 #endif
+		fuse_request_free(req);
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
 
 	req->bio = bio;
 	req->queue = q;
@@ -468,20 +476,25 @@ static void pxd_rq_fn(struct request_queue *q)
 
 		req = pxd_fuse_req(pxd_dev, 0);
 		if (IS_ERR(req)) {
-  			spin_lock_irq(&pxd_dev->qlock);
+			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
 		}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
-			    REQCTR(&pxd_dev->ctx->fc));
+			    REQCTR(&pxd_dev->ctx->fc))) {
 #else
-		pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, rq->cmd_flags, true,
-			    REQCTR(&pxd_dev->ctx->fc));
+			    REQCTR(&pxd_dev->ctx->fc))) {
 #endif
+			fuse_request_free(req);
+			spin_lock_irq(&pxd_dev->qlock);
+			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+			continue;
+		}
 
 		req->rq = rq;
 		req->queue = q;
@@ -516,9 +529,12 @@ static void pxd_queue_workfn(struct work_struct *work)
 		goto err;
 	}
 
-	pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
-		REQCTR(&pxd_dev->ctx->fc));
+		REQCTR(&pxd_dev->ctx->fc))) {
+		error = BLK_STS_IOERR;
+		goto err;
+	}
 
 	req->num_pages = 0;
 	req->misc.pxd_rdwr_in.chksum = 0;
