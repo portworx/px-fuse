@@ -253,7 +253,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev, int nr_pages)
 			 __func__, nr_pages, status);
 	}
 
-	if (req) req->fastpath = pxd_dev->fastpath;
+	req->fastpath = pxd_dev->fastpath;
 	return req;
 }
 
