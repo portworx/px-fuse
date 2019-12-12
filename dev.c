@@ -354,12 +354,32 @@ ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 
 extern uint32_t pxd_detect_zero_writes;
 
+static bool __check_zero_page_write(char *base, size_t len) {
+	uint8_t wsize = sizeof(uint64_t);
+	char *p;
+	size_t i;
+	uint64_t *q;
+
+	p = base;
+	q = (uint64_t *)p;
+	for (i = 0; i < (len / wsize); i++) {
+		if (q[i]) {
+			return false;
+		}
+	}
+	for (i = len - (len % wsize); i < len; i++) {
+		if (p[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /* Check if the request is writing zeroes and if so, convert it as a discard
  * request.
  */
 static void __fuse_convert_zero_writes_slowpath(struct fuse_req *req)
 {
-	uint8_t wsize = sizeof(uint64_t);
 	struct req_iterator breq_iter;
 
 #ifdef HAVE_BVEC_ITER
@@ -368,25 +388,15 @@ static void __fuse_convert_zero_writes_slowpath(struct fuse_req *req)
 	struct bio_vec *bvec = NULL;
 #endif
 	char *kaddr, *p;
-	size_t i, len;
-	uint64_t *q;
+	size_t len;
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		kaddr = kmap_atomic(BVEC(bvec).bv_page);
 		p = kaddr + BVEC(bvec).bv_offset;
-		q = (uint64_t *)p;
 		len = BVEC(bvec).bv_len;
-		for (i = 0; i < (len / wsize); i++) {
-			if (q[i]) {
-				kunmap_atomic(kaddr);
-				return;
-			}
-		}
-		for (i = len - (len % wsize); i < len; i++) {
-			if (p[i]) {
-				kunmap_atomic(kaddr);
-				return;
-			}
+		if (!__check_zero_page_write(p, len)) {
+			kunmap_atomic(kaddr);
+			return;
 		}
 		kunmap_atomic(kaddr);
 	}
@@ -395,7 +405,6 @@ static void __fuse_convert_zero_writes_slowpath(struct fuse_req *req)
 
 static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 {
-	uint8_t wsize = sizeof(uint64_t);
 #if defined(HAVE_BVEC_ITER)
 	struct bvec_iter bvec_iter;
 	struct bio_vec bvec;
@@ -404,25 +413,15 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 	struct bio_vec *bvec = NULL;
 #endif
 	char *kaddr, *p;
-	size_t i, len;
-	uint64_t *q;
+	size_t len;
 
 	bio_for_each_segment(bvec, req->bio, bvec_iter) {
 		kaddr = kmap_atomic(BVEC(bvec).bv_page);
 		p = kaddr + BVEC(bvec).bv_offset;
-		q = (uint64_t *)p;
 		len = BVEC(bvec).bv_len;
-		for (i = 0; i < (len / wsize); i++) {
-			if (q[i]) {
-				kunmap_atomic(kaddr);
-				return;
-			}
-		}
-		for (i = len - (len % wsize); i < len; i++) {
-			if (p[i]) {
-				kunmap_atomic(kaddr);
-				return;
-			}
+		if (!__check_zero_page_write(p, len)) {
+			kunmap_atomic(kaddr);
+			return;
 		}
 		kunmap_atomic(kaddr);
 	}
