@@ -20,27 +20,78 @@ endif
 
 MINKVER=3.10
 FPATH_MINKVER=4.0
+BLKMQ_MINKVER=4.18
 KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
-ifeq ($(shell expr $(KERNELVER) \>= $(MINKVER)),0)
+
+majorfn=$(shell echo "$1" | /bin/sed 's/\(.*\)\.\(.*\)/\1/g')
+minorfn=$(shell echo "$1" | /bin/sed 's/\(.*\)\.\(.*\)/\2/g')
+
+verlater=$(shell test "$1" -gt "$2"; echo $$?)
+versameorlater=$(shell test "$1" -ge "$2"; echo $$?)
+versame=$(shell test "$1" -eq "$2"; echo $$?)
+
+minver_major=$(call majorfn, ${MINKVER})
+minver_minor=$(call minorfn, ${MINKVER})
+
+blkmq_major=$(call majorfn, ${BLKMQ_MINKVER})
+blkmq_minor=$(call minorfn, ${BLKMQ_MINKVER})
+
+fp_major=$(call majorfn, ${FPATH_MINKVER})
+fp_minor=$(call minorfn, ${FPATH_MINKVER})
+
+kmajor=$(call majorfn, ${KERNELVER})
+kminor=$(call minorfn, ${KERNELVER})
+
+## min kernel version checks
+ifeq ($(call verlater,${minver_major},${kmajor}),0)
+$(error Kernel version error: Build kernel version must be >= $(MINKVER).)
+else
+ifeq ($(call versame,${minver_major},${kmajor}),0)
+ifeq ($(call verlater,${minver_minor},${kminor}),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif
+endif
+endif
 
-ifeq ($(shell expr $(KERNELVER) \>= $(FPATH_MINKVER)),1)
-PXDEFINES:=$(PXDEFINES) -D__PX_FASTPATH__
-px-objs += pxd_fastpath.o
-$(warning kernel fast path enabled, version $(KVERSION).)
+## blkmq checks
+ifeq ($(call verlater,${kmajor},${blkmq_major}),0)
+PXDEFINES += -D__PX_BLKMQ__
+$(warning Kernel version ${KERNELVER} supports blkmq driver model.")
 else
-PXDEFINES += -DUSE_REQUESTQ_MODEL
-px-objs += pxd_fastpath_stub.o
+ifeq ($(call versame,${kmajor},${blkmq_major}),0)
+ifeq ($(call versameorlater,${kminor},${blkmq_minor}),0)
+PXDEFINES += -D__PX_BLKMQ__
+$(warning Kernel version ${KERNELVER} supports blkmq driver model.")
+endif
+endif
+endif
 
-$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 # EL8 Specific kernel checks
 ifeq ($(shell test "$(KVERSION)" = "4.18.0-80.el8.x86_64"  -o  "$(KVERSION)" = "4.18.0-80.1.2.el8.x86_64" -o "$(KVERSION)" = "4.18.0.el8.x86_64"; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__
-$(warning enabling slow path with BLKMQ support)
 endif
 
+## fastpath specific checks
+ifeq ($(call verlater,${kmajor},${fp_major}),0)
+PXDEFINES += -D__PX_FASTPATH__
+px-objs += pxd_fastpath.o
+$(warning kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+else
+ifeq ($(call versame,${kmajor},${fp_major}),0)
+ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
+PXDEFINES += -D__PX_FASTPATH__
+px-objs += pxd_fastpath.o
+$(warning kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+else
+px-objs += pxd_fastpath_stub.o
+$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 endif
+else
+px-objs += pxd_fastpath_stub.o
+$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+endif
+endif
+
 
 ifdef KERNELOTHER
 KERNELOTHEROPT=O=$(KERNELOTHER)
