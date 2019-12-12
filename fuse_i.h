@@ -275,8 +275,6 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 
 	/** followed by list of free ids */
 	u64 free_ids[FUSE_MAX_PER_CPU_IDS];
-
-	u64 pad[7];
 };
 
 /**
