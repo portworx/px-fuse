@@ -1118,6 +1118,7 @@ static ssize_t pxd_active_show(struct device *dev,
 	char *cp = buf;
 	int ncount;
 	int available = PAGE_SIZE - 1;
+	int i;
 
 	ncount = snprintf(cp, available, "nactive: %u/%u, [write: %u, flush: %u(nop: %u), fua: %u, discard: %u, preflush: %u], switched: %u, slowpath: %u\n",
                 atomic_read(&pxd_dev->fp.ncount), atomic_read(&pxd_dev->fp.ncomplete),
@@ -1129,11 +1130,11 @@ static ssize_t pxd_active_show(struct device *dev,
 
 	cp += ncount;
 	available -= ncount;
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
-		tmp=snprintf(cp, available, "%s\n", pxd_dev->fp.device_path[i]);
-		cp+=tmp;
-		available-=tmp;
-		ncount+=tmp;
+	for (i = 0; i < pxd_dev->fp.nfd; i++) {
+		size_t tmp = snprintf(cp, available, "%s\n", pxd_dev->fp.device_path[i]);
+		cp += tmp;
+		available -= tmp;
+		ncount += tmp;
 	}
 
 	return ncount;
