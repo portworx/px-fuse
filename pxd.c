@@ -101,7 +101,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	int err = 0;
 
 	spin_lock(&fc->lock);
-	if (!fc->connected) {
+	if (!fc->connected && !fc->allow_disconnected) {
 		err = -ENXIO;
 	} else {
 		spin_lock(&pxd_dev->lock);
