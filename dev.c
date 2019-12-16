@@ -414,8 +414,8 @@ retry:
 
 		/* Check if a write request is writing zeroes */
 		if (pxd_detect_zero_writes && (req->in.h.opcode == PXD_WRITE) &&
-			req->misc.pxd_rdwr_in.size &&
-			!(req->misc.pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
+		    req->pxd_rdwr_in.size &&
+		    !(req->pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
 			fuse_convert_zero_writes(req);
 		}
 		next = entry->next;
@@ -595,9 +595,9 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return ret;
 
 	/* advance the iterator if data is unaligned */
-	if (unlikely(req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK))
+	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
 		iov_iter_advance(&data_iter,
-				 req->misc.pxd_rdwr_in.offset & PXD_LBS_MASK);
+				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		copied = 0;
