@@ -1086,8 +1086,8 @@ static ssize_t pxd_active_show(struct device *dev,
 
 	cp += ncount;
 	available -= ncount;
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
-		int tmp = snprintf(cp, available, "%s\n", pxd_dev->fp.device_path[i]);
+	for (i = 0; i < pxd_dev->fp.nfd; i++) {
+		size_t tmp = snprintf(cp, available, "%s\n", pxd_dev->fp.device_path[i]);
 		cp += tmp;
 		available -= tmp;
 		ncount += tmp;
