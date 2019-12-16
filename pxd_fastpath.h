@@ -84,7 +84,6 @@ struct pxd_fastpath_extension {
 };
 
 // helpers
-struct file* getFile(struct pxd_device *pxd_dev, int index);
 
 // global initialization during module init for fastpath
 int fastpath_init(void);
