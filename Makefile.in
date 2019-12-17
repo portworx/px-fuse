@@ -28,13 +28,80 @@ ifeq ($(shell test -d $(KERNELPATH); echo $$?),1)
 $(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif
 
-ifeq ($(shell test -f "/usr/bin/bc"; echo $$?),0)
 MINKVER=3.10
-KERNELVER=$(shell echo $(CHK_KVER) | /bin/sed 's/-.*//' | /bin/sed 's/\(.*\..*\)\..*/\1/')
-ifeq ($(shell echo "$(KERNELVER)>=$(MINKVER)" | /usr/bin/bc),0)
+FPATH_MINKVER=4.0
+BLKMQ_MINKVER=4.18
+KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
+
+majorfn=$(shell echo "$1" | /bin/sed 's/\(.*\)\.\(.*\)/\1/g')
+minorfn=$(shell echo "$1" | /bin/sed 's/\(.*\)\.\(.*\)/\2/g')
+
+verlater=$(shell test "$1" -gt "$2"; echo $$?)
+versameorlater=$(shell test "$1" -ge "$2"; echo $$?)
+versame=$(shell test "$1" -eq "$2"; echo $$?)
+
+minver_major=$(call majorfn, ${MINKVER})
+minver_minor=$(call minorfn, ${MINKVER})
+
+blkmq_major=$(call majorfn, ${BLKMQ_MINKVER})
+blkmq_minor=$(call minorfn, ${BLKMQ_MINKVER})
+
+fp_major=$(call majorfn, ${FPATH_MINKVER})
+fp_minor=$(call minorfn, ${FPATH_MINKVER})
+
+kmajor=$(call majorfn, ${KERNELVER})
+kminor=$(call minorfn, ${KERNELVER})
+
+## min kernel version checks
+ifeq ($(call verlater,${minver_major},${kmajor}),0)
+$(error Kernel version error: Build kernel version must be >= $(MINKVER).)
+else
+ifeq ($(call versame,${minver_major},${kmajor}),0)
+ifeq ($(call verlater,${minver_minor},${kminor}),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
 endif
 endif
+endif
+
+## blkmq checks
+ifeq ($(call verlater,${kmajor},${blkmq_major}),0)
+PXDEFINES += -D__PX_BLKMQ__
+$(warning Kernel version ${KERNELVER} supports blkmq driver model.")
+else
+ifeq ($(call versame,${kmajor},${blkmq_major}),0)
+ifeq ($(call versameorlater,${kminor},${blkmq_minor}),0)
+PXDEFINES += -D__PX_BLKMQ__
+$(warning Kernel version ${KERNELVER} supports blkmq driver model.")
+endif
+endif
+endif
+
+# EL8 Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
+PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
+endif
+
+## fastpath specific checks
+ifeq ($(call verlater,${kmajor},${fp_major}),0)
+PXDEFINES += -D__PX_FASTPATH__
+px-objs += pxd_fastpath.o
+$(warning kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+else
+ifeq ($(call versame,${kmajor},${fp_major}),0)
+ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
+PXDEFINES += -D__PX_FASTPATH__
+px-objs += pxd_fastpath.o
+$(warning kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+else
+px-objs += pxd_fastpath_stub.o
+$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+endif
+else
+px-objs += pxd_fastpath_stub.o
+$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+endif
+endif
+
 
 ifdef KERNELOTHER
 KERNELOTHEROPT=O=$(KERNELOTHER)
@@ -44,20 +111,10 @@ MAJOR=$(shell echo $(CHK_KVER) | awk -F. '{print $$1}')
 MINOR=$(shell echo $(CHK_KVER) | awk -F. '{print $$2}')
 PATCH=$(shell echo $(CHK_KVER) | awk -F. '{print $$3}' | awk -F- '{print $$1}')
 export REVISION=$(shell echo $(CHK_KVER) | awk -F. '{print $$3}' |  awk -F- '{print $$2}')
+
 export VERSION=$(MAJOR).$(MINOR).$(PATCH)
 export KERNELPATH
 export OUTPATH
-
-# EL8 Specific kernel checks
-ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
-PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
-else
-# 5.x kernel checks
-ifeq ($(shell test "$(MAJOR)" = "5"; echo $$?),0)
-PXDEFINES += -D__PX_BLKMQ__
-endif
-endif
-
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
 .PHONY: rpm
@@ -87,7 +144,7 @@ docker-build: docker-build-dev
 	portworx/px-fuse:dev make
 
 px_version.c:
-	echo "const char *gitversion = \"$(shell git rev-parse HEAD)\";" > $@
+	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD):$(shell git rev-parse HEAD)\";" > $@
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile

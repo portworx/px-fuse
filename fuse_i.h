@@ -239,6 +239,9 @@ struct fuse_req {
 	    fuse_conn */
 	struct list_head list;
 
+	/** Request to use fastpath */
+	unsigned fastpath:1;
+
 	/** The request input */
 	struct fuse_in in;
 
@@ -585,9 +588,11 @@ int fuse_do_setattr(struct inode *inode, struct iattr *attr,
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
+ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path);
+int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
+
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 
 void fuse_request_init(struct fuse_req *req);
 void fuse_req_init_context(struct fuse_req *req);
-
 #endif /* _FS_FUSE_I_H */
