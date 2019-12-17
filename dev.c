@@ -245,16 +245,25 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	req->in.h.unique = fuse_get_unique(fc);
 	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
-	spin_lock(&fc->lock);
+	/*
+	 * Ensures checking the value of allow_disconnected and adding request to
+	 * queue is done atomically.
+	 */
+	rcu_read_lock();
 
 	if (fc->connected || fc->allow_disconnected) {
+		spin_lock(&fc->lock);
 		fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
 
+		rcu_read_unlock();
+
 		fuse_conn_wakeup(fc);
 	} else {
+		rcu_read_unlock();
+
 		req->out.h.error = -ENOTCONN;
-		request_end(fc, req, false);
+		request_end(fc, req, true);
 	}
 }
 
@@ -833,7 +842,7 @@ __acquires(fc->lock)
 	}
 }
 
-static void end_queued_requests(struct fuse_conn *fc)
+void fuse_end_queued_requests(struct fuse_conn *fc)
 __releases(fc->lock)
 __acquires(fc->lock)
 {
@@ -940,7 +949,7 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	spin_lock(&fc->lock);
 	if (fc->connected) {
 		fc->connected = 0;
-		end_queued_requests(fc);
+		fuse_end_queued_requests(fc);
 		wake_up_all(&fc->waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	}
@@ -953,7 +962,7 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	if (fc) {
 		spin_lock(&fc->lock);
 		fc->connected = 0;
-		end_queued_requests(fc);
+		fuse_end_queued_requests(fc);
 		spin_unlock(&fc->lock);
 		fuse_conn_put(fc);
 	}
