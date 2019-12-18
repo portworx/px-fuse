@@ -52,6 +52,7 @@ enum pxd_opcode {
 	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
+	PXD_ADD_EXT,		/**< add device with extended info to kernel */
 	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
 	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
 	PXD_GET_FEATURES,   /**< get features */
@@ -110,10 +111,21 @@ struct pxd_add_out {
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
+};
+
+/**
+ * PXD_ADD_EXT request from user space
+ */
+struct pxd_add_ext_out {
+	uint64_t dev_id;	/**< device global id */
+	size_t size;		/**< block device size in bytes */
+	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
+	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
 	int     enable_fp; /**< enable fast path */
 	struct pxd_update_path_out paths; /**< backing device paths */
 };
+
 
 /**
  * PXD_REMOVE request from user space

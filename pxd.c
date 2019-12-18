@@ -564,7 +564,7 @@ static const struct blk_mq_ops pxd_mq_ops = {
 };
 #endif
 
-static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
+static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
@@ -697,7 +697,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	put_disk(disk);
 }
 
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add)
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = NULL;
