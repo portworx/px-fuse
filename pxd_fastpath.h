@@ -71,6 +71,8 @@ struct pxd_fastpath_extension {
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
 	struct thread_context *tc;
+	unsigned int qdepth;
+	bool congested;
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
@@ -79,7 +81,6 @@ struct pxd_fastpath_extension {
 	wait_queue_head_t  suspend_wait;
 	spinlock_t suspend_lock;
 
-	wait_queue_head_t   congestion_wait;
 	wait_queue_head_t   sync_event;
 	spinlock_t   	sync_lock;
 	atomic_t nsync_active; // [global] currently active?
@@ -94,7 +95,6 @@ struct pxd_fastpath_extension {
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests
-	atomic_t ncongested; // [global] total number of times queue congested
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
@@ -123,5 +123,8 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
 void disableFastPath(struct pxd_device *pxd_dev);
+
+// congestion
+int pxd_device_congested(void *, int);
 
 #endif /* _PXD_FASTPATH_H_ */

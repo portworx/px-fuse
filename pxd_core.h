@@ -2,6 +2,9 @@
 #define _PXD_CORE_H_
 
 #include <linux/miscdevice.h>
+#ifdef __PX_BLKMQ__
+#include <linux/blk-mq.h>
+#endif
 
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
@@ -16,8 +19,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	struct timer_list timer;
-	bool init_sent;
-	uint64_t unique;
+	uint64_t open_seq;
 };
 
 struct pxd_device {
@@ -36,6 +38,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
+	bool fastpath;
 #ifdef __PX_BLKMQ__
         struct blk_mq_tag_set tag_set;
 #endif
