@@ -71,11 +71,6 @@ struct fuse_req *fuse_request_alloc()
 	return __fuse_request_alloc(GFP_NOIO);
 }
 
-struct fuse_req *fuse_request_alloc_nofs()
-{
-	return __fuse_request_alloc(GFP_NOFS);
-}
-
 void fuse_request_free(struct fuse_req *req)
 {
 	kmem_cache_free(fuse_req_cachep, req);
