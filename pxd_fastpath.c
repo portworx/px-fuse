@@ -726,7 +726,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->fp.ncount));
-	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
+	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
 
 	switch (op) {
 	case REQ_OP_READ:
@@ -788,9 +788,9 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	struct bio *bio = &iot->clone;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-	pos = ((loff_t) bio->bi_iter.bi_sector << 9);
+	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
 #else
-	pos = ((loff_t) bio->bi_sector << 9);
+	pos = ((loff_t) bio->bi_sector << SECTOR_SHIFT);
 #endif
 
 	// mark status all good to begin with!
@@ -1093,7 +1093,7 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	pxd_suspend_io(pxd_dev);
 
 	for (i = 0; i < nfd; i++) {
-		filp_close(fp->file[i], NULL);
+		if (fp->file[i] > 0) filp_close(fp->file[i], NULL);
 	}
 	fp->nfd=0;
 
