@@ -550,6 +550,23 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
 	struct pxd_add_out add;
+	struct pxd_add_ext_out add_ext;
+	size_t len = sizeof(add);
+
+	if (copy_from_iter(&add, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	memset(&add_ext, 0, sizeof(add_ext));
+	memcpy(&add_ext, &add, sizeof(add));
+	return pxd_add(conn, &add_ext);
+}
+
+static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter)
+{
+	struct pxd_add_ext_out add;
 	size_t len = sizeof(add);
 
 	if (copy_from_iter(&add, len, iter) != len) {
@@ -558,6 +575,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 	}
 	return pxd_add(conn, &add);
 }
+
 
 /* Look up request on processing list by unique ID */
 static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
@@ -840,6 +858,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_add(fc, size, iter);
 	case PXD_REMOVE:
 		return fuse_notify_remove(fc, size, iter);
+	case PXD_ADD_EXT:
+		return fuse_notify_add_ext(fc, size, iter);
 	case PXD_UPDATE_SIZE:
 		return fuse_notify_update_size(fc, size, iter);
 	case PXD_UPDATE_PATH:
