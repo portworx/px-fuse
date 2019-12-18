@@ -2,6 +2,9 @@
 #define _PXD_CORE_H_
 
 #include <linux/miscdevice.h>
+#ifdef __PX_BLKMQ__
+#include <linux/blk-mq.h>
+#endif
 
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
@@ -16,8 +19,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	struct timer_list timer;
-	bool init_sent;
-	uint64_t unique;
+	uint64_t open_seq;
 };
 
 struct pxd_device {
@@ -36,6 +38,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
+	bool fastpath;
 #ifdef __PX_BLKMQ__
         struct blk_mq_tag_set tag_set;
 #endif
@@ -43,6 +46,9 @@ struct pxd_device {
 
 #define pxd_printk(args...)
 //#define pxd_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
+
+#define pxd_io_printk(args...)
+//#define pxd_io_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
 
 #ifndef SECTOR_SIZE
 #define SECTOR_SIZE 512
@@ -78,6 +84,18 @@ mode_t open_mode(mode_t mode) {
 	if (mode & O_DIRECT) m |= O_DIRECT;
 
 	return m;
+}
+
+static inline
+void decode_mode(mode_t mode, char *out) {
+	if (mode & O_LARGEFILE) *out++ = 'L';
+	if (mode & O_NOATIME) *out++ = 'A';
+	if (mode & O_DIRECT) *out++='D';
+	if (mode & O_RDONLY) *out++='R';
+	if (mode & O_RDWR) *out++ = 'W';
+	if (mode & O_SYNC) *out++ = 'S';
+
+	*out = '\0';
 }
 
 #endif /* _PXD_CORE_H_ */
