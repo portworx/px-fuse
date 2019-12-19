@@ -209,7 +209,7 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 
 	fc->queue.w.requests[write] = req;
 	req->sequence = fc->queue.w.sequence++;
-	__smp_wmb();
+	smp_wmb();
 	fc->queue.w.write = next_index;
 	spin_unlock(&fc->queue.w.lock);
 }
