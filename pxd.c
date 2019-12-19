@@ -1487,6 +1487,27 @@ static void pxd_fuse_conn_release(struct fuse_conn *conn)
 {
 }
 
+static void pxd_abort_context(struct work_struct *work)
+{
+	struct pxd_context *ctx = container_of(work, struct pxd_context, abort_work);
+	struct fuse_conn *fc = &ctx->fc;
+
+	BUG_ON(fc->connected);
+
+	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
+		ctx->name, ctx->id);
+
+	fc->connected = true;
+	fc->allow_disconnected = 0;
+
+	fuse_abort_conn(fc);
+	pxdctx_set_connected(ctx, false);
+
+	fuse_conn_put(fc);
+
+	module_put(THIS_MODULE);
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 static void pxd_timeout(struct timer_list *args)
 #else
@@ -1498,16 +1519,23 @@ static void pxd_timeout(unsigned long args)
 #else
 	struct pxd_context *ctx = (struct pxd_context *)args;
 #endif
-	struct fuse_conn *fc = &ctx->fc;
+	/* Prevent the connection structure to be deleted while work is scheduled. */
+	if (!try_module_get(THIS_MODULE)) {
+		printk(KERN_INFO "PXD_TIMEOUT: (%s:%u) timer triggered while unloading",
+			ctx->name, ctx->id);
+		return;
+	}
 
-	BUG_ON(fc->connected);
+	/*
+	 * Prevent any connection allocated structures to be freed while work is
+	 * scheduled.
+	 */
+	fuse_conn_get(&ctx->fc);
 
-	fc->connected = true;
-	fc->allow_disconnected = 0;
-	pxdctx_set_connected(ctx, false);
-	fuse_abort_conn(fc);
-	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
-		ctx->name, ctx->id);
+	printk(KERN_INFO "PXD_TIMEOUT: (%s:%u) schedule abort work", ctx->name, ctx->id);
+
+	INIT_WORK(&ctx->abort_work, pxd_abort_context);
+	schedule_work(&ctx->abort_work);
 }
 
 int pxd_context_init(struct pxd_context *ctx, int i)
