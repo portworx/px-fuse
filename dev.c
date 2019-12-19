@@ -71,11 +71,6 @@ struct fuse_req *fuse_request_alloc()
 	return __fuse_request_alloc(GFP_NOIO);
 }
 
-struct fuse_req *fuse_request_alloc_nofs()
-{
-	return __fuse_request_alloc(GFP_NOFS);
-}
-
 void fuse_request_free(struct fuse_req *req)
 {
 	kmem_cache_free(fuse_req_cachep, req);
@@ -858,10 +853,10 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_add(fc, size, iter);
 	case PXD_REMOVE:
 		return fuse_notify_remove(fc, size, iter);
-	case PXD_ADD_EXT:
-		return fuse_notify_add_ext(fc, size, iter);
 	case PXD_UPDATE_SIZE:
 		return fuse_notify_update_size(fc, size, iter);
+	case PXD_ADD_EXT:
+		return fuse_notify_add_ext(fc, size, iter);
 	case PXD_UPDATE_PATH:
 		return fuse_notify_update_path(fc, size, iter);
 	case PXD_SET_FASTPATH:

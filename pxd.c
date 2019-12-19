@@ -19,9 +19,6 @@
 
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
-
-static struct workqueue_struct *pxd_wq;
-
 #endif
 
 /** enables time tracing */
@@ -547,8 +544,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
 		REQCTR(&pxd_dev->ctx->fc))) {
-		error = BLK_STS_IOERR;
-		goto err;
+		return BLK_STS_IOERR;
 	}
 
 	req->pxd_rdwr_in.chksum = 0;

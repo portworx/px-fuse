@@ -111,10 +111,21 @@ MAJOR=$(shell echo $(CHK_KVER) | awk -F. '{print $$1}')
 MINOR=$(shell echo $(CHK_KVER) | awk -F. '{print $$2}')
 PATCH=$(shell echo $(CHK_KVER) | awk -F. '{print $$3}' | awk -F- '{print $$1}')
 export REVISION=$(shell echo $(CHK_KVER) | awk -F. '{print $$3}' |  awk -F- '{print $$2}')
-
 export VERSION=$(MAJOR).$(MINOR).$(PATCH)
 export KERNELPATH
 export OUTPATH
+ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
+
+# EL8 Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
+PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
+else
+# 5.x kernel checks
+ifeq ($(shell test "$(MAJOR)" = "5"; echo $$?),0)
+PXDEFINES += -D__PX_BLKMQ__
+endif
+endif
+
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
 .PHONY: rpm
