@@ -77,6 +77,9 @@ struct fuse_req {
 	    fuse_conn */
 	struct list_head list;
 
+	/** Request to use fastpath */
+	unsigned fastpath:1;
+
 	/** The request input */
 	struct fuse_in in;
 
@@ -210,16 +213,20 @@ int fuse_conn_init(struct fuse_conn *fc);
 /**
  * Release reference to fuse_conn
  */
+struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 void fuse_conn_put(struct fuse_conn *fc);
 
 void fuse_restart_requests(struct fuse_conn *fc);
 
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_out *add);
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 
+// fastpath extension
+ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path);
+int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
+
 void fuse_request_init(struct fuse_req *req);
 void fuse_req_init_context(struct fuse_req *req);
-
 #endif /* _FS_FUSE_I_H */
