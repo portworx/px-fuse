@@ -213,6 +213,7 @@ int fuse_conn_init(struct fuse_conn *fc);
 /**
  * Release reference to fuse_conn
  */
+struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 void fuse_conn_put(struct fuse_conn *fc);
 
 void fuse_restart_requests(struct fuse_conn *fc);

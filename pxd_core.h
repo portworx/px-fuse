@@ -19,6 +19,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct list_head pending_requests;
 	struct timer_list timer;
+	struct work_struct abort_work;
 	uint64_t open_seq;
 };
 
