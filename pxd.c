@@ -738,14 +738,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, add->open_mode, add->enable_fp, add->paths.size);
 
-	if (pxd_dev->fastpath) {
-		err = pxd_fastpath_init(pxd_dev);
-		if (err)
-			goto out_id;
-
-		printk(KERN_INFO"Device %llu enabling fastpath %d (paths: %lu)\n",
-				add->dev_id, add->enable_fp, add->paths.size);
-	}
+	// initializes fastpath context part of pxd_dev, enables it only
+	// if pxd_dev->fastpath is true, and backing dev paths are available.
+	err = pxd_fastpath_init(pxd_dev);
+	if (err)
+		goto out_id;
 
 	err = pxd_init_disk(pxd_dev, add);
 	if (err) {
