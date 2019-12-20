@@ -1021,7 +1021,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	if (!pxd_dev->fastpath || !pxd_dev->nfd) return;
+	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) return;
 
 	pxd_suspend_io(pxd_dev);
 
@@ -1092,7 +1092,7 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	int nfd = fp->nfd;
 	int i;
 
-	if (!pxd_dev->fastpath || !pxd_dev->nfd) return;
+	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) return;
 
 	pxd_suspend_io(pxd_dev);
 
