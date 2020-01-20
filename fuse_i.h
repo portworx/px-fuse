@@ -73,10 +73,6 @@ struct fuse_out {
  * A request to the client
  */
 struct fuse_req {
-	/** This can be on either pending processing or io lists in
-	    fuse_conn */
-	struct list_head list;
-
 	/** Request to use fastpath */
 	unsigned fastpath:1;
 
@@ -101,6 +97,9 @@ struct fuse_req {
 
 	/** Associate request queue */
 	struct request_queue *queue;
+
+	/** sequence number used for restart */
+	u64 sequence;
 };
 
 #define FUSE_MAX_PER_CPU_IDS 256
@@ -111,6 +110,29 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 
 	/** followed by list of free ids */
 	u64 free_ids[FUSE_MAX_PER_CPU_IDS];
+};
+
+/** size of request ring buffer */
+#define FUSE_REQUEST_QUEUE_SIZE (2 * FUSE_DEFAULT_MAX_BACKGROUND)
+
+/** request queue */
+struct ____cacheline_aligned fuse_req_queue {
+	struct ____cacheline_aligned {
+		uint32_t write;         /** write pointer updated by receive function */
+		uint32_t read;		/** cached read pointer */
+		spinlock_t lock;	/** writer lock */
+		uint32_t pad_0;
+		uint64_t sequence;        /** next request sequence number */
+		struct fuse_req **requests;	/** request ring buffer */
+		uint64_t pad[4];
+	} w;
+
+	struct ____cacheline_aligned {
+		uint32_t read;          /** read index updated by reader */
+		uint32_t write;		/** cached write pointer */
+		struct fuse_req **requests;	/** request ring buffer */
+		uint64_t pad_2[14];
+	} r;
 };
 
 /**
@@ -127,11 +149,8 @@ struct fuse_conn {
 	/** Readers of the connection are waiting on this */
 	wait_queue_head_t waitq;
 
-	/** The list of pending requests */
-	struct list_head pending;
-
-	/** The list of requests being processed */
-	struct list_head processing;
+	/** request queue */
+	struct fuse_req_queue queue;
 
 	/** maps request ids to requests */
 	struct fuse_req **request_map;
@@ -226,7 +245,7 @@ void fuse_conn_put(struct fuse_conn *fc);
  */
 struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 
-void fuse_restart_requests(struct fuse_conn *fc);
+int fuse_restart_requests(struct fuse_conn *fc);
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);

@@ -23,6 +23,7 @@
 #include <linux/random.h>
 #include <linux/version.h>
 #include <linux/blkdev.h>
+#include <linux/sort.h>
 #include "pxd_compat.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
@@ -52,7 +53,6 @@ static struct fuse_conn *fuse_get_conn(struct file *file)
 void fuse_request_init(struct fuse_req *req)
 {
 	memset(req, 0, sizeof(*req));
-	INIT_LIST_HEAD(&req->list);
 }
 
 static struct fuse_req *__fuse_request_alloc(gfp_t flags)
@@ -192,7 +192,21 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
-	list_add_tail(&req->list, &fc->pending);
+	u32 write, next_index;
+
+	spin_lock(&fc->queue.w.lock);
+	write = fc->queue.w.write;
+	next_index = (write + 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
+	if (fc->queue.w.read == next_index) {
+		fc->queue.w.read = fc->queue.r.read;
+		BUG_ON(next_index == fc->queue.w.read);
+	}
+
+	fc->queue.w.requests[write] = req;
+	req->sequence = fc->queue.w.sequence++;
+	smp_wmb();
+	fc->queue.w.write = next_index;
+	spin_unlock(&fc->queue.w.lock);
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
@@ -208,33 +222,16 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
  * was closed.  The requester thread is woken up (if still waiting),
  * the 'end' callback is called if given, else the reference to the
  * request is released
- *
- * If called with fc->lock, unlocks it
  */
-static void request_end(struct fuse_conn *fc, struct fuse_req *req,
-                        bool lock)
-__releases(fc->lock)
+static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 {
-	u64 uid;
-
-	if (likely(lock)) {
-		spin_lock(&fc->lock);
-	}
-	list_del(&req->list);
-	spin_unlock(&fc->lock);
-	uid = req->in.h.unique;
+	u64 uid = req->in.h.unique;
 	if (req->end)
 		req->end(fc, req);
 	fuse_put_unique(fc, uid);
 #ifndef __PX_BLKMQ__
 	fuse_request_free(req);
 #endif
-}
-
-static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
-					    struct fuse_req *req)
-{
-	queue_request(fc, req);
 }
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
@@ -252,10 +249,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	rcu_read_lock();
 
 	if (fc->connected || fc->allow_disconnected) {
-		spin_lock(&fc->lock);
-		fuse_request_send_nowait_locked(fc, req);
-		spin_unlock(&fc->lock);
-
+		queue_request(fc, req);
 		rcu_read_unlock();
 
 		fuse_conn_wakeup(fc);
@@ -263,13 +257,23 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		rcu_read_unlock();
 
 		req->out.h.error = -ENOTCONN;
-		request_end(fc, req, true);
+		request_end(fc, req);
 	}
 }
 
 static int request_pending(struct fuse_conn *fc)
 {
-	return !list_empty(&fc->pending);
+	u32 wwrite;
+	/* check cached value first */
+	if (fc->queue.r.read != fc->queue.r.write)
+		return true;
+	/* check the writer value, if it is same nothing pending */
+	wwrite = fc->queue.w.write;
+	if (fc->queue.r.read == wwrite)
+		return false;
+	/* update cache with new value */
+	fc->queue.r.write = wwrite;
+	return true;
 }
 
 /* Wait until a request is available on the pending list */
@@ -412,17 +416,14 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 {
 	int err;
 	struct fuse_req *req;
-	struct list_head *entry, *first, *last, tmp, *next;
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
+	u32 read, write;
 
-	INIT_LIST_HEAD(&tmp);
-
-	spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
-		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
-			goto err_unlock;
+			return -EAGAIN;
+		spin_lock(&fc->lock);
 		request_wait(fc);
 		err = -ENODEV;
 		if (!fc->connected)
@@ -430,36 +431,21 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 		err = -ERESTARTSYS;
 		if (!request_pending(fc))
 			goto err_unlock;
+		spin_unlock(&fc->lock);
 	}
 
 retry:
-	entry = fc->pending.next;
-	first = fc->pending.next;
-	last = &fc->pending;
-	while (entry != &fc->pending) {
-		req = list_entry(entry, struct fuse_req, list);
-		if (req->in.h.len <= remain) {
-			last = entry;
-			remain -= req->in.h.len;
-			entry = entry->next;
-		} else {
-			remain = 0;
+	read = fc->queue.r.read;
+	write = fc->queue.r.write;
+
+	while (read != write) {
+		req = fc->queue.r.requests[read];
+
+		if (req->in.h.len > remain)
 			break;
-		}
-	}
 
-	err = copied ? copied : -EINVAL;
-	if (last == &fc->pending)
-		goto err_unlock;
-
-	list_cut_position(&tmp, &fc->pending, last);
-	list_splice_tail(&tmp, &fc->processing);
-	spin_unlock(&fc->lock);
-
-	entry = first;
-	err = 0;
-	while (1) {
-		req = list_entry(entry, struct fuse_req, list);
+		fc->queue.r.requests[read] = NULL;
+		read = (read + 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
 
 		/* Check if a write request is writing zeroes */
 		if (pxd_detect_zero_writes && (req->in.h.opcode == PXD_WRITE) &&
@@ -467,32 +453,24 @@ retry:
 		    !(req->pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
 			fuse_convert_zero_writes(req);
 		}
-		next = entry->next;
+
 		copied_this_time = fuse_copy_req_read(req, iter);
-		if (likely(copied_this_time > 0)) {
-			copied += copied_this_time;
-		} else {
-			err = copied_this_time;
+
+		if (copied_this_time < 0) {
 			req->out.h.error = -EIO;
-			request_end(fc, req, true);
+			request_end(fc, req);
+		} else {
+			copied += copied_this_time;
+			remain -= copied_this_time;
 		}
-		if (entry == last)
-			break;
-		entry = next;
-	}
-	if (!copied) {
-		copied = err;
 	}
 
+	fc->queue.r.read = read;
+
 	/* Check if more requests could be picked up */
-	if (remain && request_pending(fc)) {
-		INIT_LIST_HEAD(&tmp);
-		spin_lock(&fc->lock);
-		if (request_pending(fc)) {
-			goto retry;
-		}
-		spin_unlock(&fc->lock);
-	}
+	if (remain && request_pending(fc))
+		goto retry;
+
 	return copied;
 
  err_unlock:
@@ -912,7 +890,7 @@ static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req, true);
+	request_end(fc, req);
 	return 0;
 }
 
@@ -947,7 +925,7 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req, true);
+	request_end(fc, req);
 	return 0;
 }
 
@@ -991,15 +969,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return -ENOENT;
 	}
 
-	spin_lock(&fc->lock);
-	if (!fc->connected) {
-		spin_unlock(&fc->lock);
-		return err;
-	}
-
-	list_del_init(&req->list);
-	spin_unlock(&fc->lock);
-
 	req->out.h = oh;
 
 	if (req->fastpath) {
@@ -1009,6 +978,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	}
 
 	if (err) return err;
+
 	return nbytes;
 }
 
@@ -1062,30 +1032,18 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
 	return mask;
 }
 
-/*
- * Abort all requests on the given list (pending or processing)
- *
- * This function releases and reacquires fc->lock
- */
-static void end_requests(struct fuse_conn *fc, struct list_head *head)
-__releases(fc->lock)
-__acquires(fc->lock)
-{
-	while (!list_empty(head)) {
-		struct fuse_req *req;
-		req = list_entry(head->next, struct fuse_req, list);
-		req->out.h.error = -ECONNABORTED;
-		request_end(fc, req, false);
-		spin_lock(&fc->lock);
-	}
-}
-
 void fuse_end_queued_requests(struct fuse_conn *fc)
 __releases(fc->lock)
 __acquires(fc->lock)
 {
-	end_requests(fc, &fc->pending);
-	end_requests(fc, &fc->processing);
+	int i;
+	for (i = 0; i < FUSE_REQUEST_QUEUE_SIZE; ++i) {
+		struct fuse_req *req = fc->request_map[i];
+		if (req != NULL) {
+			req->out.h.error = -ECONNABORTED;
+			request_end(fc, req);
+		}
+	}
 }
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
@@ -1096,6 +1054,28 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 		kfree(fc->free_ids);
 	if (fc->request_map)
 		kfree(fc->request_map);
+	if (fc->queue.w.requests)
+		vfree(fc->queue.w.requests);
+}
+
+static int fuse_req_queue_init(struct fuse_req_queue *queue)
+{
+	size_t alloc_size = FUSE_REQUEST_QUEUE_SIZE * sizeof(queue->w.requests[0]);
+	queue->w.requests = vmalloc(alloc_size);
+	if (queue->w.requests == NULL)
+		return -ENOMEM;
+	memset(queue->w.requests, 0, alloc_size);
+
+	queue->w.sequence = 1;
+	queue->w.read = 0;
+	queue->w.write = 0;
+	spin_lock_init(&queue->w.lock);
+
+	queue->r.requests = queue->w.requests;
+	queue->r.write = 0;
+	queue->r.read = 0;
+
+	return 0;
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1107,8 +1087,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	spin_lock_init(&fc->lock);
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
-	INIT_LIST_HEAD(&fc->pending);
-	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->entry);
 	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
 		GFP_KERNEL);
@@ -1137,12 +1115,18 @@ int fuse_conn_init(struct fuse_conn *fc)
 		goto err_out;
 	}
 
+	/* start with nothing allocated to cpus */
 	for_each_possible_cpu(cpu) {
 		struct fuse_per_cpu_ids *my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 		memset(my_ids, 0, sizeof(*my_ids));
 	}
 
 	fc->reqctr = 0;
+
+	rc = fuse_req_queue_init(&fc->queue);
+	if (rc != 0)
+		goto err_out;
+
 	return 0;
 err_out:
 	fuse_conn_free_allocs(fc);
@@ -1154,6 +1138,7 @@ void fuse_conn_put(struct fuse_conn *fc)
 	if (atomic_dec_and_test(&fc->count)) {
 		fuse_conn_free_allocs(fc);
 		fc->release(fc);
+
 	}
 }
 
@@ -1208,13 +1193,82 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-void fuse_restart_requests(struct fuse_conn *fc)
+static int compare_reqs(const void *lhs, const void *rhs)
 {
+	struct fuse_req *lhs_req = *(struct fuse_req**)lhs;
+	struct fuse_req *rhs_req = *(struct fuse_req**)rhs;
+
+
+
+	if (lhs_req->sequence < rhs_req->sequence)
+		return -1;
+	if (lhs_req->sequence > rhs_req->sequence)
+		return 1;
+	return 0;
+}
+
+/* Request map contains all pending requests. Add them back to the queue sorted by
+ * original request order. This function is called when the reader is inactive
+ * and reader part can be safely modified.
+ */
+int fuse_restart_requests(struct fuse_conn *fc)
+{
+	int i;
+	struct fuse_req **resend_reqs;
+	u32 read = fc->queue.r.read;	/* ok to access read part since user space is
+ 					* inactive */
+	u32 write;
+	u64 sequence;
+	int resend_count = 0;
+
+	/*
+	 * Receive function may be adding new requests while scan is in progress.
+	 * Find the sequence of the first request unread by user space. If there are no
+	 * pending requests, use the next request sequence.
+	 */
+	spin_lock(&fc->queue.w.lock);
+	sequence = fc->queue.w.sequence;
+	write = fc->queue.w.write;
+	if (read != write)
+		sequence = fc->queue.w.requests[read]->sequence;
+	spin_unlock(&fc->queue.w.lock);
+
+	printk(KERN_INFO "read %d write %d sequence %lld", read, write, sequence);
+
+	resend_reqs = vmalloc(sizeof(struct fuse_req *) * FUSE_REQUEST_QUEUE_SIZE);
+	if (resend_reqs == NULL)
+		return -ENOMEM;
+
+	/* Add all pending requests with lower sequence to resend list */
+	for (i = 0; i < FUSE_REQUEST_QUEUE_SIZE; ++i) {
+		struct fuse_req *req = fc->request_map[i];
+		if (req == NULL)
+			continue;
+		if (req->sequence < sequence)
+			resend_reqs[resend_count++] = req;
+	}
+
+	sort(resend_reqs, resend_count, sizeof(struct fuse_req*), &compare_reqs, NULL);
+
+	/* Put requests back into the queue*/
+	for (i = resend_count; i != 0; --i) {
+		read = (read - 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
+		fc->queue.w.requests[read] = resend_reqs[i - 1];
+	}
+
+	spin_lock(&fc->queue.w.lock);
+	fc->queue.w.read = read;
+	/* update the reader part */
+	fc->queue.r.read = read;
+	spin_unlock(&fc->queue.w.lock);
+
 	spin_lock(&fc->lock);
-	list_splice_init(&fc->processing, &fc->pending);
-	wake_up(&fc->waitq);
-	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
+	fuse_conn_wakeup(fc);
 	spin_unlock(&fc->lock);
+
+	vfree(resend_reqs);
+
+	return 0;
 }
 
 static int fuse_dev_fasync(int fd, struct file *file, int on)
