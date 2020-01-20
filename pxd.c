@@ -1531,10 +1531,14 @@ static void pxd_abort_context(struct work_struct *work)
 	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
 		ctx->name, ctx->id);
 
-	fc->connected = true;
 	fc->allow_disconnected = 0;
 
-	fuse_abort_conn(fc);
+	/* Let other threads see the value of allow_disconnected. */
+	synchronize_rcu();
+
+	spin_lock(&fc->lock);
+	fuse_end_queued_requests(fc);
+	spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
 
 	fuse_conn_put(fc);
