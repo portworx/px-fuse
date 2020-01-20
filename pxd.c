@@ -738,14 +738,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, add->open_mode, add->enable_fp, add->paths.size);
 
-	if (pxd_dev->fastpath) {
-		err = pxd_fastpath_init(pxd_dev);
-		if (err)
-			goto out_id;
-
-		printk(KERN_INFO"Device %llu enabling fastpath %d (paths: %lu)\n",
-				add->dev_id, add->enable_fp, add->paths.size);
-	}
+	// initializes fastpath context part of pxd_dev, enables it only
+	// if pxd_dev->fastpath is true, and backing dev paths are available.
+	err = pxd_fastpath_init(pxd_dev);
+	if (err)
+		goto out_id;
 
 	err = pxd_init_disk(pxd_dev, add);
 	if (err) {
@@ -1500,10 +1497,14 @@ static void pxd_abort_context(struct work_struct *work)
 	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
 		ctx->name, ctx->id);
 
-	fc->connected = true;
 	fc->allow_disconnected = 0;
 
-	fuse_abort_conn(fc);
+	/* Let other threads see the value of allow_disconnected. */
+	synchronize_rcu();
+
+	spin_lock(&fc->lock);
+	fuse_end_queued_requests(fc);
+	spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
 }
 
