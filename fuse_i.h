@@ -211,10 +211,20 @@ void fuse_abort_conn(struct fuse_conn *fc);
 int fuse_conn_init(struct fuse_conn *fc);
 
 /**
+ * Abort pending requests
+ */
+void fuse_end_queued_requests(struct fuse_conn *fc);
+
+/**
  * Release reference to fuse_conn
  */
 struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 void fuse_conn_put(struct fuse_conn *fc);
+
+/**
+ * Acquire reference to fuse_conn
+ */
+struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 
 void fuse_restart_requests(struct fuse_conn *fc);
 
