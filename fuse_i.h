@@ -64,9 +64,10 @@ struct fuse_req {
 	/** Request to use fastpath */
 	unsigned fastpath:1;
 
-	/** The request input */
+	/** The request input header */
 	struct fuse_in_header in;
 
+	/** Read/write request */
 	struct pxd_rdwr_in pxd_rdwr_in;
 
 	/** The request output */
