@@ -1105,12 +1105,14 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 		return -EINVAL;
 	}
 
+	if (!ctx->fc.connected)
+		cancel_delayed_work_sync(&ctx->abort_work);
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = new_timeout_secs;
-	if (!ctx->fc.connected) {
-		mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
-	}
+	if (!ctx->fc.connected)
+		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
+
 	return count;
 }
 
@@ -1468,7 +1470,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 
-	del_timer_sync(&ctx->timer);
+	cancel_delayed_work_sync(&ctx->abort_work);
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_MAX;
 	fc->connected = 1;
@@ -1502,7 +1504,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		pxd_printk("%s: not opened\n", __func__);
 	else
 		ctx->fc.connected = 0;
-	mod_timer(&ctx->timer, jiffies + (pxd_timeout_secs * HZ));
+	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
 	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
@@ -1523,7 +1525,8 @@ static void pxd_fuse_conn_release(struct fuse_conn *conn)
 
 static void pxd_abort_context(struct work_struct *work)
 {
-	struct pxd_context *ctx = container_of(work, struct pxd_context, abort_work);
+	struct pxd_context *ctx = container_of(to_delayed_work(work), struct pxd_context,
+		abort_work);
 	struct fuse_conn *fc = &ctx->fc;
 
 	BUG_ON(fc->connected);
@@ -1540,40 +1543,6 @@ static void pxd_abort_context(struct work_struct *work)
 	fuse_end_queued_requests(fc);
 	spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
-
-	fuse_conn_put(fc);
-
-	module_put(THIS_MODULE);
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-static void pxd_timeout(struct timer_list *args)
-#else
-static void pxd_timeout(unsigned long args)
-#endif
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	struct pxd_context *ctx = from_timer(ctx, args, timer);
-#else
-	struct pxd_context *ctx = (struct pxd_context *)args;
-#endif
-	/* Prevent the connection structure to be deleted while work is scheduled. */
-	if (!try_module_get(THIS_MODULE)) {
-		printk(KERN_INFO "PXD_TIMEOUT: (%s:%u) timer triggered while unloading",
-			ctx->name, ctx->id);
-		return;
-	}
-
-	/*
-	 * Prevent any connection allocated structures to be freed while work is
-	 * scheduled.
-	 */
-	fuse_conn_get(&ctx->fc);
-
-	printk(KERN_INFO "PXD_TIMEOUT: (%s:%u) schedule abort work", ctx->name, ctx->id);
-
-	INIT_WORK(&ctx->abort_work, pxd_abort_context);
-	schedule_work(&ctx->abort_work);
 }
 
 int pxd_context_init(struct pxd_context *ctx, int i)
@@ -1603,18 +1572,14 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
 	INIT_LIST_HEAD(&ctx->pending_requests);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	timer_setup(&ctx->timer, pxd_timeout, 0);
-#else
-	setup_timer(&ctx->timer, pxd_timeout, (unsigned long) ctx);
-#endif
+	INIT_DELAYED_WORK(&ctx->abort_work, pxd_abort_context);
 	return 0;
 }
 
 static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
-	del_timer_sync(&ctx->timer);
+	cancel_delayed_work_sync(&ctx->abort_work);
 	if (ctx->id < pxd_num_contexts_exported) {
 		fuse_abort_conn(&ctx->fc);
 		fuse_conn_put(&ctx->fc);
