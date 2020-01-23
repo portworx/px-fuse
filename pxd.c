@@ -180,7 +180,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
 	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
-			__func__, req, req->in.h.unique,
+			__func__, req, req->in.unique,
 			req->pxd_rdwr_in.offset, req->out.h.error);
 }
 
@@ -197,7 +197,7 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	trace_pxd_reply(REQCTR(fc), req->in.unique, REQ_OP_WRITE);
 #else
-	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
+	trace_pxd_reply(REQCTR(fc), req->in.unique, REQ_WRITE);
 #endif
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, req->out.h.error);
@@ -384,7 +384,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
-			req->in.h.unique, flags, size, off, minor, flags);
+			req->in.unique, flags, size, off, minor, flags);
 		return -1;
 	}
 
