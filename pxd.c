@@ -251,7 +251,6 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 			 __func__, status);
 	}
 
-	req->fastpath = pxd_dev->fastpath;
 	return req;
 }
 
@@ -435,6 +434,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
+	req->fastpath = pxd_dev->fastpath;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc))) {
@@ -489,6 +489,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
+		req->fastpath = pxd_dev->fastpath;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
