@@ -193,8 +193,8 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 
 	fc->queue.w.requests[write] = req;
 	req->sequence = fc->queue.w.sequence++;
-	smp_wmb();
 	fc->queue.w.write = next_index;
+	smp_store_release(&fc->queue.r.write, next_index);
 	spin_unlock(&fc->queue.w.lock);
 }
 
@@ -250,17 +250,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 
 static int request_pending(struct fuse_conn *fc)
 {
-	u32 wwrite;
-	/* check cached value first */
-	if (fc->queue.r.read != fc->queue.r.write)
-		return true;
-	/* check the writer value, if it is same nothing pending */
-	wwrite = fc->queue.w.write;
-	if (fc->queue.r.read == wwrite)
-		return false;
-	/* update cache with new value */
-	fc->queue.r.write = wwrite;
-	return true;
+	return fc->queue.r.read != fc->queue.r.write;
 }
 
 /* Wait until a request is available on the pending list */
@@ -414,7 +404,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 
 retry:
 	read = fc->queue.r.read;
-	write = fc->queue.r.write;
+	write = smp_load_acquire(&fc->queue.r.write);
 
 	while (read != write) {
 		req = fc->queue.r.requests[read];
@@ -1237,6 +1227,7 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	fc->queue.w.read = read;
 	/* update the reader part */
 	fc->queue.r.read = read;
+	fc->queue.r.write = fc->queue.w.write;
 	spin_unlock(&fc->queue.w.lock);
 
 	spin_lock(&fc->lock);

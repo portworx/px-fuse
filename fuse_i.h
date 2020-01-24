@@ -107,7 +107,7 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 /** request queue */
 struct ____cacheline_aligned fuse_req_queue {
 	struct ____cacheline_aligned {
-		uint32_t write;         /** write pointer updated by receive function */
+		uint32_t write;         /** cached write pointer */
 		uint32_t read;		/** cached read pointer */
 		spinlock_t lock;	/** writer lock */
 		uint32_t pad_0;
@@ -118,7 +118,7 @@ struct ____cacheline_aligned fuse_req_queue {
 
 	struct ____cacheline_aligned {
 		uint32_t read;          /** read index updated by reader */
-		uint32_t write;		/** cached write pointer */
+		uint32_t write;		/** write pointer updated by receive function */
 		struct fuse_req **requests;	/** request ring buffer */
 		uint64_t pad_2[14];
 	} r;
