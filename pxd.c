@@ -429,7 +429,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 			bio->bi_vcnt, flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev);
-	if (IS_ERR(req)) {
+	if (IS_ERR_OR_NULL(req)) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
@@ -483,7 +483,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			rq->nr_phys_segments, rq->cmd_flags);
 
 		req = pxd_fuse_req(pxd_dev);
-		if (IS_ERR(req)) {
+		if (IS_ERR_OR_NULL(req)) {
 			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
