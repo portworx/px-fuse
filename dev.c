@@ -1161,8 +1161,11 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	spin_lock(&fc->queue.w.lock);
 	sequence = fc->queue.w.sequence;
 	write = fc->queue.w.write;
-	if (read != write)
-		sequence = fc->request_map[fc->queue.w.requests[read].in.unique]->sequence;
+	if (read != write) {
+		int index = fc->queue.w.requests[read].in.unique &
+			(FUSE_MAX_REQUEST_IDS - 1);
+		sequence = fc->request_map[index]->sequence;
+	}
 	spin_unlock(&fc->queue.w.lock);
 
 	printk(KERN_INFO "read %d write %d sequence %lld", read, write, sequence);
