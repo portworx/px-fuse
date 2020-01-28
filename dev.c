@@ -387,10 +387,9 @@ retry:
 
 	while (read != write && remain >= sizeof(struct rdwr_in)) {
 		/* copy as many contiguous elements as possible */
-		copied_this_time = min((FUSE_REQUEST_QUEUE_SIZE - read) *
-			sizeof(struct rdwr_in),
-			min((write - read) * sizeof(struct rdwr_in),
-			remain / sizeof(struct rdwr_in) * sizeof(struct rdwr_in)));
+		copied_this_time = min(FUSE_REQUEST_QUEUE_SIZE - read,
+			min(write - read, (u32)(remain / sizeof(struct rdwr_in)))) *
+				   sizeof(struct rdwr_in);
 		if (copy_to_iter(&fc->queue.r.requests[read], copied_this_time, iter)
 		    != copied_this_time) {
 			printk(KERN_ERR "%s: copy error\n", __func__);
