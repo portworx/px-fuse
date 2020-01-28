@@ -660,6 +660,12 @@ struct fuse_fallocate_in {
 };
 
 struct fuse_in_header {
+	uint32_t	opcode;
+	uint32_t	padding;
+	uint64_t	unique;
+};
+
+struct fuse_in_header_v1 {
 	uint32_t	len;
 	uint32_t	opcode;
 	uint64_t	unique;
