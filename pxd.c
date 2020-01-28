@@ -299,6 +299,9 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 
 	pxd_req_misc(req, size, off, minor, flags);
+
+	if (pxd_detect_zero_writes && req->pxd_rdwr_in.size != 0)
+		fuse_convert_zero_writes(req);
 }
 
 static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
