@@ -1509,6 +1509,50 @@ static void pxd_abort_context(struct work_struct *work)
 	pxdctx_set_connected(ctx, false);
 }
 
+static void pxd_vm_close(struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
+	pr_info("pxd_vm_close %d", ctx->id);
+}
+
+static int pxd_vm_fault(struct vm_fault *vmf)
+{
+	struct page *page;
+	struct file *file = vmf->vma->vm_file;
+	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
+	void *map_addr = (void*)ctx->fc.queue + (vmf->pgoff << PAGE_SHIFT);
+	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct fuse_req_queue))
+		return -EFAULT;
+	page = vmalloc_to_page(map_addr);
+	get_page(page);
+	vmf->page = page;
+	return 0;
+}
+
+static void pxd_vm_open(struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
+	pr_info("pxd_vm_open %d off %ld start %ld end %ld", ctx->id,
+		vma->vm_pgoff << PAGE_SHIFT, vma->vm_start, vma->vm_end);
+}
+
+static struct vm_operations_struct pxd_vm_ops = {
+	.close = pxd_vm_close,
+	.fault = pxd_vm_fault,
+	.open = pxd_vm_open,
+};
+
+static int pxd_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	vma->vm_ops = &pxd_vm_ops;
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vma->vm_private_data = filp->private_data;
+	pxd_vm_open(vma);
+	return 0;
+}
+
 int pxd_context_init(struct pxd_context *ctx, int i)
 {
 	int err;
@@ -1521,6 +1565,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops.open = pxd_control_open;
 	ctx->fops.release = pxd_control_release;
 	ctx->fops.unlocked_ioctl = pxd_control_ioctl;
+	ctx->fops.mmap = pxd_mmap;
 
 	if (ctx->id < pxd_num_contexts_exported) {
 		err = fuse_conn_init(&ctx->fc);
