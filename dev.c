@@ -81,11 +81,6 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 	struct fuse_req *req;
 	int err;
 
-	if (!fc->connected && !fc->allow_disconnected) {
-		 err = -ENOTCONN;
-		goto out;
-	}
-
 	req = fuse_request_alloc();
 	if (!req) {
 		err = -ENOMEM;
@@ -245,20 +240,16 @@ static int request_pending(struct fuse_conn *fc)
 
 /* Wait until a request is available on the pending list */
 static void request_wait(struct fuse_conn *fc)
-__releases(fc->lock)
-__acquires(fc->lock)
 {
 	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue_exclusive(&fc->waitq, &wait);
-	while (fc->connected && !request_pending(fc)) {
+	while (!request_pending(fc)) {
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (signal_pending(current))
 			break;
 
-		spin_unlock(&fc->lock);
 		schedule();
-		spin_lock(&fc->lock);
 	}
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&fc->waitq, &wait);
@@ -372,24 +363,17 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	struct iov_iter *iter)
 {
-	int err;
 	struct fuse_req *req;
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
 	u32 read, write;
 
 	if (!request_pending(fc)) {
-		if ((file->f_flags & O_NONBLOCK) && fc->connected)
+		if ((file->f_flags & O_NONBLOCK))
 			return -EAGAIN;
-		spin_lock(&fc->lock);
 		request_wait(fc);
-		err = -ENODEV;
-		if (!fc->connected)
-			goto err_unlock;
-		err = -ERESTARTSYS;
 		if (!request_pending(fc))
-			goto err_unlock;
-		spin_unlock(&fc->lock);
+			return -ERESTARTSYS;
 	}
 
 retry:
@@ -428,10 +412,6 @@ retry:
 		goto retry;
 
 	return copied;
-
- err_unlock:
-	spin_unlock(&fc->lock);
-	return err;
 }
 
 
@@ -975,12 +955,8 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
 
 	poll_wait(file, &fc->waitq, wait);
 
-	spin_lock(&fc->lock);
-	if (!fc->connected)
-		mask = POLLERR;
-	else if (request_pending(fc))
+	if (request_pending(fc))
 		mask |= POLLIN | POLLRDNORM;
-	spin_unlock(&fc->lock);
 
 	return mask;
 }
