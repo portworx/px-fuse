@@ -85,7 +85,7 @@ endif
 ifeq ($(call verlater,${kmajor},${fp_major}),0)
 PXDEFINES += -D__PX_FASTPATH__
 px-objs += pxd_fastpath.o
-$(info kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 else
 ifeq ($(call versame,${kmajor},${fp_major}),0)
 ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
