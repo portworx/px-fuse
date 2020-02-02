@@ -178,7 +178,8 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 		BUG_ON(next_index == fc->queue.w.read);
 	}
 
-	fc->queue.w.requests[write] = req;
+	fc->queue.w.requests[write].in = req->in;
+	fc->queue.w.requests[write].rdwr = req->pxd_rdwr_in;
 	req->sequence = fc->queue.w.sequence++;
 	fc->queue.w.write = next_index;
 	smp_store_release(&fc->queue.r.write, next_index);
@@ -253,17 +254,6 @@ static void request_wait(struct fuse_conn *fc)
 	}
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&fc->waitq, &wait);
-}
-
-ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
-{
-	size_t copied = sizeof(req->in) + sizeof(req->pxd_rdwr_in);
-	if (copy_to_iter(&req->in, copied, iter) != copied) {
-		printk(KERN_ERR "%s: copy header error\n", __func__);
-		return -EFAULT;
-	}
-
-	return copied;
 }
 
 extern uint32_t pxd_detect_zero_writes;
@@ -342,7 +332,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 	req->in.opcode = PXD_DISCARD;
 }
 
-static void fuse_convert_zero_writes(struct fuse_req *req)
+void fuse_convert_zero_writes(struct fuse_req *req)
 {
 	if (req->fastpath) {
 		__fuse_convert_zero_writes_fastpath(req);
@@ -363,7 +353,6 @@ static void fuse_convert_zero_writes(struct fuse_req *req)
 static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	struct iov_iter *iter)
 {
-	struct fuse_req *req;
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
 	u32 read, write;
@@ -380,29 +369,20 @@ retry:
 	read = fc->queue.r.read;
 	write = smp_load_acquire(&fc->queue.r.write);
 
-	while (read != write) {
-		req = fc->queue.r.requests[read];
-		if (sizeof(req->in) + sizeof(req->pxd_rdwr_in) > remain)
-			break;
-
-		fc->queue.r.requests[read] = NULL;
-		read = (read + 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
-
-		/* Check if a write request is writing zeroes */
-		if (pxd_detect_zero_writes && (req->in.opcode == PXD_WRITE) &&
-		    req->pxd_rdwr_in.size &&
-		    !(req->pxd_rdwr_in.flags & PXD_FLAGS_SYNC)) {
-			fuse_convert_zero_writes(req);
+	while (read != write && remain >= sizeof(struct rdwr_in)) {
+		/* copy as many contiguous elements as possible */
+		copied_this_time = min(FUSE_REQUEST_QUEUE_SIZE - read,
+			min(write - read, (u32)(remain / sizeof(struct rdwr_in)))) *
+				   sizeof(struct rdwr_in);
+		if (copy_to_iter(&fc->queue.r.requests[read], copied_this_time, iter)
+		    != copied_this_time) {
+			printk(KERN_ERR "%s: copy error\n", __func__);
+			return -EFAULT;
 		}
-
-		copied_this_time = fuse_copy_req_read(req, iter);
-
-		if (copied_this_time < 0) {
-			request_end(fc, req, -EIO);
-		} else {
-			copied += copied_this_time;
-			remain -= copied_this_time;
-		}
+		read = (read + copied_this_time / sizeof(struct rdwr_in)) &
+		       (FUSE_REQUEST_QUEUE_SIZE - 1);
+		copied += copied_this_time;
+		remain -= copied_this_time;
 	}
 
 	fc->queue.r.read = read;
@@ -1157,8 +1137,11 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	spin_lock(&fc->queue.w.lock);
 	sequence = fc->queue.w.sequence;
 	write = fc->queue.w.write;
-	if (read != write)
-		sequence = fc->queue.w.requests[read]->sequence;
+	if (read != write) {
+		int index = fc->queue.w.requests[read].in.unique &
+			(FUSE_MAX_REQUEST_IDS - 1);
+		sequence = fc->request_map[index]->sequence;
+	}
 	spin_unlock(&fc->queue.w.lock);
 
 	printk(KERN_INFO "read %d write %d sequence %lld", read, write, sequence);
@@ -1181,7 +1164,8 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	/* Put requests back into the queue*/
 	for (i = resend_count; i != 0; --i) {
 		read = (read - 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
-		fc->queue.w.requests[read] = resend_reqs[i - 1];
+		fc->queue.w.requests[read].in = resend_reqs[i - 1]->in;
+		fc->queue.w.requests[read].rdwr = resend_reqs[i - 1]->pxd_rdwr_in;
 	}
 
 	spin_lock(&fc->queue.w.lock);

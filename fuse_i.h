@@ -91,14 +91,14 @@ struct ____cacheline_aligned fuse_req_queue {
 		spinlock_t lock;	/** writer lock */
 		uint32_t pad_0;
 		uint64_t sequence;        /** next request sequence number */
-		struct fuse_req **requests;	/** request ring buffer */
+		struct rdwr_in *requests;	/** request ring buffer */
 		uint64_t pad[4];
 	} w;
 
 	struct ____cacheline_aligned {
 		uint32_t read;          /** read index updated by reader */
 		uint32_t write;		/** write pointer updated by receive function */
-		struct fuse_req **requests;	/** request ring buffer */
+		struct rdwr_in *requests;	/** request ring buffer */
 		uint64_t pad_2[14];
 	} r;
 };
@@ -225,4 +225,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
 
 void fuse_request_init(struct fuse_req *req);
+
+void fuse_convert_zero_writes(struct fuse_req *req);
+
 #endif /* _FS_FUSE_I_H */
