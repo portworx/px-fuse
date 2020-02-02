@@ -908,6 +908,7 @@ static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, i
 
 		wake_up(&tc->read_event);
 	}
+	atomic_inc(&head->pxd_dev->fp.ncount);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -1026,7 +1027,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_suspend_io(pxd_dev);
 
 	decode_mode(mode, modestr);
-	printk("device %llu mode %s\n", pxd_dev->dev_id, modestr);
+	printk("device %llu mode %s, nfd %d\n", pxd_dev->dev_id, modestr, nfd);
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
 			if (force) {
@@ -1109,7 +1110,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
-	fp->nfd = 0; // will take slow path, if additional info not provided.
+	memset(fp, 0, sizeof(*fp));
+	// will take slow path, if additional info not provided.
 
 	pxd_printk("Number of cpu ids %d\n", __px_ncpus);
 #if 0
@@ -1177,8 +1179,12 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	int i;
 	struct file* f;
 
+	pxd_printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
+			pxd_dev->dev_id, update_path->size);
 	mode = open_mode(pxd_dev->mode);
 	for (i = 0; i < update_path->size; i++) {
+		pxd_printk("Fastpath %d: %s, current %s, %p\n", i, update_path->devpath[i],
+				pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
 			// if previous paths are same.. then skip anymore config
 			printk(KERN_INFO"pxd%llu already configured for path %s\n",
@@ -1197,8 +1203,11 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 		pxd_dev->fp.file[i] = f;
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
+		pxd_printk("successfully installed fastpath %s at %p\n",
+				pxd_dev->fp.device_path[i], f);
 	}
 	pxd_dev->fp.nfd = update_path->size;
+	printk("dev%llu completed setting up %d paths", pxd_dev->dev_id, pxd_dev->fp.nfd);
 
 	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
@@ -1295,11 +1304,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	head = __pxd_init_block_head(pxd_dev, bio);
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
-
-		// non-trivial high memory pressure failing IO
-		spin_lock_irq(&pxd_dev->lock);
-		atomic_dec(&pxd_dev->fp.ncount);
-		spin_unlock_irq(&pxd_dev->lock);
 
 		return BLK_QC_RETVAL;
 	}

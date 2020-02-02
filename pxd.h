@@ -169,6 +169,17 @@ struct pxd_fastpath_out {
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
 
+static inline
+int pxd_supported_features(void)
+{
+	int features = 0;
+#ifdef __PX_FASTPATH__
+	features |= PXD_FEATURE_FASTPATH;
+#endif
+
+	return features;
+}
+
 
 /**
  * PXD_READ/PXD_WRITE kernel request structure

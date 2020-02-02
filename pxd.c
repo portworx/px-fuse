@@ -589,6 +589,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	}
 #else
 	if (pxd_dev->fastpath) {
+		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
 		q = blk_alloc_queue(GFP_KERNEL);
 		if (!q) {
 			err = -ENOMEM;
@@ -743,6 +744,14 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	err = pxd_fastpath_init(pxd_dev);
 	if (err)
 		goto out_id;
+
+	if (pxd_dev->fastpath) {
+		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
+		if (err) {
+			pxd_fastpath_cleanup(pxd_dev);
+			goto out_id;
+		}
+	}
 
 	err = pxd_init_disk(pxd_dev, add);
 	if (err) {
@@ -1612,9 +1621,11 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 #ifdef __PX_BLKMQ__
-	printk(KERN_INFO "pxd: blk-mq driver loaded version %s\n", gitversion);
+	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
+			gitversion, pxd_supported_features());
 #else
-	printk(KERN_INFO "pxd: driver loaded version %s\n", gitversion);
+	printk(KERN_INFO "pxd: driver loaded version %s, features %#x\n",
+			gitversion, pxd_supported_features());
 #endif
 
 	return 0;
