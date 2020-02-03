@@ -1180,9 +1180,9 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	struct file* f;
 
 	pxd_printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
-			pxd_dev->dev_id, update_path->size);
+			pxd_dev->dev_id, update_path->count);
 	mode = open_mode(pxd_dev->mode);
-	for (i = 0; i < update_path->size; i++) {
+	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d: %s, current %s, %p\n", i, update_path->devpath[i],
 				pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
@@ -1206,9 +1206,12 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 		pxd_printk("successfully installed fastpath %s at %p\n",
 				pxd_dev->fp.device_path[i], f);
 	}
-	pxd_dev->fp.nfd = update_path->size;
-	printk("dev%llu completed setting up %d paths", pxd_dev->dev_id, pxd_dev->fp.nfd);
+	pxd_dev->fp.nfd = update_path->count;
 
+	if (!update_path->count && pxd_dev->strict) goto out_file_failed;
+
+	printk("dev%llu completed setting up %d paths\n",
+			pxd_dev->dev_id, pxd_dev->fp.nfd);
 	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
 
@@ -1223,6 +1226,7 @@ out_file_failed:
 
 	// even if there are errors setting up fastpath, initialize to take slow path,
 	// do not report failure outside
+	if (pxd_dev->strict) return -EINVAL;
 	return 0;
 }
 

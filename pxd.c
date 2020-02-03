@@ -735,9 +735,10 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->fastpath = add->enable_fp;
+	pxd_dev->strict = add->strict;
 
-	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d npath %lu\n",
-			add->dev_id, add->open_mode, add->enable_fp, add->paths.size);
+	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d(%d) npath %lu\n",
+			add->dev_id, add->open_mode, add->enable_fp, add->strict, add->paths.count);
 
 	// initializes fastpath context part of pxd_dev, enables it only
 	// if pxd_dev->fastpath is true, and backing dev paths are available.
@@ -1320,7 +1321,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 
 		token = __strtok_r(0, delim, &saveptr);
 	}
-	update_out.size = i;
+	update_out.count = i;
 	update_out.dev_id = pxd_dev->dev_id;
 
 	__pxd_update_path(pxd_dev, &update_out);
