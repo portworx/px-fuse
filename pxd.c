@@ -1516,7 +1516,11 @@ static void pxd_vm_close(struct vm_area_struct *vma)
 	pr_info("pxd_vm_close %d", ctx->id);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
+static int pxd_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+#else
 static int pxd_vm_fault(struct vm_fault *vmf)
+#endif
 {
 	struct page *page;
 	struct file *file = vmf->vma->vm_file;
