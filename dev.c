@@ -34,9 +34,6 @@
 #define PAGE_CACHE_RELEASE(page) page_cache_release(page)
 #endif
 
-/** Maximum number of outstanding background requests */
-#define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
-
 #define FUSE_MAX_REQUEST_IDS (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
 static struct kmem_cache *fuse_req_cachep;
@@ -170,20 +167,20 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
 	u32 write, next_index;
 
-	spin_lock(&fc->queue.w.lock);
-	write = fc->queue.w.write;
+	spin_lock(&fc->queue->w.lock);
+	write = fc->queue->w.write;
 	next_index = (write + 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
-	if (fc->queue.w.read == next_index) {
-		fc->queue.w.read = fc->queue.r.read;
-		BUG_ON(next_index == fc->queue.w.read);
+	if (fc->queue->w.read == next_index) {
+		fc->queue->w.read = fc->queue->r.read;
+		BUG_ON(next_index == fc->queue->w.read);
 	}
 
-	fc->queue.w.requests[write].in = req->in;
-	fc->queue.w.requests[write].rdwr = req->pxd_rdwr_in;
-	req->sequence = fc->queue.w.sequence++;
-	fc->queue.w.write = next_index;
-	smp_store_release(&fc->queue.r.write, next_index);
-	spin_unlock(&fc->queue.w.lock);
+	fc->queue->requests[write].in = req->in;
+	fc->queue->requests[write].rdwr = req->pxd_rdwr_in;
+	req->sequence = fc->queue->w.sequence++;
+	fc->queue->w.write = next_index;
+	smp_store_release(&fc->queue->r.write, next_index);
+	spin_unlock(&fc->queue->w.lock);
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
@@ -236,7 +233,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 
 static int request_pending(struct fuse_conn *fc)
 {
-	return fc->queue.r.read != fc->queue.r.write;
+	return fc->queue->r.read != fc->queue->r.write;
 }
 
 /* Wait until a request is available on the pending list */
@@ -366,15 +363,15 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	}
 
 retry:
-	read = fc->queue.r.read;
-	write = smp_load_acquire(&fc->queue.r.write);
+	read = fc->queue->r.read;
+	write = smp_load_acquire(&fc->queue->r.write);
 
 	while (read != write && remain >= sizeof(struct rdwr_in)) {
 		/* copy as many contiguous elements as possible */
 		copied_this_time = min(FUSE_REQUEST_QUEUE_SIZE - read,
 			min(write - read, (u32)(remain / sizeof(struct rdwr_in)))) *
 				   sizeof(struct rdwr_in);
-		if (copy_to_iter(&fc->queue.r.requests[read], copied_this_time, iter)
+		if (copy_to_iter(&fc->queue->requests[read], copied_this_time, iter)
 		    != copied_this_time) {
 			printk(KERN_ERR "%s: copy error\n", __func__);
 			return -EFAULT;
@@ -385,7 +382,7 @@ retry:
 		remain -= copied_this_time;
 	}
 
-	fc->queue.r.read = read;
+	fc->queue->r.read = read;
 
 	/* Check if more requests could be picked up */
 	if (remain && request_pending(fc))
@@ -962,28 +959,21 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 		kfree(fc->free_ids);
 	if (fc->request_map)
 		kfree(fc->request_map);
-	if (fc->queue.w.requests)
-		vfree(fc->queue.w.requests);
+	if (fc->queue)
+		vfree(fc->queue);
 }
 
-static int fuse_req_queue_init(struct fuse_req_queue *queue)
+static void fuse_req_queue_init(struct fuse_req_queue *queue)
 {
-	size_t alloc_size = FUSE_REQUEST_QUEUE_SIZE * sizeof(queue->w.requests[0]);
-	queue->w.requests = vmalloc(alloc_size);
-	if (queue->w.requests == NULL)
-		return -ENOMEM;
-	memset(queue->w.requests, 0, alloc_size);
+	memset(queue->requests, 0, sizeof(queue->requests));
 
 	queue->w.sequence = 1;
 	queue->w.read = 0;
 	queue->w.write = 0;
 	spin_lock_init(&queue->w.lock);
 
-	queue->r.requests = queue->w.requests;
 	queue->r.write = 0;
 	queue->r.read = 0;
-
-	return 0;
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1006,6 +996,12 @@ int fuse_conn_init(struct fuse_conn *fc)
 	}
 	memset(fc->request_map, 0,
 		FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*));
+
+	fc->queue = vmalloc((sizeof(*fc->queue) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+	if (!fc->queue) {
+		printk(KERN_ERR "failed to allocate request queue");
+		goto err_out;
+	}
 
 	fc->free_ids = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(u64), GFP_KERNEL);
 	if (!fc->free_ids) {
@@ -1031,9 +1027,7 @@ int fuse_conn_init(struct fuse_conn *fc)
 
 	fc->reqctr = 0;
 
-	rc = fuse_req_queue_init(&fc->queue);
-	if (rc != 0)
-		goto err_out;
+	fuse_req_queue_init(fc->queue);
 
 	return 0;
 err_out:
@@ -1123,7 +1117,7 @@ int fuse_restart_requests(struct fuse_conn *fc)
 {
 	int i;
 	struct fuse_req **resend_reqs;
-	u32 read = fc->queue.r.read;	/* ok to access read part since user space is
+	u32 read = fc->queue->r.read;	/* ok to access read part since user space is
  					* inactive */
 	u32 write;
 	u64 sequence;
@@ -1134,15 +1128,15 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	 * Find the sequence of the first request unread by user space. If there are no
 	 * pending requests, use the next request sequence.
 	 */
-	spin_lock(&fc->queue.w.lock);
-	sequence = fc->queue.w.sequence;
-	write = fc->queue.w.write;
+	spin_lock(&fc->queue->w.lock);
+	sequence = fc->queue->w.sequence;
+	write = fc->queue->w.write;
 	if (read != write) {
-		int index = fc->queue.w.requests[read].in.unique &
+		int index = fc->queue->requests[read].in.unique &
 			(FUSE_MAX_REQUEST_IDS - 1);
 		sequence = fc->request_map[index]->sequence;
 	}
-	spin_unlock(&fc->queue.w.lock);
+	spin_unlock(&fc->queue->w.lock);
 
 	printk(KERN_INFO "read %d write %d sequence %lld", read, write, sequence);
 
@@ -1164,16 +1158,16 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	/* Put requests back into the queue*/
 	for (i = resend_count; i != 0; --i) {
 		read = (read - 1) & (FUSE_REQUEST_QUEUE_SIZE - 1);
-		fc->queue.w.requests[read].in = resend_reqs[i - 1]->in;
-		fc->queue.w.requests[read].rdwr = resend_reqs[i - 1]->pxd_rdwr_in;
+		fc->queue->requests[read].in = resend_reqs[i - 1]->in;
+		fc->queue->requests[read].rdwr = resend_reqs[i - 1]->pxd_rdwr_in;
 	}
 
-	spin_lock(&fc->queue.w.lock);
-	fc->queue.w.read = read;
+	spin_lock(&fc->queue->w.lock);
+	fc->queue->w.read = read;
 	/* update the reader part */
-	fc->queue.r.read = read;
-	fc->queue.r.write = fc->queue.w.write;
-	spin_unlock(&fc->queue.w.lock);
+	fc->queue->r.read = read;
+	fc->queue->r.write = fc->queue->w.write;
+	spin_unlock(&fc->queue->w.lock);
 
 	spin_lock(&fc->lock);
 	fuse_conn_wakeup(fc);

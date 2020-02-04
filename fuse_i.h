@@ -80,6 +80,9 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 	u64 free_ids[FUSE_MAX_PER_CPU_IDS];
 };
 
+/** Maximum number of outstanding background requests */
+#define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
+
 /** size of request ring buffer */
 #define FUSE_REQUEST_QUEUE_SIZE (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
@@ -91,16 +94,16 @@ struct ____cacheline_aligned fuse_req_queue {
 		spinlock_t lock;	/** writer lock */
 		uint32_t pad_0;
 		uint64_t sequence;        /** next request sequence number */
-		struct rdwr_in *requests;	/** request ring buffer */
-		uint64_t pad[4];
+		uint64_t pad[5];
 	} w;
 
 	struct ____cacheline_aligned {
 		uint32_t read;          /** read index updated by reader */
 		uint32_t write;		/** write pointer updated by receive function */
-		struct rdwr_in *requests;	/** request ring buffer */
-		uint64_t pad_2[14];
+		uint64_t pad_2[7];
 	} r;
+
+	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 /**
@@ -118,7 +121,7 @@ struct fuse_conn {
 	wait_queue_head_t waitq;
 
 	/** request queue */
-	struct fuse_req_queue queue;
+	struct fuse_req_queue *queue;
 
 	/** maps request ids to requests */
 	struct fuse_req **request_map;
