@@ -40,6 +40,7 @@ struct pxd_device {
 	bool connected;
 	mode_t mode;
 	bool fastpath;
+	bool strict;
 #ifdef __PX_BLKMQ__
         struct blk_mq_tag_set tag_set;
 #endif

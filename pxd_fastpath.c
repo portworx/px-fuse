@@ -360,7 +360,7 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	if (unlikely(bvec->bv_len != PXD_LBS)) {
 		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
 	}
-	set_fs(get_ds());
+	set_fs(KERNEL_DS);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	iov_iter_bvec(&i, WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
@@ -459,7 +459,7 @@ ssize_t _pxd_read(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff
 	mm_segment_t old_fs = get_fs();
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
 
-	set_fs(get_ds());
+	set_fs(KERNEL_DS);
 	result = vfs_read(file, kaddr, bvec->bv_len, pos);
 	set_fs(old_fs);
 	kunmap(bvec->bv_page);
@@ -908,6 +908,7 @@ static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, i
 
 		wake_up(&tc->read_event);
 	}
+	atomic_inc(&head->pxd_dev->fp.ncount);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -1026,7 +1027,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_suspend_io(pxd_dev);
 
 	decode_mode(mode, modestr);
-	printk("device %llu mode %s\n", pxd_dev->dev_id, modestr);
+	printk("device %llu mode %s, nfd %d\n", pxd_dev->dev_id, modestr, nfd);
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
 			if (force) {
@@ -1109,7 +1110,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
-	fp->nfd = 0; // will take slow path, if additional info not provided.
+	memset(fp, 0, sizeof(*fp));
+	// will take slow path, if additional info not provided.
 
 	pxd_printk("Number of cpu ids %d\n", __px_ncpus);
 #if 0
@@ -1177,8 +1179,12 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	int i;
 	struct file* f;
 
+	pxd_printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
+			pxd_dev->dev_id, update_path->count);
 	mode = open_mode(pxd_dev->mode);
-	for (i = 0; i < update_path->size; i++) {
+	for (i = 0; i < update_path->count; i++) {
+		pxd_printk("Fastpath %d: %s, current %s, %p\n", i, update_path->devpath[i],
+				pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
 			// if previous paths are same.. then skip anymore config
 			printk(KERN_INFO"pxd%llu already configured for path %s\n",
@@ -1197,9 +1203,15 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 		pxd_dev->fp.file[i] = f;
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
+		pxd_printk("successfully installed fastpath %s at %p\n",
+				pxd_dev->fp.device_path[i], f);
 	}
-	pxd_dev->fp.nfd = update_path->size;
+	pxd_dev->fp.nfd = update_path->count;
 
+	if (!update_path->count && pxd_dev->strict) goto out_file_failed;
+
+	printk("dev%llu completed setting up %d paths\n",
+			pxd_dev->dev_id, pxd_dev->fp.nfd);
 	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
 
@@ -1212,8 +1224,10 @@ out_file_failed:
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
 
-	// even if there are errors setting up fastpath, initialize to take slow path,
-	// do not report failure outside
+	if (pxd_dev->strict) return -EINVAL;
+
+	// if not in strict mode, then even if there are errors setting up fastpath,
+	// initialize to take slow path, do not report failure outside.
 	return 0;
 }
 
@@ -1295,11 +1309,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	head = __pxd_init_block_head(pxd_dev, bio);
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
-
-		// non-trivial high memory pressure failing IO
-		spin_lock_irq(&pxd_dev->lock);
-		atomic_dec(&pxd_dev->fp.ncount);
-		spin_unlock_irq(&pxd_dev->lock);
 
 		return BLK_QC_RETVAL;
 	}

@@ -100,7 +100,7 @@ struct pxd_init_out {
  */
 struct pxd_update_path_out {
 	uint64_t dev_id;
-	size_t size; // count of paths below.
+	size_t count; // count of paths below.
 	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 };
 
@@ -124,6 +124,7 @@ struct pxd_add_ext_out {
 	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
 	int     enable_fp; /**< enable fast path */
+	bool strict; /***< if strict, then fastpath attach fails if dependencies fail, if not, attach fallback to native path */
 	struct pxd_update_path_out paths; /**< backing device paths */
 };
 
@@ -169,6 +170,17 @@ struct pxd_fastpath_out {
  */
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
+
+static inline
+int pxd_supported_features(void)
+{
+	int features = 0;
+#ifdef __PX_FASTPATH__
+	features |= PXD_FEATURE_FASTPATH;
+#endif
+
+	return features;
+}
 
 
 /**
