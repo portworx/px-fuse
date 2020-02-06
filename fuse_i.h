@@ -9,6 +9,7 @@
 #ifndef _FS_FUSE_I_H
 #define _FS_FUSE_I_H
 
+#ifdef __KERNEL__
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/wait.h>
@@ -79,6 +80,11 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 	/** followed by list of free ids */
 	u64 free_ids[FUSE_MAX_PER_CPU_IDS];
 };
+#endif
+
+#ifndef __KERNEL__
+#define ____cacheline_aligned alignas(64)
+#endif
 
 /** Maximum number of outstanding background requests */
 #define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
@@ -88,6 +94,7 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 
 /** request queue */
 struct ____cacheline_aligned fuse_req_queue {
+#ifdef __KERNEL__
 	struct ____cacheline_aligned {
 		uint32_t write;         /** cached write pointer */
 		uint32_t read;		/** cached read pointer */
@@ -102,10 +109,21 @@ struct ____cacheline_aligned fuse_req_queue {
 		uint32_t write;		/** write pointer updated by receive function */
 		uint64_t pad_2[7];
 	} r;
+#else
+	struct alignas(64) {
+		uint64_t pad[8];
+	} w;
 
+	struct alignas(64) {
+		std::atomic<uint32_t> read;
+		std::atomic<uint32_t> write;
+		uint64_t pad_2[7];
+	} r;
+#endif
 	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
+#ifdef __KERNEL__
 /**
  * A Fuse connection.
  *
@@ -230,5 +248,5 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
 void fuse_request_init(struct fuse_req *req);
 
 void fuse_convert_zero_writes(struct fuse_req *req);
-
+#endif
 #endif /* _FS_FUSE_I_H */
