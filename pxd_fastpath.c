@@ -1224,9 +1224,10 @@ out_file_failed:
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
 
-	// even if there are errors setting up fastpath, initialize to take slow path,
-	// do not report failure outside
 	if (pxd_dev->strict) return -EINVAL;
+
+	// if not in strict mode, then even if there are errors setting up fastpath,
+	// initialize to take slow path, do not report failure outside.
 	return 0;
 }
 
