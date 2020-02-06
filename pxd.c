@@ -524,7 +524,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
-	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
@@ -1528,16 +1527,23 @@ static void pxd_vm_close(struct vm_area_struct *vma)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
 static int pxd_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
 static int pxd_vm_fault(struct vm_fault *vmf)
+#else
+static vm_fault_t pxd_vm_fault(struct vm_fault *vmf)
 #endif
 {
 	struct page *page;
 	struct file *file = vmf->vma->vm_file;
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	void *map_addr = (void*)ctx->fc.queue + (vmf->pgoff << PAGE_SHIFT);
-	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct fuse_req_queue))
+	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct fuse_req_queue)) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
 		return -EFAULT;
+#else
+		return VM_FAULT_SIGSEGV;
+#endif
+	}
 	page = vmalloc_to_page(map_addr);
 	get_page(page);
 	vmf->page = page;
