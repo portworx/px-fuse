@@ -39,36 +39,6 @@
 
 struct fuse_conn;
 
-/** One input argument of a request */
-struct fuse_in_arg {
-	unsigned size;
-	const void *value;
-};
-
-/** The request input */
-struct fuse_in {
-	/** The request header */
-	struct fuse_in_header h;
-
-	/** Number of arguments */
-	unsigned numargs;
-
-	/** Array of arguments */
-	struct fuse_in_arg args[3];
-};
-
-/** One output argument of a request */
-struct fuse_arg {
-	unsigned size;
-	void *value;
-};
-
-/** The request output */
-struct fuse_out {
-	/** Header returned from userspace */
-	struct fuse_out_header h;
-};
-
 /**
  * A request to the client
  */
@@ -76,12 +46,10 @@ struct fuse_req {
 	/** Request to use fastpath */
 	unsigned fastpath:1;
 
-	/** The request input */
-	struct fuse_in in;
+	/** The request input header */
+	struct fuse_in_header in;
 
-	/** The request output */
-	struct fuse_out out;
-
+	/** Read/write request */
 	struct pxd_rdwr_in pxd_rdwr_in;
 
 	union {
@@ -93,7 +61,7 @@ struct fuse_req {
 	};
 
 	/** Request completion callback */
-	void (*end)(struct fuse_conn *, struct fuse_req *);
+	void (*end)(struct fuse_conn *, struct fuse_req *, int status);
 
 	/** Associate request queue */
 	struct request_queue *queue;
@@ -112,27 +80,30 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 	u64 free_ids[FUSE_MAX_PER_CPU_IDS];
 };
 
+/** Maximum number of outstanding background requests */
+#define FUSE_DEFAULT_MAX_BACKGROUND (PXD_MAX_QDEPTH * PXD_MAX_DEVICES)
+
 /** size of request ring buffer */
 #define FUSE_REQUEST_QUEUE_SIZE (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
 /** request queue */
 struct ____cacheline_aligned fuse_req_queue {
 	struct ____cacheline_aligned {
-		uint32_t write;         /** write pointer updated by receive function */
+		uint32_t write;         /** cached write pointer */
 		uint32_t read;		/** cached read pointer */
 		spinlock_t lock;	/** writer lock */
 		uint32_t pad_0;
 		uint64_t sequence;        /** next request sequence number */
-		struct fuse_req **requests;	/** request ring buffer */
-		uint64_t pad[4];
+		uint64_t pad[5];
 	} w;
 
 	struct ____cacheline_aligned {
 		uint32_t read;          /** read index updated by reader */
-		uint32_t write;		/** cached write pointer */
-		struct fuse_req **requests;	/** request ring buffer */
-		uint64_t pad_2[14];
+		uint32_t write;		/** write pointer updated by receive function */
+		uint64_t pad_2[7];
 	} r;
+
+	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 /**
@@ -150,7 +121,7 @@ struct fuse_conn {
 	wait_queue_head_t waitq;
 
 	/** request queue */
-	struct fuse_req_queue queue;
+	struct fuse_req_queue *queue;
 
 	/** maps request ids to requests */
 	struct fuse_req **request_map;
@@ -161,18 +132,18 @@ struct fuse_conn {
 	/** number of free ids in stack */
 	u32 num_free_ids;
 
-	/** per cpu id allocators */
-	struct fuse_per_cpu_ids __percpu *per_cpu_ids;
-
-	/** The next unique request id */
-	u64 reqctr;
-
 	/** Connection established, cleared on umount, connection
 	    abort and device release */
 	bool connected;
 
 	/* Alow operations on disconnected fuse conenction. */
 	bool allow_disconnected;
+
+	/** per cpu id allocators */
+	struct fuse_per_cpu_ids __percpu *per_cpu_ids;
+
+	/** The next unique request id */
+	u64 reqctr;
 
 	/** Refcount */
 	atomic_t count;
@@ -257,5 +228,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
 
 void fuse_request_init(struct fuse_req *req);
-void fuse_req_init_context(struct fuse_req *req);
+
+void fuse_convert_zero_writes(struct fuse_req *req);
+
 #endif /* _FS_FUSE_I_H */
