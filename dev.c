@@ -24,6 +24,7 @@
 #include <linux/version.h>
 #include <linux/blkdev.h>
 #include <linux/sort.h>
+#include <linux/vmalloc.h>
 #include "pxd_compat.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
