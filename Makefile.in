@@ -66,12 +66,12 @@ endif
 ## blkmq checks
 ifeq ($(call verlater,${kmajor},${blkmq_major}),0)
 PXDEFINES += -D__PX_BLKMQ__
-$(warning Kernel version ${KERNELVER} supports blkmq driver model.")
+$(info Kernel version ${KERNELVER} supports blkmq driver model.")
 else
 ifeq ($(call versame,${kmajor},${blkmq_major}),0)
 ifeq ($(call versameorlater,${kminor},${blkmq_minor}),0)
 PXDEFINES += -D__PX_BLKMQ__
-$(warning Kernel version ${KERNELVER} supports blkmq driver model.")
+$(info Kernel version ${KERNELVER} supports blkmq driver model.")
 endif
 endif
 endif
@@ -85,20 +85,20 @@ endif
 ifeq ($(call verlater,${kmajor},${fp_major}),0)
 PXDEFINES += -D__PX_FASTPATH__
 px-objs += pxd_fastpath.o
-$(warning kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 else
 ifeq ($(call versame,${kmajor},${fp_major}),0)
 ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
 PXDEFINES += -D__PX_FASTPATH__
 px-objs += pxd_fastpath.o
-$(warning kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 else
 px-objs += pxd_fastpath_stub.o
-$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 endif
 else
 px-objs += pxd_fastpath_stub.o
-$(warning kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
 endif
 endif
 
