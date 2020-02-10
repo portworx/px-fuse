@@ -360,7 +360,7 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	if (unlikely(bvec->bv_len != PXD_LBS)) {
 		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
 	}
-	set_fs(get_ds());
+	set_fs(KERNEL_DS);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	iov_iter_bvec(&i, WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
@@ -459,7 +459,7 @@ ssize_t _pxd_read(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff
 	mm_segment_t old_fs = get_fs();
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
 
-	set_fs(get_ds());
+	set_fs(KERNEL_DS);
 	result = vfs_read(file, kaddr, bvec->bv_len, pos);
 	set_fs(old_fs);
 	kunmap(bvec->bv_page);
@@ -908,6 +908,7 @@ static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, i
 
 		wake_up(&tc->read_event);
 	}
+	atomic_inc(&head->pxd_dev->fp.ncount);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -1297,10 +1298,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		BIO_ENDIO(bio, -ENOMEM);
 
 		// non-trivial high memory pressure failing IO
-		spin_lock_irq(&pxd_dev->lock);
-		atomic_dec(&pxd_dev->fp.ncount);
-		spin_unlock_irq(&pxd_dev->lock);
-
 		return BLK_QC_RETVAL;
 	}
 
