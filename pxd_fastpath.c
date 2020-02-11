@@ -758,7 +758,9 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 		ret = _pxd_flush(pxd_dev, iot->file);
 		goto out;
 	case REQ_OP_DISCARD:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	case REQ_OP_WRITE_ZEROES:
+#endif
 		ret = _pxd_bio_discard(pxd_dev, iot->file, bio, pos);
 		goto out;
 	default:
@@ -1239,7 +1241,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	unsigned int rw = bio_op(bio);
 #else
 	unsigned int rw = bio_rw(bio);
@@ -1250,7 +1252,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	struct pxd_io_tracker *head;
 	struct thread_context *tc;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	if (!pxd_dev) {
 #else
 	if (rw == READA) rw = READ;
@@ -1310,6 +1312,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
 
+		// trivial high memory pressure failing IO
 		return BLK_QC_RETVAL;
 	}
 
