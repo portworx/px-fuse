@@ -758,7 +758,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 		ret = _pxd_flush(pxd_dev, iot->file);
 		goto out;
 	case REQ_OP_DISCARD:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,1)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
 	case REQ_OP_WRITE_ZEROES:
 #endif
 		ret = _pxd_bio_discard(pxd_dev, iot->file, bio, pos);
