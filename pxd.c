@@ -1525,7 +1525,7 @@ static void pxd_vm_close(struct vm_area_struct *vma)
 	pr_info("pxd_vm_close %d", ctx->id);
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0)
 static int pxd_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
 static int pxd_vm_fault(struct vm_fault *vmf)
@@ -1534,7 +1534,11 @@ static vm_fault_t pxd_vm_fault(struct vm_fault *vmf)
 #endif
 {
 	struct page *page;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0)
+        struct file *file = vma->vm_file;
+#else
 	struct file *file = vmf->vma->vm_file;
+#endif
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	void *map_addr = (void*)ctx->fc.queue + (vmf->pgoff << PAGE_SHIFT);
 	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct fuse_req_queue)) {
