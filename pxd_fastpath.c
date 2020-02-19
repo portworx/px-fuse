@@ -41,7 +41,7 @@ unsigned int __pxd_active(struct pxd_device *pxd_dev)
 unsigned int pxd_active(struct pxd_device *pxd_dev)
 {
 	unsigned int active;
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->lock);
 	active = __pxd_active(pxd_dev);
@@ -322,13 +322,11 @@ static void pxd_issue_sync(struct pxd_device *pxd_dev, struct file *file)
 				pxd_dev->dev_id, ret);
 	}
 
-	//spin_lock(&pxd_dev->fp.sync_lock);
 	spin_lock(&pxd_dev->fp.sync_event.lock);
 	atomic_set(&pxd_dev->fp.nwrite_counter, 0);
 	atomic_set(&pxd_dev->fp.nsync_active, 0);
 	atomic_inc(&pxd_dev->fp.nsync);
 	spin_unlock(&pxd_dev->fp.sync_event.lock);
-	//spin_unlock(&pxd_dev->fp.sync_lock);
 
 	wake_up(&pxd_dev->fp.sync_event);
 }
@@ -561,7 +559,7 @@ static void pxd_complete_io(struct bio* bio)
 
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
 		// but update head status if this is a failure
@@ -630,7 +628,7 @@ static void pxd_complete_io(struct bio* bio)
 	spin_lock(&pxd_dev->lock);
 	printk("%s: dev %llu ncount %d, ncomplete %d\n", __func__, pxd_dev->dev_id,
 			pxd_dev->fp.ncount, pxd_dev->fp.ncomplete);
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	BUG_ON((__pxd_active(pxd_dev) == 0));
 	pxd_dev->fp.ncomplete++;
 	spin_unlock(&pxd_dev->lock);
@@ -759,7 +757,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	int ret;
 #endif
 
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
@@ -837,7 +835,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	int ret;
 	struct bio *bio = &iot->clone;
 
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
@@ -905,7 +903,7 @@ static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker
 	//
 	struct pxd_io_tracker *curr;
 
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	// NOTE NOTE NOTE accessing out of lock
 	if (!pxd_dev->connected || pxd_dev->removing) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
@@ -951,7 +949,7 @@ static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, i
 {
 	struct pxd_device *pxd_dev = head->pxd_dev;
 
-	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	if (rw != READ) {
 		spin_lock(&tc->write_lock);
 		list_add_tail(&head->item, &tc->iot_writers);
@@ -1012,11 +1010,11 @@ static int pxd_io_thread(void *data, int rw)
 		pxd_dev = head->pxd_dev;
 		BUG_ON(head->magic != PXD_IOT_MAGIC);
 		BUG_ON(!pxd_dev);
-		BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+		BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 		if (unlikely(pxd_handle_io(tc, head) != 0)) {
 			/* if early fail, then force wakeup */
-			BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+			BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 			spin_lock(&pxd_dev->lock);
 			pxd_dev->fp.ncomplete++;
 			printk("%s: dev %llu (%px) ncount %d\n", __func__, pxd_dev->dev_id, pxd_dev, pxd_dev->fp.ncount);
@@ -1039,14 +1037,14 @@ static int pxd_io_writer(void *data)
 static void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
 	int need_flush = 0;
-	spin_lock(&pxd_dev->fp.suspend_lock);
+	spin_lock(&pxd_dev->fp.suspend_wait.lock);
 	if (!pxd_dev->fp.suspend++) {
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 		need_flush = 1;
 	} else {
 		printk("For pxd device %llu IO already suspended\n", pxd_dev->dev_id);
 	}
-	spin_unlock(&pxd_dev->fp.suspend_lock);
+	spin_unlock(&pxd_dev->fp.suspend_wait.lock);
 
 	// need to wait for inflight IOs to complete
 	if (need_flush) {
@@ -1064,16 +1062,19 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 
 static void pxd_resume_io(struct pxd_device *pxd_dev)
 {
-	spin_lock(&pxd_dev->fp.suspend_lock);
+	bool wakeup;
+	spin_lock(&pxd_dev->fp.suspend_wait.lock);
 	pxd_dev->fp.suspend--;
-	if (!pxd_dev->fp.suspend) {
+	wakeup = (pxd_dev->fp.suspend == 0);
+	spin_unlock(&pxd_dev->fp.suspend_wait.lock);
+
+	if (wakeup) {
 		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
 		wake_up(&pxd_dev->fp.suspend_wait);
 	} else {
 		printk("For pxd device %llu IO still suspended(%d)\n",
 				pxd_dev->dev_id, pxd_dev->fp.suspend);
 	}
-	spin_unlock(&pxd_dev->fp.suspend_lock);
 }
 
 /*
@@ -1207,7 +1208,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 	// device temporary IO suspend
 	init_waitqueue_head(&fp->suspend_wait);
-	spin_lock_init(&fp->suspend_lock);
 	fp->suspend = 0;
 
 	// congestion init
@@ -1218,7 +1218,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	fp->nr_congestion_off = 0;
 
 	init_waitqueue_head(&fp->sync_event);
-	spin_lock_init(&fp->sync_lock);
 
 	atomic_set(&fp->nsync_active, 0);
 	atomic_set(&fp->nsync, 0);
@@ -1347,7 +1346,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	// If IO suspended, then hang IO onto the suspend wait queue
 	{
-		//spin_lock(&pxd_dev->fp.suspend_lock);
 		spin_lock(&pxd_dev->fp.suspend_wait.lock);
 		if (pxd_dev->fp.suspend) {
 			printk("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
@@ -1359,7 +1357,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 		}
 		spin_unlock(&pxd_dev->fp.suspend_wait.lock);
-		//spin_unlock(&pxd_dev->fp.suspend_lock);
 	}
 
 	if (pxd_dev->removing) {
