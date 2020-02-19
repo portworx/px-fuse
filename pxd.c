@@ -183,7 +183,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_printk("%s: receive reply to %p(%lld) at %lld\n",
+	pxd_printk("%s: receive reply to %px(%lld) at %lld\n",
 			__func__, req, req->in.unique,
 			req->pxd_rdwr_in.offset);
 }
@@ -738,7 +738,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->fastpath = add->enable_fp;
 	pxd_dev->strict = add->strict;
 
-	printk(KERN_INFO"Device %llu added %p with mode %#x fastpath %d(%d) npath %lu\n",
+	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d(%d) npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->strict, add->paths.count);
 
 	// initializes fastpath context part of pxd_dev, enables it only

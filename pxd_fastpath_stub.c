@@ -24,5 +24,4 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	return 0; // cannot fail
 }
 
-unsigned int pxd_active(struct pxd_device*) { return 0; }
 #endif
