@@ -51,9 +51,6 @@ module_param(pxd_detect_zero_writes, uint, 0644);
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
-extern void init_bgthread(void);
-extern void cleanup_bgthread(void);
-
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
@@ -1690,7 +1687,6 @@ int pxd_init(void)
 			gitversion, pxd_supported_features());
 #endif
 
-	init_bgthread();
 	return 0;
 
 out_blkdev:
@@ -1705,7 +1701,6 @@ out_fuse:
 out_fuse_dev:
 	fuse_dev_cleanup();
 out:
-	cleanup_bgthread();
 	return err;
 }
 
@@ -1713,7 +1708,6 @@ void pxd_exit(void)
 {
 	int i;
 
-	cleanup_bgthread();
 	fastpath_cleanup();
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");
