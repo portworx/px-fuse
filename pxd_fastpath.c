@@ -721,16 +721,13 @@ void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	spin_unlock(&ctx->lock);
 }
 
-#define HACKIT
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 {
 	struct bio *bio = &iot->clone;
-#ifndef HACKIT
 	unsigned int op = bio_op(bio);
 	loff_t pos;
 	int ret;
-#endif
 
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
@@ -740,11 +737,6 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
-#ifdef HACKIT
-	// HACH HACK HACK
-	pxd_complete_io(bio);
-	return 0;
-#else
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n", PXD_ACTIVE(pxd_dev));
 	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
 
@@ -800,7 +792,6 @@ out:
 	pxd_complete_io(bio);
 
 	return ret;
-#endif
 }
 
 #else
