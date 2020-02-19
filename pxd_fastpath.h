@@ -94,8 +94,8 @@ struct pxd_fastpath_extension {
 
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path
-	int ncomplete; // [global] total completed requests
-	int ncount; // [global] total active requests, always modify with pxd_dev.lock
+	atomic_t ncomplete; // [global] total completed requests
+	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
@@ -127,6 +127,10 @@ void disableFastPath(struct pxd_device *pxd_dev);
 
 // congestion
 int pxd_device_congested(void *, int);
-unsigned int pxd_active(struct pxd_device*);
+#ifdef __PX_FASTPATH__
+#define PXD_ACTIVE(pxd)  (atomic_read(&pxd_dev->fp.ncount))
+#else
+#define PXD_ACTIVE(pxd) (0)
+#endif
 
 #endif /* _PXD_FASTPATH_H_ */

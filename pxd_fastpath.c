@@ -28,33 +28,11 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw);
 #define pxd_get_writeio(tc)  pxd_get_io(tc, WRITE)
 #define pxd_get_readio(tc)   pxd_get_io(tc, READ)
 
-unsigned int __pxd_active(struct pxd_device *pxd_dev)
-{
-	unsigned int in, out;
-
-	in = pxd_dev->fp.ncount;
-	out = pxd_dev->fp.ncomplete;
-
-	return (in >= out) ? (in - out) : 0;
-}
-
-unsigned int pxd_active(struct pxd_device *pxd_dev)
-{
-	unsigned int active;
-	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-
-	spin_lock(&pxd_dev->lock);
-	active = __pxd_active(pxd_dev);
-	spin_unlock(&pxd_dev->lock);
-
-	return active;
-}
-
 // congestion callback from kernel writeback module
 int pxd_device_congested(void *data, int bits)
 {
 	struct pxd_device *pxd_dev = data;
-	int ncount = pxd_active(pxd_dev);
+	int ncount = PXD_ACTIVE(pxd_dev);
 
 	// notify congested if device is suspended as well.
 	// modified under lock, read outside lock.
@@ -625,13 +603,10 @@ static void pxd_complete_io(struct bio* bio)
 
 	__pxd_cleanup_block_io(head);
 
-	spin_lock(&pxd_dev->lock);
-	printk("%s: dev %llu ncount %d, ncomplete %d\n", __func__, pxd_dev->dev_id,
-			pxd_dev->fp.ncount, pxd_dev->fp.ncomplete);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	BUG_ON((__pxd_active(pxd_dev) == 0));
-	pxd_dev->fp.ncomplete++;
-	spin_unlock(&pxd_dev->lock);
+	BUG_ON((PXD_ACTIVE(pxd_dev) == 0));
+	atomic_inc(&pxd_dev->fp.ncomplete);
+	atomic_dec(&pxd_dev->fp.ncount);
 }
 
 static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_dev,
@@ -770,7 +745,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	pxd_complete_io(bio);
 	return 0;
 #else
-	pxd_printk("do_bio_filebacked for new bio (pending %u)\n", pxd_active(pxd_dev));
+	pxd_printk("do_bio_filebacked for new bio (pending %u)\n", PXD_ACTIVE(pxd_dev));
 	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
 
 	switch (op) {
@@ -961,11 +936,7 @@ static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, i
 		wake_up(&tc->read_event);
 		spin_unlock(&tc->read_lock);
 	}
-	spin_lock(&pxd_dev->lock);
-	pxd_dev->fp.ncount++;
-	printk("%s: dev %llu (%px) head %px ncount %d, ncomplete %d\n",
-		__func__, pxd_dev->dev_id, pxd_dev, head, pxd_dev->fp.ncount, pxd_dev->fp.ncomplete);
-	spin_unlock(&pxd_dev->lock);
+	atomic_inc(&pxd_dev->fp.ncount);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -1015,10 +986,8 @@ static int pxd_io_thread(void *data, int rw)
 		if (unlikely(pxd_handle_io(tc, head) != 0)) {
 			/* if early fail, then force wakeup */
 			BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-			spin_lock(&pxd_dev->lock);
-			pxd_dev->fp.ncomplete++;
-			printk("%s: dev %llu (%px) ncount %d\n", __func__, pxd_dev->dev_id, pxd_dev, pxd_dev->fp.ncount);
-			spin_unlock(&pxd_dev->lock);
+			atomic_inc(&pxd_dev->fp.ncomplete);
+			atomic_dec(&pxd_dev->fp.ncount);
 		}
 	}
 	return 0;
@@ -1051,7 +1020,7 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 		int nactive = 0;
 		do {
 			mb();
-			nactive = pxd_active(pxd_dev);
+			nactive = PXD_ACTIVE(pxd_dev);
 			if (!nactive) break;
 			printk(KERN_WARNING"pxd device %llu still has %d active IO, waiting completion to suspend",
 					pxd_dev->dev_id, nactive);
@@ -1230,9 +1199,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nswitch,0);
 	atomic_set(&fp->nslowPath,0);
 	atomic_set(&fp->nwrite_counter,0);
-	// protected by pxd_dev.lock
-	fp->ncount = 0;
-	fp->ncomplete = 0;
+	atomic_set(&pxd_dev->fp.ncount, 0);
+	atomic_set(&pxd_dev->fp.ncomplete, 0);
 
 	for (i = 0; i < MAX_NUMNODES; i++) {
 		atomic_set(&fp->index[i], 0);
