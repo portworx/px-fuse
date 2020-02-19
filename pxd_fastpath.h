@@ -17,7 +17,7 @@
 // create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
 // writer threads are pinned on the same cpu.
 // reader threads are pinned on the same numa node
-#define PXD_MAX_THREAD_PER_CPU (4)
+#define PXD_MAX_THREAD_PER_CPU (1)
 
 struct pxd_device;
 struct pxd_context;
@@ -31,6 +31,8 @@ struct node_cpu_map {
 
 // Added metadata for each bio
 struct pxd_io_tracker {
+#define PXD_IOT_MAGIC (0xbeefcafe)
+	unsigned int magic;
 	struct pxd_device *pxd_dev; // back pointer to pxd device
 	struct pxd_io_tracker *head; // back pointer to head copy [ALL]
 	struct list_head replicas; // only replica needs this
@@ -79,10 +81,8 @@ struct pxd_fastpath_extension {
 	// if set, then newer IOs shall block, until reactivated.
 	int suspend;
 	wait_queue_head_t  suspend_wait;
-	spinlock_t suspend_lock;
 
 	wait_queue_head_t   sync_event;
-	spinlock_t   	sync_lock;
 	atomic_t nsync_active; // [global] currently active?
 	atomic_t nsync; // [global] number of forced syncs completed
 	atomic_t nio_discard;
@@ -91,10 +91,11 @@ struct pxd_fastpath_extension {
 	atomic_t nio_flush_nop;
 	atomic_t nio_fua;
 	atomic_t nio_write;
-	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
+
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path
-	atomic_t ncomplete; // [global] total completed requests
+	int ncomplete; // [global] total completed requests
+	int ncount; // [global] total active requests, always modify with pxd_dev.lock
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
@@ -126,5 +127,6 @@ void disableFastPath(struct pxd_device *pxd_dev);
 
 // congestion
 int pxd_device_congested(void *, int);
+unsigned int pxd_active(struct pxd_device*);
 
 #endif /* _PXD_FASTPATH_H_ */

@@ -15,6 +15,8 @@
 
 /// @file px_fuse/pxd.h
 
+#define PXD_DEV_MAGIC (0xcafec0de)
+#define PXD_POISON (0xdeadbeef)
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */

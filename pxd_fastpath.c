@@ -5,6 +5,8 @@
 #include "pxd_core.h"
 #include "pxd_compat.h"
 
+#define STATIC
+
 // cached info at px loadtime, to gracefully handle hot plugging cpus
 static int __px_ncpus;
 
@@ -26,11 +28,33 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw);
 #define pxd_get_writeio(tc)  pxd_get_io(tc, WRITE)
 #define pxd_get_readio(tc)   pxd_get_io(tc, READ)
 
+unsigned int __pxd_active(struct pxd_device *pxd_dev)
+{
+	unsigned int in, out;
+
+	in = pxd_dev->fp.ncount;
+	out = pxd_dev->fp.ncomplete;
+
+	return (in >= out) ? (in - out) : 0;
+}
+
+unsigned int pxd_active(struct pxd_device *pxd_dev)
+{
+	unsigned int active;
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+
+	spin_lock(&pxd_dev->lock);
+	active = __pxd_active(pxd_dev);
+	spin_unlock(&pxd_dev->lock);
+
+	return active;
+}
+
 // congestion callback from kernel writeback module
 int pxd_device_congested(void *data, int bits)
 {
 	struct pxd_device *pxd_dev = data;
-	int ncount = atomic_read(&pxd_dev->fp.ncount);
+	int ncount = pxd_active(pxd_dev);
 
 	// notify congested if device is suspended as well.
 	// modified under lock, read outside lock.
@@ -40,23 +64,23 @@ int pxd_device_congested(void *data, int bits)
 
 	// does not care about async or sync request.
 	if (ncount > pxd_dev->fp.qdepth) {
-		spin_lock_irq(&pxd_dev->lock);
+		spin_lock(&pxd_dev->lock);
 		if (!pxd_dev->fp.congested) {
 			pxd_dev->fp.congested = true;
 			pxd_dev->fp.nr_congestion_on++;
 		}
-		spin_unlock_irq(&pxd_dev->lock);
+		spin_unlock(&pxd_dev->lock);
 		return 1;
 	}
 
 	if (pxd_dev->fp.congested) {
 		if (ncount < (3*pxd_dev->fp.qdepth)/4) {
-			spin_lock_irq(&pxd_dev->lock);
+			spin_lock(&pxd_dev->lock);
 			if (pxd_dev->fp.congested) {
 				pxd_dev->fp.congested = false;
 				pxd_dev->fp.nr_congestion_off++;
 			}
-			spin_unlock_irq(&pxd_dev->lock);
+			spin_unlock(&pxd_dev->lock);
 			return 0;
 		}
 		return 1;
@@ -71,13 +95,13 @@ int pxd_io_empty(struct thread_context *tc, int rw)
 	int empty;
 
 	if (rw == WRITE) {
-		spin_lock_irq(&tc->write_lock);
+		spin_lock(&tc->write_lock);
 		empty = list_empty(&tc->iot_writers);
-		spin_unlock_irq(&tc->write_lock);
+		spin_unlock(&tc->write_lock);
 	} else {
-		spin_lock_irq(&tc->read_lock);
+		spin_lock(&tc->read_lock);
 		empty = list_empty(&tc->iot_readers);
-		spin_unlock_irq(&tc->read_lock);
+		spin_unlock(&tc->read_lock);
 	}
 
 	return empty;
@@ -113,7 +137,7 @@ static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid)
 	for (i = 0; i < PXD_MAX_THREAD_PER_CPU; i++) {
 		// set dedicated thread function
 		tc->reader[i] = kthread_create_on_node(pxd_io_reader, tc,
-				node, "pxwr%d:%d:%d", node, cpuid, i);
+				node, "pxrd%d:%d:%d", node, cpuid, i);
 		if (IS_ERR(tc->reader[i])) {
 			pxd_printk("Init global reader kthread for cpu %d failed %lu\n",
 				cpuid, PTR_ERR(tc->reader[i]));
@@ -131,7 +155,7 @@ static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid)
 	for (i = 0; i < PXD_MAX_THREAD_PER_CPU; i++) {
 		// set dedicated thread function
 		tc->writer[i] = kthread_create_on_node(pxd_io_writer, tc,
-				node, "pxrd%d:%d:%d", node, cpuid, i);
+				node, "pxwr%d:%d:%d", node, cpuid, i);
 		if (IS_ERR(tc->writer[i])) {
 			pxd_printk("Init global writer kthread for cpu %d failed %lu\n",
 				cpuid, PTR_ERR(tc->writer[i]));
@@ -151,7 +175,7 @@ fail_wr:
 	for(;i >= 0; i--) {
 		if (tc->writer[i]) kthread_stop(tc->writer[i]);
 	}
-	i = PXD_MAX_THREAD_PER_CPU;
+	i = PXD_MAX_THREAD_PER_CPU-1;
 fail_rd:
 	for(;i >= 0; i--) {
 		if (tc->reader[i]) kthread_stop(tc->reader[i]);
@@ -253,7 +277,7 @@ void fastpath_cleanup(void)
 	g_tc = NULL;
 }
 
-static int _pxd_flush(struct pxd_device *pxd_dev, struct file *file)
+STATIC int _pxd_flush(struct pxd_device *pxd_dev, struct file *file)
 {
 	int ret = 0;
 
@@ -298,32 +322,34 @@ static void pxd_issue_sync(struct pxd_device *pxd_dev, struct file *file)
 				pxd_dev->dev_id, ret);
 	}
 
-	spin_lock_irq(&pxd_dev->fp.sync_lock);
+	//spin_lock(&pxd_dev->fp.sync_lock);
+	spin_lock(&pxd_dev->fp.sync_event.lock);
 	atomic_set(&pxd_dev->fp.nwrite_counter, 0);
 	atomic_set(&pxd_dev->fp.nsync_active, 0);
 	atomic_inc(&pxd_dev->fp.nsync);
-	spin_unlock_irq(&pxd_dev->fp.sync_lock);
+	spin_unlock(&pxd_dev->fp.sync_event.lock);
+	//spin_unlock(&pxd_dev->fp.sync_lock);
 
 	wake_up(&pxd_dev->fp.sync_event);
 }
 
-static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file *file)
+STATIC void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file *file)
 {
 	int sync_wait, sync_now;
-	spin_lock_irq(&pxd_dev->fp.sync_lock);
+
+	spin_lock(&pxd_dev->fp.sync_event.lock);
 	sync_now = pxd_should_flush(pxd_dev, &sync_wait);
 
 	if (sync_wait) {
-		wait_event_lock_irq(pxd_dev->fp.sync_event,
-				!atomic_read(&pxd_dev->fp.nsync_active),
-				pxd_dev->fp.sync_lock);
+		wait_event_interruptible_locked(pxd_dev->fp.sync_event,
+				!atomic_read(&pxd_dev->fp.nsync_active));
 	}
-	spin_unlock_irq(&pxd_dev->fp.sync_lock);
+	spin_unlock(&pxd_dev->fp.sync_event.lock);
 
 	if (sync_now) pxd_issue_sync(pxd_dev, file);
 }
 
-static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
+STATIC int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
 {
 	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 	int ret;
@@ -392,7 +418,7 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	return bw;
 }
 
-static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
+STATIC int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
 {
 	int ret = 0;
 	int nsegs = 0;
@@ -409,7 +435,7 @@ static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *b
 		nsegs++;
 		ret = _pxd_write(pxd_dev->dev_id, file, &bvec, &pos);
 		if (ret < 0) {
-			printk(KERN_ERR"do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+			printk(KERN_ERR"do_pxd_write pos %lld page %px, off %u for len %d FAILED %d\n",
 				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
 			return ret;
 		}
@@ -421,7 +447,7 @@ static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *b
 		nsegs++;
 		ret = _pxd_write(pxd_dev->dev_id, file, bvec, &pos);
 		if (ret < 0) {
-			pxd_printk("device %llu: do_pxd_write pos %lld page %p, off %u for len %d FAILED %d\n",
+			pxd_printk("device %llu: do_pxd_write pos %lld page %px, off %u for len %d FAILED %d\n",
 				pxd_dev->dev_id, pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
 			return ret;
 		}
@@ -469,7 +495,7 @@ ssize_t _pxd_read(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff
 	return result;
 }
 
-static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t *pos)
+STATIC ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t *pos)
 {
 	ssize_t s;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -504,15 +530,27 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct
 
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 {
+	int dir = bio_data_dir(head->orig);
+
 	while (!list_empty(&head->replicas)) {
 		struct pxd_io_tracker *repl = list_first_entry(&head->replicas, struct pxd_io_tracker, item);
-		pxd_printk("__pxd_cleanup_block_io for head %p, repl %p\n", head, repl);
+		BUG_ON(repl->magic != PXD_IOT_MAGIC);
+		repl->magic = PXD_POISON;
 		list_del(&repl->item);
+		printk("freeing repl %px, bio %px dir %d\n", repl, &repl->clone, dir == READ);
 		bio_put(&repl->clone);
 	}
 
-	pxd_printk("__pxd_cleanup_block_io freeing head %p\n", head);
+	BUG_ON(head->magic != PXD_IOT_MAGIC);
+	head->magic = PXD_POISON;
+	printk("freeing tracker %px, bio %px dir %d\n", head, &head->clone, dir == READ);
 	bio_put(&head->clone);
+}
+
+static void pxd_complete_io_dummy(struct bio* bio)
+{
+	printk("%s: bio %px should never be called\n", __func__, bio);
+	BUG();
 }
 
 static void pxd_complete_io(struct bio* bio)
@@ -521,18 +559,9 @@ static void pxd_complete_io(struct bio* bio)
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
 
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
-
-	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d\n",
-			bio, pxd_dev, head, atomic_read(&head->active));
-
+	BUG_ON(iot->magic != PXD_IOT_MAGIC);
+	BUG_ON(head->magic != PXD_IOT_MAGIC);
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
 		// but update head status if this is a failure
@@ -545,20 +574,26 @@ static void pxd_complete_io(struct bio* bio)
 			atomic_inc(&head->fails);
 		}
 #endif
-		pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d error %d early return\n",
+		pxd_printk("pxd_complete_io for bio %px (pxd %px) with head %px active %d error %d early return\n",
 			bio, pxd_dev, head, atomic_read(&head->active), atomic_read(&head->fails));
 
 		return;
 	}
+
+	pxd_io_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
+			bio->bi_vcnt, bio->bi_flags,
+			(bio->bi_opf & REQ_OP_MASK),
+			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
 #else
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
-
-	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d - completing orig %p\n",
-			bio, pxd_dev, head, atomic_read(&head->active), iot->orig);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
@@ -592,8 +627,13 @@ static void pxd_complete_io(struct bio* bio)
 
 	__pxd_cleanup_block_io(head);
 
-	atomic_dec(&pxd_dev->fp.ncount);
-	atomic_inc(&pxd_dev->fp.ncomplete);
+	spin_lock(&pxd_dev->lock);
+	printk("%s: dev %llu ncount %d, ncomplete %d\n", __func__, pxd_dev->dev_id,
+			pxd_dev->fp.ncount, pxd_dev->fp.ncomplete);
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON((__pxd_active(pxd_dev) == 0));
+	pxd_dev->fp.ncomplete++;
+	spin_unlock(&pxd_dev->lock);
 }
 
 static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_dev,
@@ -604,7 +644,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	struct inode *inode = mapping->host;
 	struct block_device *bdi = I_BDEV(inode);
 
-	pxd_printk("pxd %p:__pxd_init_block_replica entering with bio %p, fileh %p with blkg %p\n",
+	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px with blkg %px\n",
 			pxd_dev, bio, fileh, bio->bi_blkg);
 
 	clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
@@ -614,7 +654,9 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	}
 
 	iot = container_of(clone_bio, struct pxd_io_tracker, clone);
+	BUG_ON(&iot->clone != clone_bio);
 
+	iot->magic = PXD_IOT_MAGIC;
 	iot->pxd_dev = pxd_dev;
 	iot->head = iot;
 	INIT_LIST_HEAD(&iot->replicas);
@@ -624,23 +666,15 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	atomic_set(&iot->active, 0);
 	atomic_set(&iot->fails, 0);
 	iot->file = fileh;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	iot->read = (bio_op(bio) == REQ_OP_READ);
-#else
 	iot->read = (bio_data_dir(bio) == READ);
-#endif
 
-	pxd_printk("pxd %p:__pxd_init_block_replica clone bio %p (blkg %p), resetting backing block dev to %p\n",
-			pxd_dev, clone_bio, clone_bio->bi_blkg, bdi);
-
+	clone_bio->bi_private = pxd_dev;
 	if (S_ISBLK(inode->i_mode)) {
 		BIO_SET_DEV(clone_bio, bdi);
+		clone_bio->bi_end_io = pxd_complete_io;
+	} else {
+		clone_bio->bi_end_io = pxd_complete_io_dummy;
 	}
-	clone_bio->bi_private = pxd_dev;
-	clone_bio->bi_end_io = pxd_complete_io;
-
-	pxd_printk("pxd %p:__pxd_init_block_replica allocated repl %p for orig bio %p\n",
-			pxd_dev, iot, bio);
 
 	return iot;
 }
@@ -650,14 +684,17 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 	struct pxd_io_tracker* head;
 	struct pxd_io_tracker *repl;
 	int index;
+	int dir = bio_data_dir(bio);
 
-	pxd_printk("pxd %p:__pxd_init_block_replica to allocate iotracker for bio %p\n",
+	pxd_printk("pxd %px:__pxd_init_block_replica to allocate iotracker for bio %px\n",
 			pxd_dev, bio);
 
 	head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
 	if (!head) {
 		return NULL;
 	}
+	printk("allocated tracker %px, clone bio %px dir %d\n", head, &head->clone, dir == READ);
+
 	// initialize the replicas only if the request is non-read
 	if (!head->read) {
 		for (index=1; index<pxd_dev->fp.nfd; index++) {
@@ -666,13 +703,14 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 				goto repl_cleanup;
 			}
 
+			BUG_ON(repl->magic != PXD_IOT_MAGIC);
 			repl->head = head;
-			list_add(&repl->item, &head->replicas);
+			list_add_tail(&repl->item, &head->replicas);
+			printk("allocated repl %px, clone bio %px dir %d\n", repl, &repl->clone, dir == READ);
 		}
 	}
 
-	pxd_printk("pxd %p:__pxd_init_block_head allocated head %p for orig bio %p nfd %d\n",
-			pxd_dev, head, bio, pxd_dev->fp.nfd);
+	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	return head;
 
 repl_cleanup:
@@ -690,9 +728,9 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	}
 
 	if (enable) {
-		spin_lock_irq(&pxd_dev->lock);
+		spin_lock(&pxd_dev->lock);
 		enableFastPath(pxd_dev, true);
-		spin_unlock_irq(&pxd_dev->lock);
+		spin_unlock(&pxd_dev->lock);
 	}
 
 	if (enable) pxd_dev->connected = true;
@@ -710,22 +748,31 @@ void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	spin_unlock(&ctx->lock);
 }
 
+#define HACKIT
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 {
 	struct bio *bio = &iot->clone;
-	loff_t pos;
+#ifndef HACKIT
 	unsigned int op = bio_op(bio);
+	loff_t pos;
 	int ret;
+#endif
 
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #else
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
-	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
-				atomic_read(&pxd_dev->fp.ncount));
+#ifdef HACKIT
+	// HACH HACK HACK
+	pxd_complete_io(bio);
+	return 0;
+#else
+	pxd_printk("do_bio_filebacked for new bio (pending %u)\n", pxd_active(pxd_dev));
 	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
 
 	switch (op) {
@@ -780,6 +827,7 @@ out:
 	pxd_complete_io(bio);
 
 	return ret;
+#endif
 }
 
 #else
@@ -789,6 +837,8 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	int ret;
 	struct bio *bio = &iot->clone;
 
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
 #else
@@ -855,8 +905,9 @@ static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker
 	//
 	struct pxd_io_tracker *curr;
 
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
 	// NOTE NOTE NOTE accessing out of lock
-	if (!pxd_dev->connected) {
+	if (!pxd_dev->connected || pxd_dev->removing) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
 		__pxd_cleanup_block_io(head);
 		BIO_ENDIO(bio, -ENXIO);
@@ -898,19 +949,25 @@ static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker
 
 static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw)
 {
-	if (rw != READ) {
-		spin_lock_irq(&tc->write_lock);
-		list_add(&head->item, &tc->iot_writers);
-		spin_unlock_irq(&tc->write_lock);
-		wake_up(&tc->write_event);
-	} else {
-		spin_lock_irq(&tc->read_lock);
-		list_add(&head->item, &tc->iot_readers);
-		spin_unlock_irq(&tc->read_lock);
+	struct pxd_device *pxd_dev = head->pxd_dev;
 
+	BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+	if (rw != READ) {
+		spin_lock(&tc->write_lock);
+		list_add_tail(&head->item, &tc->iot_writers);
+		wake_up(&tc->write_event);
+		spin_unlock(&tc->write_lock);
+	} else {
+		spin_lock(&tc->read_lock);
+		list_add_tail(&head->item, &tc->iot_readers);
 		wake_up(&tc->read_event);
+		spin_unlock(&tc->read_lock);
 	}
-	atomic_inc(&head->pxd_dev->fp.ncount);
+	spin_lock(&pxd_dev->lock);
+	pxd_dev->fp.ncount++;
+	printk("%s: dev %llu (%px) head %px ncount %d, ncomplete %d\n",
+		__func__, pxd_dev->dev_id, pxd_dev, head, pxd_dev->fp.ncount, pxd_dev->fp.ncomplete);
+	spin_unlock(&pxd_dev->lock);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -918,19 +975,19 @@ static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
 	struct pxd_io_tracker* head = NULL;
 
 	if (rw != READ) {
-		spin_lock_irq(&tc->write_lock);
+		spin_lock(&tc->write_lock);
 		if (!list_empty(&tc->iot_writers)) {
 			head = list_first_entry(&tc->iot_writers, struct pxd_io_tracker, item);
 			list_del(&head->item);
 		}
-		spin_unlock_irq(&tc->write_lock);
+		spin_unlock(&tc->write_lock);
 	} else {
-		spin_lock_irq(&tc->read_lock);
+		spin_lock(&tc->read_lock);
 		if (!list_empty(&tc->iot_readers)) {
 			head = list_first_entry(&tc->iot_readers, struct pxd_io_tracker, item);
 			list_del(&head->item);
 		}
-		spin_unlock_irq(&tc->read_lock);
+		spin_unlock(&tc->read_lock);
 	}
 
 	return head;
@@ -940,6 +997,8 @@ static int pxd_io_thread(void *data, int rw)
 {
 	struct thread_context *tc = data;
 	struct pxd_io_tracker *head;
+	struct pxd_device *pxd_dev;
+	int run = 0;
 
 	while (!kthread_should_stop()) {
 		pxd_wait_io(tc, rw);
@@ -948,15 +1007,20 @@ static int pxd_io_thread(void *data, int rw)
 		if (!head) {
 			continue;
 		}
+		printk("%s:%s woke up, run %d\n", current->comm, __func__, run++);
+
+		pxd_dev = head->pxd_dev;
+		BUG_ON(head->magic != PXD_IOT_MAGIC);
+		BUG_ON(!pxd_dev);
+		BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
 
 		if (unlikely(pxd_handle_io(tc, head) != 0)) {
 			/* if early fail, then force wakeup */
-
-			struct pxd_device *pxd_dev = head->pxd_dev;
-			BUG_ON(!pxd_dev);
-
-			atomic_dec(&pxd_dev->fp.ncount);
-			atomic_inc(&pxd_dev->fp.ncomplete);
+			BUG_ON(pxd_dev->magic != PXDDEV_MAGIC);
+			spin_lock(&pxd_dev->lock);
+			pxd_dev->fp.ncomplete++;
+			printk("%s: dev %llu (%px) ncount %d\n", __func__, pxd_dev->dev_id, pxd_dev, pxd_dev->fp.ncount);
+			spin_unlock(&pxd_dev->lock);
 		}
 	}
 	return 0;
@@ -975,19 +1039,21 @@ static int pxd_io_writer(void *data)
 static void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
 	int need_flush = 0;
-	spin_lock_irq(&pxd_dev->fp.suspend_lock);
+	spin_lock(&pxd_dev->fp.suspend_lock);
 	if (!pxd_dev->fp.suspend++) {
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 		need_flush = 1;
 	} else {
 		printk("For pxd device %llu IO already suspended\n", pxd_dev->dev_id);
 	}
-	spin_unlock_irq(&pxd_dev->fp.suspend_lock);
+	spin_unlock(&pxd_dev->fp.suspend_lock);
 
 	// need to wait for inflight IOs to complete
 	if (need_flush) {
+		int nactive = 0;
 		do {
-			int nactive = atomic_read(&pxd_dev->fp.ncount);
+			mb();
+			nactive = pxd_active(pxd_dev);
 			if (!nactive) break;
 			printk(KERN_WARNING"pxd device %llu still has %d active IO, waiting completion to suspend",
 					pxd_dev->dev_id, nactive);
@@ -998,7 +1064,7 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 
 static void pxd_resume_io(struct pxd_device *pxd_dev)
 {
-	spin_lock_irq(&pxd_dev->fp.suspend_lock);
+	spin_lock(&pxd_dev->fp.suspend_lock);
 	pxd_dev->fp.suspend--;
 	if (!pxd_dev->fp.suspend) {
 		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
@@ -1007,7 +1073,7 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 		printk("For pxd device %llu IO still suspended(%d)\n",
 				pxd_dev->dev_id, pxd_dev->fp.suspend);
 	}
-	spin_unlock_irq(&pxd_dev->fp.suspend_lock);
+	spin_unlock(&pxd_dev->fp.suspend_lock);
 }
 
 /*
@@ -1033,6 +1099,8 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
 			if (force) {
+				printk("dev %llu:%s closing file desc %px\n",
+						pxd_dev->dev_id, __func__, fp->file[i]);
 				filp_close(fp->file[i], NULL);
 				f = filp_open(fp->device_path[i], mode, 0600);
 				if (IS_ERR_OR_NULL(f)) {
@@ -1070,7 +1138,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 
 	pxd_resume_io(pxd_dev);
 
-	printk(KERN_INFO"pxd_dev %llu mode %#x setting up with %d backing volumes, [%p,%p,%p]\n",
+	printk(KERN_INFO"pxd_dev %llu mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
 		pxd_dev->dev_id, mode, fp->nfd,
 		fp->file[0], fp->file[1], fp->file[2]);
 
@@ -1100,9 +1168,15 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	pxd_suspend_io(pxd_dev);
 
 	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) filp_close(fp->file[i], NULL);
+		if (fp->file[i] > 0) {
+			int ret = vfs_fsync(fp->file[i], 0);
+			if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
+				printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
+			}
+			filp_close(fp->file[i], NULL);
+		}
 	}
-	fp->nfd=0;
+	fp->nfd = 0;
 
 	pxd_resume_io(pxd_dev);
 }
@@ -1112,7 +1186,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
-	memset(fp, 0, sizeof(*fp));
+	memset(fp, 0, sizeof(struct pxd_fastpath_extension));
 	// will take slow path, if additional info not provided.
 
 	pxd_printk("Number of cpu ids %d\n", __px_ncpus);
@@ -1154,17 +1228,16 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nio_preflush, 0);
 	atomic_set(&fp->nio_fua, 0);
 	atomic_set(&fp->nio_write, 0);
-	atomic_set(&fp->ncount,0);
 	atomic_set(&fp->nswitch,0);
 	atomic_set(&fp->nslowPath,0);
-	atomic_set(&fp->ncomplete,0);
 	atomic_set(&fp->nwrite_counter,0);
+	// protected by pxd_dev.lock
+	fp->ncount = 0;
+	fp->ncomplete = 0;
 
-	for (i = 0; i < nr_node_ids; i++) {
+	for (i = 0; i < MAX_NUMNODES; i++) {
 		atomic_set(&fp->index[i], 0);
 	}
-
-	enableFastPath(pxd_dev, true);
 
 	return 0;
 }
@@ -1181,20 +1254,24 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	int i;
 	struct file* f;
 
-	pxd_printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
+	printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
 			pxd_dev->dev_id, update_path->count);
 	mode = open_mode(pxd_dev->mode);
 	for (i = 0; i < update_path->count; i++) {
-		pxd_printk("Fastpath %d: %s, current %s, %p\n", i, update_path->devpath[i],
-				pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
-		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
-			// if previous paths are same.. then skip anymore config
-			printk(KERN_INFO"pxd%llu already configured for path %s\n",
-				pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
-			continue;
+		printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
+				update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
+		if (pxd_dev->fp.file[i]) {
+			BUG_ON(pxd_dev->fp.nfd <= i);
+			if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
+				// if previous paths are same.. then skip anymore config
+				printk(KERN_INFO"pxd%llu already configured for path %s\n",
+					pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
+				continue;
+			}
+
+			filp_close(pxd_dev->fp.file[i], NULL);
 		}
 
-		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 		f = filp_open(update_path->devpath[i], mode, 0600);
 		if (IS_ERR_OR_NULL(f)) {
 			printk(KERN_ERR"Failed attaching path: device %llu, path %s, err %ld\n",
@@ -1203,17 +1280,15 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 			goto out_file_failed;
 		}
 		pxd_dev->fp.file[i] = f;
-		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
+		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i], MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
-		pxd_printk("successfully installed fastpath %s at %p\n",
-				pxd_dev->fp.device_path[i], f);
+		printk("successfully installed fastpath %s at %px\n", pxd_dev->fp.device_path[i], f);
 	}
 	pxd_dev->fp.nfd = update_path->count;
 
 	if (!update_path->count && pxd_dev->strict) goto out_file_failed;
 
-	printk("dev%llu completed setting up %d paths\n",
-			pxd_dev->dev_id, pxd_dev->fp.nfd);
+	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
 
@@ -1258,7 +1333,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	if (rw == READA) rw = READ;
 	if (!pxd_dev || (rw != READ && rw != WRITE)) {
 #endif
-		printk(KERN_ERR"pxd basic sanity fail, pxd_device %p (%llu), rw %#x\n",
+		printk(KERN_ERR"pxd basic sanity fail, pxd_device %px (%llu), rw %#x\n",
 				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
@@ -1272,26 +1347,36 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	// If IO suspended, then hang IO onto the suspend wait queue
 	{
-		spin_lock_irq(&pxd_dev->fp.suspend_lock);
+		//spin_lock(&pxd_dev->fp.suspend_lock);
+		spin_lock(&pxd_dev->fp.suspend_wait.lock);
 		if (pxd_dev->fp.suspend) {
-			printk("pxd device %llu is suspended, IO blocked until device activated[bio %p, wr %d]\n",
+			printk("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
-			wait_event_lock_irq(pxd_dev->fp.suspend_wait, !pxd_dev->fp.suspend, pxd_dev->fp.suspend_lock);
-			printk("pxd device %llu re-activated, IO resumed[bio %p, wr %d]\n",
+			wait_event_interruptible_locked(
+				pxd_dev->fp.suspend_wait,
+				!pxd_dev->fp.suspend);
+			printk("pxd device %llu re-activated, IO resumed[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 		}
-		spin_unlock_irq(&pxd_dev->fp.suspend_lock);
+		spin_unlock(&pxd_dev->fp.suspend_wait.lock);
+		//spin_unlock(&pxd_dev->fp.suspend_lock);
+	}
+
+	if (pxd_dev->removing) {
+		printk(KERN_ERR"px dev is being removed, failing IO.\n");
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
 	}
 
 	if (!pxd_dev->fp.nfd) {
-		pxd_printk("px has no backing path yet, should take slow path IO.\n");
+		printk("px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}
 
 	pxd_printk("pxd_make_fastpath_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
 
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	pxd_io_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
 			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",

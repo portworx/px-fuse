@@ -84,6 +84,7 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	struct pxd_device *pxd_dev = disk->private_data;
 
 	spin_lock(&pxd_dev->lock);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	pxd_dev->open_count--;
 	spin_unlock(&pxd_dev->lock);
 
@@ -182,9 +183,9 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
-	pxd_printk("%s: receive reply to %p(%lld) at %lld err %d\n",
+	pxd_printk("%s: receive reply to %p(%lld) at %lld\n",
 			__func__, req, req->in.unique,
-			req->pxd_rdwr_in.offset, req->out.h.error);
+			req->pxd_rdwr_in.offset);
 }
 
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
@@ -429,7 +430,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 
 	flags = bio->bi_flags;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	pxd_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
@@ -531,8 +532,8 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-		   "flags  %llx\n", __func__,
+	pxd_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+		   "flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
 		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
@@ -715,6 +716,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (!pxd_dev)
 		goto out_module;
 
+	pxd_dev->magic = PXD_DEV_MAGIC;
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
@@ -736,8 +738,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->fastpath = add->enable_fp;
 	pxd_dev->strict = add->strict;
 
-	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d(%d) npath %lu\n",
-			add->dev_id, add->open_mode, add->enable_fp, add->strict, add->paths.count);
+	printk(KERN_INFO"Device %llu added %p with mode %#x fastpath %d(%d) npath %lu\n",
+			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->strict, add->paths.count);
 
 	// initializes fastpath context part of pxd_dev, enables it only
 	// if pxd_dev->fastpath is true, and backing dev paths are available.
@@ -801,8 +803,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int err;
 	struct pxd_device *pxd_dev;
 
-	pxd_printk(KERN_INFO"pxd_remove for device %llu\n",
-			remove->dev_id);
+	printk(KERN_INFO"pxd_remove for device %llu\n", remove->dev_id);
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -830,7 +831,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	}
 
 	pxd_dev->removing = true;
-	pxd_fastpath_cleanup(pxd_dev);
+	wmb();
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
@@ -844,6 +845,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	}
 
 	spin_unlock(&pxd_dev->lock);
+	pxd_fastpath_cleanup(pxd_dev);
 
 	device_unregister(&pxd_dev->dev);
 
@@ -1096,9 +1098,16 @@ static ssize_t pxd_active_show(struct device *dev,
 	int ncount;
 	int available = PAGE_SIZE - 1;
 	int i;
+	int nactive;
+	int ncomplete;
 
-	ncount = snprintf(cp, available, "nactive: %u/%u, [write: %u, flush: %u(nop: %u), fua: %u, discard: %u, preflush: %u], switched: %u, slowpath: %u\n",
-                atomic_read(&pxd_dev->fp.ncount), atomic_read(&pxd_dev->fp.ncomplete),
+	spin_lock(&pxd_dev->lock);
+	nactive = pxd_dev->fp.ncount;
+	ncomplete = pxd_dev->fp.ncomplete;
+	spin_unlock(&pxd_dev->lock);
+
+	ncount = snprintf(cp, available, "in/out: %u/%u, [write: %u, flush: %u(nop: %u), fua: %u, discard: %u, preflush: %u], switched: %u, slowpath: %u\n",
+                nactive, ncomplete,
 		atomic_read(&pxd_dev->fp.nio_write),
 		atomic_read(&pxd_dev->fp.nio_flush), atomic_read(&pxd_dev->fp.nio_flush_nop),
 		atomic_read(&pxd_dev->fp.nio_fua), atomic_read(&pxd_dev->fp.nio_discard),
@@ -1205,9 +1214,9 @@ static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *a
 		thresh = MAX_CONGESTION_THRESHOLD;
 	}
 
-	spin_lock_irq(&pxd_dev->lock);
+	spin_lock(&pxd_dev->lock);
 	pxd_dev->fp.qdepth = thresh;
-	spin_unlock_irq(&pxd_dev->lock);
+	spin_unlock(&pxd_dev->lock);
 
 	return count;
 }
@@ -1379,6 +1388,8 @@ static void pxd_dev_device_release(struct device *dev)
 
 	pxd_free_disk(pxd_dev);
 	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
+	printk("freeing dev %llu pxd device %px\n", pxd_dev->dev_id, pxd_dev);
+	pxd_dev->magic = PXD_POISON;
 	kfree(pxd_dev);
 }
 
