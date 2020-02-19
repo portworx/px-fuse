@@ -29,7 +29,7 @@ $(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif
 
 MINKVER=3.10
-FPATH_MINKVER=4.0
+FPATH_MINKVER=4.10
 BLKMQ_MINKVER=4.18
 KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
 
