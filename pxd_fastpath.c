@@ -151,7 +151,7 @@ fail_wr:
 	for(;i >= 0; i--) {
 		if (tc->writer[i]) kthread_stop(tc->writer[i]);
 	}
-	i = PXD_MAX_THREAD_PER_CPU-1;
+	i = PXD_MAX_THREAD_PER_CPU - 1;
 fail_rd:
 	for(;i >= 0; i--) {
 		if (tc->reader[i]) kthread_stop(tc->reader[i]);
@@ -504,20 +504,18 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct
 
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 {
-	int dir = bio_data_dir(head->orig);
-
 	while (!list_empty(&head->replicas)) {
 		struct pxd_io_tracker *repl = list_first_entry(&head->replicas, struct pxd_io_tracker, item);
 		BUG_ON(repl->magic != PXD_IOT_MAGIC);
 		repl->magic = PXD_POISON;
 		list_del(&repl->item);
-		printk("freeing repl %px, bio %px dir %d\n", repl, &repl->clone, dir == READ);
+		pxd_mem_printk("freeing repl %px, bio %px dir %d\n", repl, &repl->clone, bio_data_dir(head->orig) == READ);
 		bio_put(&repl->clone);
 	}
 
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	head->magic = PXD_POISON;
-	printk("freeing tracker %px, bio %px dir %d\n", head, &head->clone, dir == READ);
+	pxd_mem_printk("freeing tracker %px, bio %px dir %d\n", head, &head->clone, bio_data_dir(head->orig) == READ);
 	bio_put(&head->clone);
 }
 
@@ -655,16 +653,12 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 	struct pxd_io_tracker* head;
 	struct pxd_io_tracker *repl;
 	int index;
-	int dir = bio_data_dir(bio);
-
-	pxd_printk("pxd %px:__pxd_init_block_replica to allocate iotracker for bio %px\n",
-			pxd_dev, bio);
 
 	head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
 	if (!head) {
 		return NULL;
 	}
-	printk("allocated tracker %px, clone bio %px dir %d\n", head, &head->clone, dir == READ);
+	pxd_mem_printk("allocated tracker %px, clone bio %px dir %d\n", head, &head->clone, bio_data_dir(bio) == READ);
 
 	// initialize the replicas only if the request is non-read
 	if (!head->read) {
@@ -677,7 +671,7 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 			BUG_ON(repl->magic != PXD_IOT_MAGIC);
 			repl->head = head;
 			list_add_tail(&repl->item, &head->replicas);
-			printk("allocated repl %px, clone bio %px dir %d\n", repl, &repl->clone, dir == READ);
+			pxd_mem_printk("allocated repl %px, clone bio %px dir %d\n", repl, &repl->clone, bio_data_dir(bio) == READ);
 		}
 	}
 
@@ -956,7 +950,6 @@ static int pxd_io_thread(void *data, int rw)
 	struct thread_context *tc = data;
 	struct pxd_io_tracker *head;
 	struct pxd_device *pxd_dev;
-	int run = 0;
 
 	while (!kthread_should_stop()) {
 		pxd_wait_io(tc, rw);
@@ -965,7 +958,6 @@ static int pxd_io_thread(void *data, int rw)
 		if (!head) {
 			continue;
 		}
-		printk("%s:%s woke up, run %d\n", current->comm, __func__, run++);
 
 		pxd_dev = head->pxd_dev;
 		BUG_ON(head->magic != PXD_IOT_MAGIC);
@@ -1210,11 +1202,11 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	int i;
 	struct file* f;
 
-	printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
+	pxd_printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
 			pxd_dev->dev_id, update_path->count);
 	mode = open_mode(pxd_dev->mode);
 	for (i = 0; i < update_path->count; i++) {
-		printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
+		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 				update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
 		if (pxd_dev->fp.file[i]) {
 			BUG_ON(pxd_dev->fp.nfd <= i);
@@ -1238,7 +1230,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 		pxd_dev->fp.file[i] = f;
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i], MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
-		printk("successfully installed fastpath %s at %px\n", pxd_dev->fp.device_path[i], f);
+		pxd_printk("dev %llu: successfully installed fastpath %s at %px\n", pxd_dev->dev_id, pxd_dev->fp.device_path[i], f);
 	}
 	pxd_dev->fp.nfd = update_path->count;
 
@@ -1307,9 +1299,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		if (pxd_dev->fp.suspend) {
 			printk("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
-			wait_event_interruptible_locked(
-				pxd_dev->fp.suspend_wait,
-				!pxd_dev->fp.suspend);
+			wait_event_interruptible_locked(pxd_dev->fp.suspend_wait, !pxd_dev->fp.suspend);
 			printk("pxd device %llu re-activated, IO resumed[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 		}
@@ -1317,13 +1307,13 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	if (pxd_dev->removing) {
-		printk(KERN_ERR"px dev is being removed, failing IO.\n");
+		pxd_printk(KERN_ERR"px dev is being removed, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
 	if (!pxd_dev->fp.nfd) {
-		printk("px has no backing path yet, should take slow path IO.\n");
+		pxd_printk("px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}

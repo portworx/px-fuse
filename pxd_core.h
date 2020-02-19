@@ -52,6 +52,9 @@ struct pxd_device {
 
 #define pxd_io_printk(args...)
 //#define pxd_io_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
+//
+#define pxd_mem_printk(args...)
+//#define pxd_mem_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
 
 #ifndef SECTOR_SIZE
 #define SECTOR_SIZE 512

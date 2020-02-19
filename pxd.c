@@ -716,6 +716,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (!pxd_dev)
 		goto out_module;
 
+	pxd_mem_printk("device %llu allocated at %px\n", add->dev_id, pxd_dev);
+
 	pxd_dev->magic = PXD_DEV_MAGIC;
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
@@ -1381,7 +1383,7 @@ static void pxd_dev_device_release(struct device *dev)
 
 	pxd_free_disk(pxd_dev);
 	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
-	printk("freeing dev %llu pxd device %px\n", pxd_dev->dev_id, pxd_dev);
+	pxd_mem_printk("freeing dev %llu pxd device %px\n", pxd_dev->dev_id, pxd_dev);
 	pxd_dev->magic = PXD_POISON;
 	kfree(pxd_dev);
 }
