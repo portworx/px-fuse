@@ -5,8 +5,6 @@
 #include "pxd_core.h"
 #include "pxd_compat.h"
 
-#define STATIC
-
 // cached info at px loadtime, to gracefully handle hot plugging cpus
 static int __px_ncpus;
 
@@ -255,7 +253,7 @@ void fastpath_cleanup(void)
 	g_tc = NULL;
 }
 
-STATIC int _pxd_flush(struct pxd_device *pxd_dev, struct file *file)
+static int _pxd_flush(struct pxd_device *pxd_dev, struct file *file)
 {
 	int ret = 0;
 
@@ -309,7 +307,7 @@ static void pxd_issue_sync(struct pxd_device *pxd_dev, struct file *file)
 	wake_up(&pxd_dev->fp.sync_event);
 }
 
-STATIC void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file *file)
+static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file *file)
 {
 	int sync_wait, sync_now;
 
@@ -325,7 +323,7 @@ STATIC void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file 
 	if (sync_now) pxd_issue_sync(pxd_dev, file);
 }
 
-STATIC int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
+static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
 {
 	int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 	int ret;
@@ -394,7 +392,7 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	return bw;
 }
 
-STATIC int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
+static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
 {
 	int ret = 0;
 	int nsegs = 0;
@@ -471,7 +469,7 @@ ssize_t _pxd_read(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff
 	return result;
 }
 
-STATIC ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t *pos)
+static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t *pos)
 {
 	ssize_t s;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
