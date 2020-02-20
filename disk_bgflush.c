@@ -4,10 +4,11 @@
 #include <linux/mm.h>
 #include <linux/timer.h>
 #include <linux/vmstat.h>
+#include <linux/workqueue.h>
 
 #define MAXPOOLS (16)
 #define BGFLUSH_CHECK_TIMEOUT (30*HZ)
-static struct timer_list bgtimer;
+static struct delayed_work bgflush;
 
 static
 bool shouldFlush(void)
@@ -19,12 +20,13 @@ bool shouldFlush(void)
 	si_meminfo(&i);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	pages = global_node_page_state(LRU_ACTIVE_FILE) + global_node_page_state(LRU_ACTIVE_ANON);
+	pages = global_node_page_state(LRU_INACTIVE_FILE) + global_node_page_state(LRU_INACTIVE_ANON);
 #else
-	pages = global_page_state(LRU_ACTIVE_FILE) + global_page_state(LRU_ACTIVE_ANON);
+	pages = global_page_state(LRU_INACTIVE_FILE) + global_page_state(LRU_INACTIVE_ANON);
 #endif
-	// if active page cache utilization is higher than 50% of installed ram
-	if (pages > i.totalram/2) return true;
+	// if inactive page cache utilization is higher than available freeram
+	// or if inactive pages are higher than 50% of total ram
+	if (pages > i.freeram || pages > i.totalram/2) return true;
 
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
@@ -83,27 +85,20 @@ void pagecache_flush(void) {
         }
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-static void bgflusher(struct timer_list *unused) {
-#else
-static void bgflusher(unsigned long unused) {
-#endif
+static void bgflusher(struct work_struct *work)
+{
 	if (shouldFlush()) 
 		pagecache_flush();
 
-	mod_timer(&bgtimer, jiffies + BGFLUSH_CHECK_TIMEOUT);
+	schedule_delayed_work(&bgflush, BGFLUSH_CHECK_TIMEOUT);
 }
 
 
 void init_bgthread(void) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	timer_setup(&bgtimer, bgflusher, 0);
-#else
-	setup_timer(&bgtimer, bgflusher, 0);
-#endif
-	mod_timer(&bgtimer, jiffies + BGFLUSH_CHECK_TIMEOUT);
+	INIT_DELAYED_WORK(&bgflush, bgflusher);
+	schedule_delayed_work(&bgflush, BGFLUSH_CHECK_TIMEOUT);
 }
 
 void cleanup_bgthread(void) {
-	del_timer_sync(&bgtimer);
+	cancel_delayed_work_sync(&bgflush);
 }
