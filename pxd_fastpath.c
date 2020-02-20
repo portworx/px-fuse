@@ -693,9 +693,7 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	}
 
 	if (enable) {
-		spin_lock(&pxd_dev->lock);
 		enableFastPath(pxd_dev, true);
-		spin_unlock(&pxd_dev->lock);
 	}
 
 	if (enable) pxd_dev->connected = true;
