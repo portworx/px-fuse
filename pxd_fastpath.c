@@ -1304,8 +1304,8 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		spin_unlock(&pxd_dev->fp.suspend_wait.lock);
 	}
 
-	if (pxd_dev->removing) {
-		pxd_printk(KERN_ERR"px dev is being removed, failing IO.\n");
+	if (!pxd_dev->connected || pxd_dev->removing) {
+		pxd_printk(KERN_ERR"px not connected/dev is being removed, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
