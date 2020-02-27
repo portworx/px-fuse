@@ -24,6 +24,7 @@ struct pxd_context {
 };
 
 struct pxd_device {
+#define PXD_DEV_MAGIC (0xcafec0de)
 	unsigned int magic;
 	uint64_t dev_id;
 	int major;
