@@ -557,6 +557,23 @@ static const struct blk_mq_ops pxd_mq_ops = {
 };
 #endif
 
+#define __type_is_ptr(bdev)  __builtin_types_compatible_p(typeof(bdev), struct backing_dev_info*)
+#define __ptr_or_null(bdev) __builtin_choose_expr(__type_is_ptr(bdev), bdev, (struct backing_dev_info*)NULL)
+
+#define PXD_SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+	__builtin_choose_expr(__type_is_ptr(bdev), \
+			__SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
+			__SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
+
+#define __SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+	({ \
+		if (bdev) { \
+			(bdev)->congested_fn = cfn;\
+			(bdev)->congested_data = cdata;\
+		} \
+	})
+
+
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
 {
 	struct gendisk *disk;
@@ -594,9 +611,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		}
 
 		// add hooks to control congestion only while using fastpath
-		q->backing_dev_info->congested_fn = pxd_device_congested;
-		q->backing_dev_info->congested_data = pxd_dev;
-
+		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 	} else {
 #endif

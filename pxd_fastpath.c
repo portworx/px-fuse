@@ -1,9 +1,45 @@
 #include <linux/types.h>
 #include <linux/delay.h>
+#include <linux/genhd.h>
 
 #include "pxd.h"
 #include "pxd_core.h"
 #include "pxd_compat.h"
+
+#ifndef MIN_NICE
+#define MIN_NICE (-20)
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
+static
+void _generic_end_io_acct(struct request_queue *q, int rw,
+		struct hd_struct *part, unsigned long start_time)
+{
+	unsigned long duration = jiffies - start_time;
+	int cpu = part_stat_lock();
+
+	part_stat_add(cpu, part, ticks[rw], duration);
+	part_round_stats(q, cpu, part);
+	part_dec_in_flight(q, part, rw);
+
+	part_stat_unlock();
+}
+
+static
+void _generic_start_io_acct(struct request_queue *q, int rw,
+		unsigned long sectors, struct hd_struct *part)
+{
+	int cpu = part_stat_lock();
+
+	part_round_stats(q, cpu, part);
+	part_stat_inc(cpu, part, ios[rw]);
+	part_stat_add(cpu, part, sectors[rw], sectors);
+	part_inc_in_flight(q, part, rw);
+
+	part_stat_unlock();
+}
+
+#endif
 
 // cached info at px loadtime, to gracefully handle hot plugging cpus
 static int __px_ncpus;
@@ -519,13 +555,21 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 	bio_put(&head->clone);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 static void pxd_complete_io_dummy(struct bio* bio)
+#else
+static void pxd_complete_io_dummy(struct bio* bio, int error)
+#endif
 {
 	printk("%s: bio %px should never be called\n", __func__, bio);
 	BUG();
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 static void pxd_complete_io(struct bio* bio)
+#else
+static void pxd_complete_io(struct bio* bio, int error)
+#endif
 {
 	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
 	struct pxd_device *pxd_dev = bio->bi_private;
@@ -541,8 +585,12 @@ static void pxd_complete_io(struct bio* bio)
 		if (bio->bi_status) {
 			atomic_inc(&head->fails);
 		}
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 		if (bio->bi_error) {
+			atomic_inc(&head->fails);
+		}
+#else 
+		if (error) {
 			atomic_inc(&head->fails);
 		}
 #endif
@@ -563,8 +611,10 @@ static void pxd_complete_io(struct bio* bio)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
+#else
+	_generic_end_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
@@ -589,7 +639,7 @@ static void pxd_complete_io(struct bio* bio)
 }
 #else
 {
-	int status = bio->bi_error;
+	int status = error;
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
@@ -616,7 +666,11 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px with blkg %px\n",
 			pxd_dev, bio, fileh, bio->bi_blkg);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 	clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
+#else
+	clone_bio = bio_clone_bioset(bio, GFP_KERNEL, ppxd_bio_set);
+#endif
 	if (!clone_bio) {
 		pxd_printk(KERN_ERR"No memory for io context");
 		return NULL;
@@ -723,8 +777,10 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
+#else
+	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n", PXD_ACTIVE(pxd_dev));
@@ -779,7 +835,11 @@ out:
 		bio->bi_error = ret;
 #endif
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 	pxd_complete_io(bio);
+#else
+	pxd_complete_io(bio, ret);
+#endif
 
 	return ret;
 }
@@ -802,7 +862,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	// mark status all good to begin with!
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 	bio->bi_status = 0;
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 	bio->bi_error = 0;
 #endif
 	if (bio_data_dir(bio) == WRITE) {
@@ -836,11 +896,16 @@ out:
 	if (ret < 0) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 		bio->bi_status = ret;
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 		bio->bi_error = ret;
 #endif
 	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 	pxd_complete_io(bio);
+#else
+	pxd_complete_io(bio, ret);
+#endif
 
 	return ret;
 }
@@ -870,8 +935,10 @@ static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
+#else
+	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
 	// initialize active io to configured replicas
