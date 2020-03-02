@@ -594,9 +594,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		}
 
 		// add hooks to control congestion only while using fastpath
-		q->backing_dev_info->congested_fn = pxd_device_congested;
-		q->backing_dev_info->congested_data = pxd_dev;
-
+		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 	} else {
 #endif
