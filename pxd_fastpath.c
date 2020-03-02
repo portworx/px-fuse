@@ -1,3 +1,4 @@
+#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/genhd.h>
@@ -11,9 +12,10 @@
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
-#ifdef RHEL_VERSION_CODE
 
-#if RHEL_VERSION_CODE >= RHEL_RELEASE_VERSION(7,7)
+#ifdef RHEL_RELEASE_CODE
+
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7,7)
 static
 void _generic_end_io_acct(struct request_queue *q, int rw,
 		struct hd_struct *part, unsigned long start_time)
