@@ -1415,20 +1415,20 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	if (rw == READA) rw = READ;
 	if (!pxd_dev || (rw != READ && rw != WRITE)) {
 #endif
-		printk(KERN_ERR"pxd basic sanity fail, pxd_device %px (%llu), rw %#x\n",
+		printk_ratelimited(KERN_ERR"pxd basic sanity fail, pxd_device %px (%llu), rw %#x\n",
 				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
 	if (!pxd_dev->connected) {
-		printk(KERN_ERR"px is disconnected, failing IO.\n");
+		printk_ratelimited(KERN_ERR"px is disconnected, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
 	if (rw != READ && !write_allowed(pxd_dev->mode)) {
-		printk(KERN_ERR"px device %llu is read only, failing IO.\n", pxd_dev->dev_id);
+		printk_ratelimited(KERN_ERR"px device %llu is read only, failing IO.\n", pxd_dev->dev_id);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
@@ -1437,17 +1437,17 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	{
 		spin_lock(&pxd_dev->fp.suspend_wait.lock);
 		if (pxd_dev->fp.suspend) {
-			printk("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
+			printk_ratelimited("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 			wait_event_interruptible_locked(pxd_dev->fp.suspend_wait, !pxd_dev->fp.suspend);
-			printk("pxd device %llu re-activated, IO resumed[bio %px, wr %d]\n",
+			printk_ratelimited("pxd device %llu re-activated, IO resumed[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 		}
 		spin_unlock(&pxd_dev->fp.suspend_wait.lock);
 	}
 
 	if (!pxd_dev->connected || pxd_dev->removing) {
-		pxd_printk(KERN_ERR"px not connected/dev is being removed, failing IO.\n");
+		printk_ratelimited(KERN_ERR"px not connected/dev is being removed, failing IO.\n");
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
