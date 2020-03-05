@@ -1177,7 +1177,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_suspend_io(pxd_dev);
 
 	decode_mode(mode, modestr);
-	printk("device %llu mode %s, nfd %d\n", pxd_dev->dev_id, modestr, nfd);
+	printk("device %llu mode %#x(%s), nfd %d\n", pxd_dev->dev_id, mode, modestr, nfd);
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
 			if (force) {
@@ -1332,10 +1332,12 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	int err = 0;
 	int i;
 	struct file* f;
+	char modestr[32];
 
-	pxd_printk("pxd_init_fastpath_target for dev%llu with paths %ld\n",
-			pxd_dev->dev_id, update_path->count);
 	mode = open_mode(pxd_dev->mode);
+	decode_mode(mode, modestr);
+	printk("device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
+			pxd_dev->dev_id, mode, modestr, update_path->count);
 	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 				update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
@@ -1368,9 +1370,6 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	if (!update_path->count && pxd_dev->strict) goto out_file_failed;
 
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
-	/* setup whether access is block or file access */
-	enableFastPath(pxd_dev, false);
-
 	return 0;
 out_file_failed:
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
@@ -1380,10 +1379,14 @@ out_file_failed:
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
 
-	if (pxd_dev->strict) return -EINVAL;
+	// fail the call if in strict mode.
+	if (pxd_dev->strict) {
+		printk(KERN_ERR"device %llu fastpath setup failed %d\n", pxd_dev->dev_id, err);
+		return err;
+	}
 
-	// if not in strict mode, then even if there are errors setting up fastpath,
-	// initialize to take slow path, do not report failure outside.
+	// Allow fallback to native path and not report failure outside.
+	printk("device %llu setup through nativepath (%d)", pxd_dev->dev_id, err);
 	return 0;
 }
 
@@ -1420,6 +1423,12 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	if (!pxd_dev->connected) {
 		printk(KERN_ERR"px is disconnected, failing IO.\n");
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
+	if (rw != READ && !write_allowed(pxd_dev->mode)) {
+		printk(KERN_ERR"px device %llu is read only, failing IO.\n", pxd_dev->dev_id);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
