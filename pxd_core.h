@@ -1,6 +1,7 @@
 #ifndef _PXD_CORE_H_
 #define _PXD_CORE_H_
 
+#include <linux/types.h>
 #include <linux/miscdevice.h>
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
@@ -80,9 +81,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 static inline
 mode_t open_mode(mode_t mode) {
 	mode_t m = O_LARGEFILE | O_NOATIME; // default
-	if (mode & O_RDONLY) {
-		m |= O_RDONLY;
-	} else {
+	if (mode & O_RDWR) {
 		m |= O_RDWR;
 	}
 
@@ -97,11 +96,23 @@ void decode_mode(mode_t mode, char *out) {
 	if (mode & O_LARGEFILE) *out++ = 'L';
 	if (mode & O_NOATIME) *out++ = 'A';
 	if (mode & O_DIRECT) *out++='D';
-	if (mode & O_RDONLY) *out++='R';
-	if (mode & O_RDWR) *out++ = 'W';
+	if (mode & O_WRONLY) *out++ = 'W';
+	if (mode & O_RDWR) {
+		*out++ = 'R';
+		*out++ = 'W';
+	} else { // O_RDONLY is defined as zero
+		*out++ = 'R';
+	}
 	if (mode & O_SYNC) *out++ = 'S';
+	if (mode & O_TRUNC) *out++ = 'T';
+	if (mode & O_APPEND) *out++ = 'P';
 
 	*out = '\0';
+}
+
+static inline
+int write_allowed(mode_t curr) {
+	return ((curr & (O_RDWR | O_WRONLY)));
 }
 
 #endif /* _PXD_CORE_H_ */
