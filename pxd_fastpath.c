@@ -1130,14 +1130,19 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 	// need to wait for inflight IOs to complete
 	if (need_flush) {
 		int nactive = 0;
-		do {
+		int retry = 5; // do not wait forever
+		while (retry--) {
 			mb();
 			nactive = PXD_ACTIVE(pxd_dev);
 			if (!nactive) break;
 			printk(KERN_WARNING"pxd device %llu still has %d active IO, waiting completion to suspend",
 					pxd_dev->dev_id, nactive);
 			msleep_interruptible(100);
-		} while (1);
+
+			if (!retry) {
+				printk(KERN_WARNING"pxd device %llu suspended with active IO(%d)", pxd_dev->dev_id, nactive);
+			}
+		}
 	}
 }
 
