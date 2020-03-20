@@ -1020,8 +1020,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 		memset(my_ids, 0, sizeof(*my_ids));
 	}
 
-	fc->reqctr = 0;
-
 	fuse_req_queue_init(fc->queue);
 
 	return 0;
