@@ -163,9 +163,6 @@ struct fuse_conn {
 	/** Refcount */
 	atomic_t count;
 
-	/** Entry on the fuse_conn_list */
-	struct list_head entry;
-
 	/** O_ASYNC requests */
 	struct fasync_struct *fasync;
 

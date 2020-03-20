@@ -980,7 +980,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	spin_lock_init(&fc->lock);
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
-	INIT_LIST_HEAD(&fc->entry);
 	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
 		GFP_KERNEL);
 
