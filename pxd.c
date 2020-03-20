@@ -11,7 +11,7 @@
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
 #define TRACE_INCLUDE_FILE pxd_trace
-#include <pxd_trace.h>
+#include "pxd_trace.h"
 #undef CREATE_TRACE_POINTS
 
 #include "pxd_compat.h"
@@ -20,6 +20,9 @@
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
 #endif
+
+#include "io.h"
+#include "pxd_io_uring.h"
 
 /** enables time tracing */
 //#define GD_TIME_LOG
@@ -1649,6 +1652,9 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	misc_deregister(&ctx->io_ctx.miscdev);
+#endif
 	cancel_delayed_work_sync(&ctx->abort_work);
 	if (ctx->id < pxd_num_contexts_exported) {
 		fuse_abort_conn(&ctx->fc);
@@ -1659,6 +1665,13 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 int pxd_init(void)
 {
 	int err, i, j;
+
+	err = -ENOMEM;
+	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
+	if (req_cachep == NULL) {
+		printk(KERN_ERR "pxd: failed to initialize request cache");
+		goto out;
+	}
 
 	err = fuse_dev_init();
 	if (err) {
@@ -1681,12 +1694,22 @@ int pxd_init(void)
 			printk(KERN_ERR "pxd: failed to initialize connection\n");
 			goto out_fuse;
 		}
+
 		err = misc_register(&ctx->miscdev);
 		if (err) {
 			printk(KERN_ERR "pxd: failed to register dev %s %d: %d\n",
 				ctx->miscdev.name, i, err);
 			goto out_fuse;
 		}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+		err = io_ring_register_device(ctx->io_name, &ctx->io_ctx, i);
+		if (err) {
+			printk(KERN_ERR "pxd: failed to register io dev %s %d: %d\n",
+				ctx->io_ctx.miscdev.name, i, err);
+			goto out_fuse;
+		}
+#endif
 	}
 
 	pxd_miscdev.fops = &pxd_contexts[0].fops;
@@ -1757,6 +1780,8 @@ void pxd_exit(void)
 	fuse_dev_cleanup();
 
 	kfree(pxd_contexts);
+
+	kmem_cache_destroy(req_cachep);
 
 	printk(KERN_INFO "pxd: driver unloaded\n");
 }

@@ -1059,7 +1059,7 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 		vfree(fc->queue);
 }
 
-static void fuse_queue_init_cb(struct fuse_queue_cb *cb)
+void fuse_queue_init_cb(struct fuse_queue_cb *cb)
 {
 	cb->w.sequence = 1;
 	cb->w.read = 0;
