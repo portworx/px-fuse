@@ -1608,7 +1608,6 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
-	INIT_LIST_HEAD(&ctx->pending_requests);
 	INIT_DELAYED_WORK(&ctx->abort_work, pxd_abort_context);
 	return 0;
 }
