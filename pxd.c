@@ -1101,6 +1101,13 @@ static ssize_t pxd_active_show(struct device *dev,
 		ncount += tmp;
 	}
 
+	for (i=0; i<num_online_cpus(); i++) {
+		size_t tmp = snprintf(cp, available, "[%d]=%d\n", i, get_thread_count(i));
+		cp += tmp;
+		available -= tmp;
+		ncount += tmp;
+	}
+
 	return ncount;
 }
 

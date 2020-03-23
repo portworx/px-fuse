@@ -2,6 +2,9 @@
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/genhd.h>
+#include <linux/topology.h>
+#include <linux/cpumask.h>
+#include <linux/nodemask.h>
 
 #include "pxd.h"
 #include "pxd_core.h"
@@ -109,6 +112,7 @@ void _generic_start_io_acct(struct request_queue *q, int rw,
 
 // cached info at px loadtime, to gracefully handle hot plugging cpus
 static int __px_ncpus;
+static int __px_nnodes;
 
 // A private global bio mempool for punting requests bypassing vfs
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
@@ -197,11 +201,39 @@ void pxd_wait_io(struct thread_context *tc, int rw)
 	}
 }
 
+static struct task_struct* fastpath_thread_init(void *ctx, int dir, int cpuid, int inst)
+{
+#define READERFMT "pxrd%d:%d/%d"
+#define WRITERFMT "pxwr%d:%d/%d"
+	struct task_struct *tsk;
+	int node = cpu_to_node(cpuid);
+	int (*tfn)(void*);
+	const char *namefmt;
+
+	if (dir == WRITE) {
+		tfn = pxd_io_writer;
+		namefmt = WRITERFMT;
+	} else {
+		tfn = pxd_io_reader;
+		namefmt = READERFMT;
+	}
+
+	tsk = kthread_create_on_node(tfn, ctx, node, namefmt, node, cpuid, inst);
+	if (IS_ERR(tsk)) {
+		return tsk;
+	}
+
+	//  bind readers on any cpu but on same numa node
+	set_cpus_allowed_ptr(tsk, cpumask_of_node(node));
+	set_user_nice(tsk, MIN_NICE);
+	wake_up_process(tsk);
+	return tsk;
+}
+
 static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid)
 {
 	int i;
 	int err;
-	int node = cpu_to_node(cpuid);
 
 	spin_lock_init(&tc->read_lock);
 	init_waitqueue_head(&tc->read_event);
@@ -214,37 +246,25 @@ static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid)
 	// setup readers
 	for (i = 0; i < PXD_MAX_THREAD_PER_CPU; i++) {
 		// set dedicated thread function
-		tc->reader[i] = kthread_create_on_node(pxd_io_reader, tc,
-				node, "pxrd%d:%d:%d", node, cpuid, i);
+		tc->reader[i] = fastpath_thread_init(tc, READ, cpuid, i);
 		if (IS_ERR(tc->reader[i])) {
 			pxd_printk("Init global reader kthread for cpu %d failed %lu\n",
 				cpuid, PTR_ERR(tc->reader[i]));
 			err = -EINVAL;
 			goto fail_rd;
 		}
-
-		//  bind readers on any cpu but on same numa node
-		set_cpus_allowed_ptr(tc->reader[i], cpumask_of_node(node));
-		set_user_nice(tc->reader[i], MIN_NICE);
-		wake_up_process(tc->reader[i]);
 	}
 
 	// setup writers
 	for (i = 0; i < PXD_MAX_THREAD_PER_CPU; i++) {
 		// set dedicated thread function
-		tc->writer[i] = kthread_create_on_node(pxd_io_writer, tc,
-				node, "pxwr%d:%d:%d", node, cpuid, i);
+		tc->writer[i] = fastpath_thread_init(tc, WRITE, cpuid, i);
 		if (IS_ERR(tc->writer[i])) {
 			pxd_printk("Init global writer kthread for cpu %d failed %lu\n",
 				cpuid, PTR_ERR(tc->writer[i]));
 			err = -EINVAL;
 			goto fail_wr;
 		}
-
-		//  bind all writers on the same cpu
-		kthread_bind(tc->writer[i], cpuid);
-		set_user_nice(tc->writer[i], MIN_NICE);
-		wake_up_process(tc->writer[i]);
 	}
 
 	return 0;
@@ -295,9 +315,10 @@ int fastpath_init(void)
 
 	// cache the count of cpu information at module load time.
 	// if there is any subsequent hot plugging of cpus, will still handle gracefully.
-	__px_ncpus = nr_cpu_ids;
+	__px_ncpus = num_online_cpus();
+	__px_nnodes = num_online_nodes();
 
-	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", __px_ncpus, NR_CPUS, nr_node_ids, MAX_NUMNODES);
+	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", __px_ncpus, NR_CPUS, __px_nnodes, MAX_NUMNODES);
 	g_tc = kzalloc(sizeof(struct thread_context) * __px_ncpus, GFP_KERNEL);
 	if (!g_tc) {
 		printk(KERN_ERR "pxd: failed to initialize global thread context: -ENOMEM\n");
@@ -716,7 +737,6 @@ static void pxd_complete_io(struct bio* bio, int error)
 	__pxd_cleanup_block_io(head);
 
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	BUG_ON((PXD_ACTIVE(pxd_dev) == 0));
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->fp.ncount);
 }
@@ -1051,6 +1071,7 @@ static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, i
 		spin_unlock(&tc->read_lock);
 	}
 	atomic_inc(&pxd_dev->fp.ncount);
+	atomic_inc(&tc->ncount);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -1395,6 +1416,40 @@ out_file_failed:
 	return 0;
 }
 
+static 
+struct thread_context* get_thread_context(int dir)
+{
+	static int spread[NR_CPUS] = {0};
+
+	int cpu = smp_processor_id();
+	int node = cpu_to_node(cpu); // numa_node_id();
+	const struct cpumask *cpumask = cpumask_of_node(node);
+	int curr = spread[cpu];
+	unsigned int next = cpumask_next(curr, cpumask);
+	struct thread_context *tc;
+
+	if (next >= nr_cpu_ids) next = cpumask_first(cpumask);
+
+	// failsafe to handle cpu hot plugs
+	if (next >= __px_ncpus) next = 0;
+
+	// its okay to use it unprotected, spreading IO can be slightly undistributed.
+	spread[cpu] = next;
+	tc = &g_tc[next];
+	BUG_ON(!tc);
+	return tc;
+}
+
+int get_thread_count(int id)
+{
+	if (id < __px_ncpus) {
+		struct thread_context *tc = &g_tc[id];
+		return atomic_read(&tc->ncount);
+	}
+
+	return -1;
+}
+
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
@@ -1403,13 +1458,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	unsigned int rw = bio_op(bio);
-#else
-	unsigned int rw = bio_rw(bio);
-#endif
-	int cpu = smp_processor_id();
-	int thread = cpu % __px_ncpus;
+	int rw = bio_data_dir(bio);
 
 	struct pxd_io_tracker *head;
 	struct thread_context *tc;
@@ -1490,8 +1539,8 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-	tc = &g_tc[thread];
-	BUG_ON(!tc);
+	tc = get_thread_context(rw);
+	//tc = &g_tc[thread];
 	pxd_add_io(tc, head, rw);
 
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);

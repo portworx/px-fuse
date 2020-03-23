@@ -60,6 +60,8 @@ struct thread_context {
 	wait_queue_head_t   write_event;
 	struct list_head iot_writers;
 	struct task_struct *writer[PXD_MAX_THREAD_PER_CPU];
+
+	atomic_t ncount;
 };
 
 struct pxd_fastpath_extension {
@@ -132,5 +134,6 @@ int pxd_device_congested(void *, int);
 #else
 #define PXD_ACTIVE(pxd) (0)
 #endif
+int get_thread_count(int id);
 
 #endif /* _PXD_FASTPATH_H_ */
