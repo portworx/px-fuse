@@ -224,7 +224,6 @@ static struct task_struct* fastpath_thread_init(void *ctx, int dir, int cpuid, i
 		return tsk;
 	}
 
-	//  bind readers on any cpu but on same numa node
 	set_cpus_allowed_ptr(tsk, cpumask_of_node(node));
 	set_user_nice(tsk, MIN_NICE);
 	wake_up_process(tsk);
@@ -1523,16 +1522,22 @@ out_file_failed:
 static 
 struct thread_context* get_thread_context(int dir)
 {
-	static int spread[NR_CPUS] = {0};
+	static int spread[NR_CPUS] = {-1};
 
 	int cpu = smp_processor_id();
 	int node = cpu_to_node(cpu); // numa_node_id();
 	const struct cpumask *cpumask = cpumask_of_node(node);
 	int curr = spread[cpu];
-	unsigned int next = cpumask_next(curr, cpumask);
-	struct thread_context *tc;
 
-	if (next >= nr_cpu_ids) next = cpumask_first(cpumask);
+	struct thread_context *tc;
+	int next;
+
+	if (unlikely(curr == -1)) {
+		next = cpu;
+	} else {
+		next = cpumask_next(curr, cpumask);
+		if (next >= nr_cpu_ids) next = cpumask_first(cpumask);
+	}
 
 	// failsafe to handle cpu hot plugs
 	if (next >= __px_ncpus) next = 0;
