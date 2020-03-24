@@ -45,6 +45,12 @@ struct pxd_io_tracker {
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
 
+#define PXD_MAX_IOVEC (SEGMENT_SIZE / PXD_LBS)
+	struct iovec iov[PXD_MAX_IOVEC];
+	unsigned nsegs;
+	size_t len;
+	bool aio;
+
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
 };
@@ -93,6 +99,8 @@ struct pxd_fastpath_extension {
 	atomic_t nio_flush_nop;
 	atomic_t nio_fua;
 	atomic_t nio_write;
+
+	atomic_t naio_read, naio_write; // async io counters
 
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path

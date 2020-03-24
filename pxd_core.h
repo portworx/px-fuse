@@ -64,7 +64,6 @@ struct pxd_device {
 #define SECTOR_SHIFT (9)
 #endif
 
-#define SEGMENT_SIZE (1024 * 1024)
 #define MAX_WRITESEGS_FOR_FLUSH ((4*SEGMENT_SIZE)/PXD_LBS)
 
 // slow path make request io entry point

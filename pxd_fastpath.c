@@ -5,6 +5,7 @@
 #include <linux/topology.h>
 #include <linux/cpumask.h>
 #include <linux/nodemask.h>
+#include <linux/aio.h>
 
 #include "pxd.h"
 #include "pxd_core.h"
@@ -509,16 +510,75 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 		return 0;
 	}
 
-	printk(KERN_ERR "device %llu Write error at byte offset %llu, length %i.\n",
-                        dev_id, (unsigned long long)*pos, bvec->bv_len);
+	printk_ratelimited(KERN_ERR "device %llu Write error at byte offset %lld, length %i, wrote %ld.\n",
+                        dev_id, *pos, bvec->bv_len, bw);
 	if (bw >= 0) bw = -EIO;
 	return bw;
 }
 
-static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
+static void pxd_aio_cleanup(struct pxd_io_tracker *iot)
 {
+	int i;
+	struct iovec *iov = iot->iov;
+
+	for (i=0; i<iot->nsegs; i++) {
+		kunmap(iov->iov_base);
+	}
+}
+
+static bool pxd_aio_setup(struct pxd_io_tracker *iot, int dir)
+{
+	struct bio *bio = &iot->clone;
+	struct file *file = iot->file;
+	struct iovec *iov = iot->iov;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	struct bio_vec bvec;
+	struct bvec_iter i;
+#else
+	struct bio_vec *bvec;
+	int i;
+#endif
+	iot->nsegs = 0;
+	iot->len = 0;
+
+	if (dir == WRITE && !file->f_op->aio_write) return false;
+	if (!file->f_op->aio_read) return false;
+
+	memset(iov, 0, sizeof(iot->iov));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	bio_for_each_segment(bvec, bio, i) {
+		if (iot->nsegs < PXD_MAX_IOVEC) {
+			iov->iov_base = kmap(bvec.bv_page) + bvec.bv_offset;
+			iov->iov_len = bvec.bv_len;
+			iov++;
+			iot->len += bvec.bv_len;	
+		}
+		iot->nsegs++;
+	}
+#else
+	bio_for_each_segment(bvec, bio, i) {
+		if (iot->nsegs < PXD_MAX_IOVEC) {
+			iov->iov_base = kmap(bvec->bv_page) + bvec->bv_offset;
+			iov->iov_len = bvec->bv_len;
+			iov++;
+			iot->len += bvec->bv_len;	
+		}
+		iot->nsegs++;
+	}
+#endif
+
+	iot->aio = ((iot->nsegs > 0) && (iot->nsegs <= PXD_MAX_IOVEC));
+	if (!iot->aio) {
+		pxd_aio_cleanup(iot);
+	}
+	return iot->aio;
+}
+
+static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, struct bio *bio, loff_t pos)
+{
+	struct file *file = iot->file;
 	int ret = 0;
-	int nsegs = 0;
+	unsigned nsegs = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct bio_vec bvec;
 	struct bvec_iter i;
@@ -527,13 +587,33 @@ static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *b
 	int i;
 #endif
 
+	if (pxd_aio_setup(iot, WRITE)) {
+		struct kiocb iocb;
+
+		init_sync_kiocb(&iocb, iot->file);
+		iocb.ki_pos = pos;
+		iocb.ki_left = iot->len;
+		iocb.ki_nbytes = iot->len;
+
+		ret = file->f_op->aio_write(&iocb, iot->iov, iot->nsegs, iocb.ki_pos);
+		if (ret == -EIOCBQUEUED)
+			ret = wait_on_sync_kiocb(&iocb);
+		// position is already local and offset update is not needed.
+		pxd_aio_cleanup(iot);
+		if (ret < 0) {
+			printk_ratelimited(KERN_ERR"device %llu: do_aio_write pos %lld nsegs %u, len %lu FAILED %d\n",
+				pxd_dev->dev_id, pos, iot->nsegs, iot->len, ret);
+			return ret;
+		}
+
+		atomic_inc(&pxd_dev->fp.naio_write);
+		return 0;
+	}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
-		nsegs++;
 		ret = _pxd_write(pxd_dev->dev_id, file, &bvec, &pos);
 		if (ret < 0) {
-			printk(KERN_ERR"do_pxd_write pos %lld page %px, off %u for len %d FAILED %d\n",
-				pos, bvec.bv_page, bvec.bv_offset, bvec.bv_len, ret);
 			return ret;
 		}
 
@@ -541,11 +621,8 @@ static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *b
 	}
 #else
 	bio_for_each_segment(bvec, bio, i) {
-		nsegs++;
 		ret = _pxd_write(pxd_dev->dev_id, file, bvec, &pos);
 		if (ret < 0) {
-			pxd_printk("device %llu: do_pxd_write pos %lld page %px, off %u for len %d FAILED %d\n",
-				pxd_dev->dev_id, pos, bvec->bv_page, bvec->bv_offset, bvec->bv_len, ret);
 			return ret;
 		}
 
@@ -588,12 +665,13 @@ ssize_t _pxd_read(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff
 	kunmap(bvec->bv_page);
 #endif
 	if (result < 0)
-		printk(KERN_ERR "device %llu: __vfs_read return %d\n", dev_id, result);
+		printk_ratelimited(KERN_ERR "device %llu: read offset %lld failed %d\n", dev_id, *pos, result);
 	return result;
 }
 
-static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t *pos)
+static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, struct bio *bio, loff_t *pos)
 {
+	struct file *file = iot->file;
 	ssize_t s;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct bio_vec bvec;
@@ -602,6 +680,29 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct file *file, struct
 	struct bio_vec *bvec;
 	int i;
 #endif
+
+	if (pxd_aio_setup(iot, READ)) {
+		struct kiocb iocb;
+
+		init_sync_kiocb(&iocb, iot->file);
+		iocb.ki_pos = *pos;
+		iocb.ki_left = iot->len;
+		iocb.ki_nbytes = iot->len;
+
+		s = file->f_op->aio_read(&iocb, iot->iov, iot->nsegs, iocb.ki_pos);
+		if (s == -EIOCBQUEUED)
+			s = wait_on_sync_kiocb(&iocb);
+		// position is already local and offset update is not needed.
+		pxd_aio_cleanup(iot);
+		if (s < 0) {
+			printk_ratelimited(KERN_ERR"device %llu: do_aio_read pos %lld nsegs %u, len %lu FAILED %lu\n",
+				pxd_dev->dev_id, *pos, iot->nsegs, iot->len, s);
+			return s;
+		}
+
+		atomic_inc(&pxd_dev->fp.naio_read);
+		return 0;
+	}
 
 	bio_for_each_segment(bvec, bio, i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -874,7 +975,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 
 	switch (op) {
 	case REQ_OP_READ:
-		ret = pxd_receive(pxd_dev, iot->file, bio, &pos);
+		ret = pxd_receive(pxd_dev, iot, bio, &pos);
 		goto out;
 	case REQ_OP_WRITE:
 
@@ -887,7 +988,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 		/* Before any newer writes happen, make sure previous write/sync complete */
 		pxd_check_write_cache_flush(pxd_dev, iot->file);
 
-		ret = pxd_send(pxd_dev, iot->file, bio, pos);
+		ret = pxd_send(pxd_dev, iot, bio, pos);
 		if (ret < 0) goto out;
 
 		if (bio->bi_opf & REQ_FUA) {
@@ -961,7 +1062,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 		}
 		/* Before any newer writes happen, make sure previous write/sync complete */
 		pxd_check_write_cache_flush(pxd_dev, iot->file);
-		ret = pxd_send(pxd_dev, iot->file, bio, pos);
+		ret = pxd_send(pxd_dev, iot, bio, pos);
 
 		if (!ret) {
 			if ((bio->bi_rw & REQ_FUA)) {
@@ -975,7 +1076,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 		}
 
 	} else {
-		ret = pxd_receive(pxd_dev, iot->file, bio, &pos);
+		ret = pxd_receive(pxd_dev, iot, bio, &pos);
 	}
 
 out:
@@ -1339,6 +1440,9 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nwrite_counter,0);
 	atomic_set(&pxd_dev->fp.ncount, 0);
 	atomic_set(&pxd_dev->fp.ncomplete, 0);
+
+	atomic_set(&pxd_dev->fp.naio_write, 0);
+	atomic_set(&pxd_dev->fp.naio_read, 0);
 
 	for (i = 0; i < MAX_NUMNODES; i++) {
 		atomic_set(&fp->index[i], 0);

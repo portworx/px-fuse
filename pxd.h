@@ -67,6 +67,7 @@ enum pxd_opcode {
 #define PXD_FLAGS_SYNC (PXD_FLAGS_FLUSH | PXD_FLAGS_FUA)
 #define PXD_FLAGS_LAST PXD_FLAGS_META
 
+#define SEGMENT_SIZE (1024 * 1024)
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
 
