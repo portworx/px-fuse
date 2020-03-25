@@ -44,13 +44,11 @@ struct pxd_io_tracker {
 	struct bio *orig;    // original request bio [HEAD]
 
 #define PXD_MAX_IOVEC (SEGMENT_SIZE / PXD_LBS)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
-	struct iov_iter iter;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct kvec iov[PXD_MAX_IOVEC];
 #else
 	struct iovec iov[PXD_MAX_IOVEC];
 #endif
-	struct kiocb iocb;
 	unsigned nsegs;
 	size_t len;
 	bool aio;
