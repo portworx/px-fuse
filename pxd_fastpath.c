@@ -519,8 +519,9 @@ static void pxd_aio_cleanup(struct pxd_io_tracker *iot)
 {
 	int i;
 	struct iovec *iov = iot->iov;
+	unsigned max = min_t(unsigned, iot->nsegs, PXD_MAX_IOVEC);
 
-	for (i=0; i<iot->nsegs; i++) {
+	for (i=0; i<max; i++) {
 		kunmap(iov->iov_base);
 	}
 }
