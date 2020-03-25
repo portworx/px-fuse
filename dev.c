@@ -657,15 +657,12 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EFAULT;
 	}
 
-	spin_lock(&conn->lock);
 	req = request_find(conn, read_data.unique);
 	if (!req) {
-		spin_unlock(&conn->lock);
 		printk(KERN_ERR "%s: request %lld not found\n", __func__,
 		       read_data.unique);
 		return -ENOENT;
 	}
-	spin_unlock(&conn->lock);
 
 	if (req->in.opcode != PXD_WRITE &&
 	    req->in.opcode != PXD_WRITE_SAME) {
