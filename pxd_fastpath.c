@@ -235,6 +235,7 @@ static int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid)
 	int i;
 	int err;
 
+	atomic_set(&tc->ncount, 0);
 	spin_lock_init(&tc->read_lock);
 	init_waitqueue_head(&tc->read_event);
 	INIT_LIST_HEAD(&tc->iot_readers);
@@ -1520,6 +1521,7 @@ out_file_failed:
 	return 0;
 }
 
+// logic to spread the IO equally to all CPUs to avoid head of line blocking.
 static 
 struct thread_context* get_thread_context(int dir)
 {
@@ -1550,6 +1552,7 @@ struct thread_context* get_thread_context(int dir)
 	return tc;
 }
 
+// exported method to get IO processed each thread context
 int get_thread_count(int id)
 {
 	if (id < __px_ncpus) {
@@ -1633,13 +1636,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			(bio->bi_opf & REQ_OP_MASK),
 			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
 
-#if 0
-	/* keep writes on same cpu, but allow reads to spread but within same numa node */
-	if (rw == READ) {
-		int node = cpu_to_node(cpu);
-		thread = getnextcpu(node, atomic_add_return(1, &pxd_dev->fp.index[node]));
-	}
-#endif
 
 	head = __pxd_init_block_head(pxd_dev, bio);
 	if (!head) {
@@ -1650,7 +1646,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	tc = get_thread_context(rw);
-	//tc = &g_tc[thread];
 	pxd_add_io(tc, head, rw);
 
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);

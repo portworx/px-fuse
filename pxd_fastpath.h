@@ -13,11 +13,8 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-// atleast 2 per cpu
 // create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
-// writer threads are pinned on the same cpu.
-// reader threads are pinned on the same numa node
-#define PXD_MAX_THREAD_PER_CPU (4)
+#define PXD_MAX_THREAD_PER_CPU (16)
 
 struct pxd_device;
 struct pxd_context;
