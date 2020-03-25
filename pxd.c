@@ -89,6 +89,46 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	put_device(&pxd_dev->dev);
 }
 
+static long pxd_ioctl_dump_fc_info(void)
+{
+	int i;
+	struct pxd_context *ctx;
+
+	for (i = 0; i < pxd_num_contexts; ++i) {
+		ctx = &pxd_contexts[i];
+		if (ctx->num_devices == 0) {
+			continue;
+		}
+		printk(KERN_INFO "%s: pxd_ctx: %s ndevices: %lu",
+			__func__, ctx->name, ctx->num_devices);
+		printk(KERN_INFO "\tFC: connected: %d", ctx->fc.connected);
+	}
+	return 0;
+}
+
+static long pxd_ioctl_get_version(void __user *argp)
+{
+	char ver_data[64];
+	int ver_len = 0;
+
+	if (argp) {
+		ver_len = strlen(gitversion) < 64 ? strlen(gitversion) : 64;
+		strncpy(ver_data, gitversion, ver_len);
+		if (copy_to_user(argp +
+				 offsetof(struct pxd_ioctl_version_args, piv_len),
+			&ver_len, sizeof(ver_len))) {
+			return -EFAULT;
+		}
+		if (copy_to_user(argp +
+				 offsetof(struct pxd_ioctl_version_args, piv_data),
+			ver_data, ver_len)) {
+			return -EFAULT;
+		}
+	}
+
+	return 0;
+}
+
 static long pxd_ioctl_init(struct file *file, void __user *argp)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -102,51 +142,16 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 
 static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	void __user *argp = (void __user *)arg;
-	struct pxd_context *ctx = NULL;
-	int i, status = -ENOTTY;
-	char ver_data[64];
-	int ver_len = 0;
-
 	switch (cmd) {
 	case PXD_IOC_DUMP_FC_INFO:
-		for (i = 0; i < pxd_num_contexts; ++i) {
-			ctx = &pxd_contexts[i];
-			if (ctx->num_devices == 0) {
-				continue;
-			}
-			printk(KERN_INFO "%s: pxd_ctx: %s ndevices: %lu",
-				__func__, ctx->name, ctx->num_devices);
-			printk(KERN_INFO "\tFC: connected: %d", ctx->fc.connected);
-		}
-		status = 0;
-		break;
-
+		return pxd_ioctl_dump_fc_info();
 	case PXD_IOC_GET_VERSION:
-		if (argp) {
-			ver_len = strlen(gitversion) < 64 ? strlen(gitversion) : 64;
-			strncpy(ver_data, gitversion, ver_len);
-			if (copy_to_user(argp +
-				offsetof(struct pxd_ioctl_version_args, piv_len),
-				&ver_len, sizeof(ver_len))) {
-				return -EFAULT;
-			}
-			if (copy_to_user(argp +
-				offsetof(struct pxd_ioctl_version_args, piv_data),
-				ver_data, ver_len)) {
-				return -EFAULT;
-			}
-		}
-		printk(KERN_INFO "pxd driver at version: %s\n", gitversion);
-		status = 0;
-		break;
+		return pxd_ioctl_get_version((void __user *)arg);
 	case PXD_IOC_INIT:
-		status = pxd_ioctl_init(file, argp);
-		break;
+		return pxd_ioctl_init(file, (void __user *)arg);
 	default:
-		break;
+		return -ENOTTY;
 	}
-	return status;
 }
 
 static const struct block_device_operations pxd_bd_ops = {
