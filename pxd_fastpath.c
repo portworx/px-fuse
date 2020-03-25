@@ -516,7 +516,6 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	return bw;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 static void pxd_aio_cleanup(struct pxd_io_tracker *iot)
 {
 	int i;
@@ -543,8 +542,13 @@ static bool pxd_aio_setup(struct pxd_io_tracker *iot, int dir)
 	iot->nsegs = 0;
 	iot->len = 0;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+	if (dir == WRITE && !file->f_op->write_iter) return false;
+	if (!file->f_op->read_iter) return false;
+#else
 	if (dir == WRITE && !file->f_op->aio_write) return false;
 	if (!file->f_op->aio_read) return false;
+#endif
 
 	memset(iov, 0, sizeof(iot->iov));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
@@ -575,7 +579,6 @@ static bool pxd_aio_setup(struct pxd_io_tracker *iot, int dir)
 	}
 	return iot->aio;
 }
-#endif
 
 static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, struct bio *bio, loff_t pos)
 {
@@ -590,18 +593,25 @@ static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, stru
 	int i;
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 	if (pxd_aio_setup(iot, WRITE)) {
-		struct kiocb iocb;
+		init_sync_kiocb(&iot->iocb, iot->file);
+		iot->iocb.ki_pos = pos;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+		iot->iocb.private = iot;
+		// iocb.complete = pxd_complete_aio;
 
-		init_sync_kiocb(&iocb, iot->file);
-		iocb.ki_pos = pos;
-		iocb.ki_left = iot->len;
-		iocb.ki_nbytes = iot->len;
+		iov_iter_init(&iot->iter, WRITE, iot->iov, iot->nsegs, iot->len);
 
-		ret = file->f_op->aio_write(&iocb, iot->iov, iot->nsegs, iocb.ki_pos);
+		s = file->f_op->write_iter(&iot->iocb, &iot->iter);	
+		BUG_ON(s == -EIOCBQUEUED);
+#else
+		iot->iocb.ki_left = iot->len;
+		iot->iocb.ki_nbytes = iot->len;
+
+		ret = file->f_op->aio_write(&iot->iocb, iot->iov, iot->nsegs, iot->iocb.ki_pos);
 		if (ret == -EIOCBQUEUED)
-			ret = wait_on_sync_kiocb(&iocb);
+			ret = wait_on_sync_kiocb(&iot->iocb);
+#endif
 		// position is already local and offset update is not needed.
 		pxd_aio_cleanup(iot);
 		if (ret < 0) {
@@ -613,7 +623,6 @@ static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, stru
 		atomic_inc(&pxd_dev->fp.naio_write);
 		return 0;
 	}
-#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
@@ -686,18 +695,27 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct pxd_io_tracker *io
 	int i;
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 	if (pxd_aio_setup(iot, READ)) {
-		struct kiocb iocb;
+		memset(&iot->iocb, 0, sizeof(iot->iocb));
+		init_sync_kiocb(&iot->iocb, iot->file);
+		iot->iocb.ki_pos = *pos;
 
-		init_sync_kiocb(&iocb, iot->file);
-		iocb.ki_pos = *pos;
-		iocb.ki_left = iot->len;
-		iocb.ki_nbytes = iot->len;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+		iot->iocb.private = iot;
+		// iocb.complete = pxd_complete_aio;
 
-		s = file->f_op->aio_read(&iocb, iot->iov, iot->nsegs, iocb.ki_pos);
+		iov_iter_init(&iot->iter, READ, iot->iov, iot->nsegs, iot->len);
+
+		s = file->f_op->read_iter(&iot->iocb, &iot->iter);	
+		BUG_ON(s == -EIOCBQUEUED);
+#else
+		iot->iocb.ki_left = iot->len;
+		iot->iocb.ki_nbytes = iot->len;
+
+		s = file->f_op->aio_read(&iot->iocb, iot->iov, iot->nsegs, iot->iocb.ki_pos);
 		if (s == -EIOCBQUEUED)
-			s = wait_on_sync_kiocb(&iocb);
+			s = wait_on_sync_kiocb(&iot->iocb);
+#endif
 		// position is already local and offset update is not needed.
 		pxd_aio_cleanup(iot);
 		if (s < 0) {
@@ -709,7 +727,6 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct pxd_io_tracker *io
 		atomic_inc(&pxd_dev->fp.naio_read);
 		return 0;
 	}
-#endif
 
 	bio_for_each_segment(bvec, bio, i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)

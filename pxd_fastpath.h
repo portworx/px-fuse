@@ -12,6 +12,7 @@
 #include <linux/fs.h>
 #include <linux/falloc.h>
 #include <linux/bio.h>
+#include <linux/aio.h>
 
 // create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
 #define PXD_MAX_THREAD_PER_CPU (16)
@@ -42,13 +43,17 @@ struct pxd_io_tracker {
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 #define PXD_MAX_IOVEC (SEGMENT_SIZE / PXD_LBS)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,1,0)
+	struct iov_iter iter;
+	struct kvec iov[PXD_MAX_IOVEC];
+#else
 	struct iovec iov[PXD_MAX_IOVEC];
+#endif
+	struct kiocb iocb;
 	unsigned nsegs;
 	size_t len;
 	bool aio;
-#endif
 
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
