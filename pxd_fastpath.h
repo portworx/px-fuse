@@ -42,11 +42,13 @@ struct pxd_io_tracker {
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 #define PXD_MAX_IOVEC (SEGMENT_SIZE / PXD_LBS)
 	struct iovec iov[PXD_MAX_IOVEC];
 	unsigned nsegs;
 	size_t len;
 	bool aio;
+#endif
 
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]

@@ -516,6 +516,7 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	return bw;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 static void pxd_aio_cleanup(struct pxd_io_tracker *iot)
 {
 	int i;
@@ -574,6 +575,7 @@ static bool pxd_aio_setup(struct pxd_io_tracker *iot, int dir)
 	}
 	return iot->aio;
 }
+#endif
 
 static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, struct bio *bio, loff_t pos)
 {
@@ -588,6 +590,7 @@ static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, stru
 	int i;
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 	if (pxd_aio_setup(iot, WRITE)) {
 		struct kiocb iocb;
 
@@ -610,6 +613,7 @@ static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, stru
 		atomic_inc(&pxd_dev->fp.naio_write);
 		return 0;
 	}
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	bio_for_each_segment(bvec, bio, i) {
@@ -682,6 +686,7 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct pxd_io_tracker *io
 	int i;
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,1,0)
 	if (pxd_aio_setup(iot, READ)) {
 		struct kiocb iocb;
 
@@ -704,6 +709,7 @@ static ssize_t pxd_receive(struct pxd_device *pxd_dev, struct pxd_io_tracker *io
 		atomic_inc(&pxd_dev->fp.naio_read);
 		return 0;
 	}
+#endif
 
 	bio_for_each_segment(bvec, bio, i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
