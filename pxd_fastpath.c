@@ -595,6 +595,7 @@ static int pxd_send(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot, stru
 
 	if (pxd_aio_setup(iot, WRITE)) {
 		struct kiocb iocb;
+		memset(&iocb, 0, sizeof(iocb));
 		init_sync_kiocb(&iocb, iot->file);
 		iocb.ki_pos = pos;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)

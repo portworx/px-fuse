@@ -15,7 +15,7 @@
 #include <linux/aio.h>
 
 // create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
-#define PXD_MAX_THREAD_PER_CPU (16)
+#define PXD_MAX_THREAD_PER_CPU (8)
 
 struct pxd_device;
 struct pxd_context;
