@@ -1109,6 +1109,24 @@ static ssize_t pxd_active_show(struct device *dev,
 	return ncount;
 }
 
+// show io distribution across thread context (useful in fastpath only)
+static ssize_t pxd_distrib_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	char *cp = buf;
+	int ncount = 0;
+	int available = PAGE_SIZE - 1;
+	int i;
+
+	for (i=0; i<num_online_cpus(); i++) {
+		size_t tmp = snprintf(cp, available, "[%d]=%d\n", i, get_thread_count(i));
+		cp += tmp;
+		available -= tmp;
+		ncount += tmp;
+	}
+
+	return ncount;
+}
 static ssize_t pxd_sync_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
@@ -1326,6 +1344,7 @@ static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
+static DEVICE_ATTR(distrib, S_IRUGO, pxd_distrib_show, NULL);
 static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
@@ -1338,6 +1357,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
 	&dev_attr_active.attr,
+	&dev_attr_distrib.attr,
 	&dev_attr_sync.attr,
 	&dev_attr_congested.attr,
 	&dev_attr_writesegment.attr,
