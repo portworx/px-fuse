@@ -582,8 +582,6 @@ static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *b
 		if (ret < 0) {
 			return ret;
 		}
-
-		cond_resched();
 	}
 #endif
 	atomic_add(nsegs, &pxd_dev->fp.nwrite_counter);
