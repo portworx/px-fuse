@@ -238,6 +238,8 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx)
 {
 	int i;
 
+	memset(ctx, 0, offsetof(struct io_ring_ctx, miscdev));
+
 	ctx->queue = vmalloc((sizeof(*ctx->queue) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
 	if (!ctx->queue) {
 		printk(KERN_ERR "failed to allocate request queue");
