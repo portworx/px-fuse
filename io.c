@@ -2216,7 +2216,7 @@ static int io_uring_open(struct inode *inode, struct file *file)
 	spin_lock(&open_lock);
 	if (ctx->opened) {
 		spin_unlock(&open_lock);
-		return -EPERM;
+		return -EBUSY;
 	}
 	ctx->opened = true;
 	spin_unlock(&open_lock);
