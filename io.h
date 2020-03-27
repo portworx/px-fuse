@@ -132,6 +132,7 @@ struct io_ring_ctx {
 
 	struct miscdevice miscdev;
 	uint32_t context_id;
+	bool opened;
 };
 
 struct sqe_submit {

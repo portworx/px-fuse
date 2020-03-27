@@ -2200,6 +2200,8 @@ static int io_run_queue(struct io_ring_ctx *ctx)
 	return 0;
 }
 
+static DEFINE_SPINLOCK(open_lock);
+
 static int io_uring_open(struct inode *inode, struct file *file)
 {
 	struct io_ring_ctx *ctx;
@@ -2207,18 +2209,19 @@ static int io_uring_open(struct inode *inode, struct file *file)
 	struct io_uring_params p = {};
 	struct miscdevice *dev = file->private_data;
 
-	/* don't allow multiple opens */
-	if (dev->fops->open != &io_uring_open) {
-		pr_info("%s: second open attempt", __func__);
-		return -EPERM;
-	}
-
 	ctx = container_of(dev, struct io_ring_ctx, miscdev);
 
-	ret = io_ring_ctx_init(ctx);
-	if (ret != 0) {
-		return ret;
+	spin_lock(&open_lock);
+	if (ctx->opened) {
+		spin_unlock(&open_lock);
+		return -EPERM;
 	}
+	ctx->opened = true;
+	spin_unlock(&open_lock);
+
+	ret = io_ring_ctx_init(ctx);
+	if (ret != 0)
+		return ret;
 
 	ret = io_sq_offload_start(ctx, &p);
 	if (ret != 0) {
@@ -2237,6 +2240,10 @@ static int io_uring_release(struct inode *inode, struct file *file)
 
 	file->private_data = NULL;
 	io_ring_ctx_wait_and_kill(ctx);
+	spin_lock(&open_lock);
+	ctx->opened = false;
+	spin_unlock(&open_lock);
+
 	return 0;
 }
 
