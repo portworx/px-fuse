@@ -1039,12 +1039,20 @@ __releases(fc->lock)
 __acquires(fc->lock)
 {
 	int i;
+	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
+
 	for (i = 0; i < FUSE_REQUEST_QUEUE_SIZE; ++i) {
 		struct fuse_req *req = fc->request_map[i];
 		if (req != NULL) {
 			request_end(fc, req, -ECONNABORTED);
 		}
 	}
+	spin_lock(&cb->w.lock);
+	cb->w.write = 0;
+	cb->w.read = 0;
+	cb->r.read = 0;
+	cb->r.write = 0;
+	spin_unlock(&cb->w.lock);
 }
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
