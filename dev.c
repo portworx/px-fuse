@@ -941,12 +941,19 @@ __releases(fc->lock)
 __acquires(fc->lock)
 {
 	int i;
+
 	for (i = 0; i < FUSE_REQUEST_QUEUE_SIZE; ++i) {
 		struct fuse_req *req = fc->request_map[i];
 		if (req != NULL) {
 			request_end(fc, req, -ECONNABORTED);
 		}
 	}
+	spin_lock(&fc->queue->w.lock);
+	fc->queue->w.write = 0;
+	fc->queue->w.read = 0;
+	fc->queue->r.read = 0;
+	fc->queue->r.write = 0;
+	spin_unlock(&fc->queue->w.lock);
 }
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
