@@ -666,15 +666,12 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EFAULT;
 	}
 
-	spin_lock(&conn->lock);
 	req = request_find(conn, read_data.unique);
 	if (!req) {
-		spin_unlock(&conn->lock);
 		printk(KERN_ERR "%s: request %lld not found\n", __func__,
 		       read_data.unique);
 		return -ENOENT;
 	}
-	spin_unlock(&conn->lock);
 
 	if (req->in.opcode != PXD_WRITE &&
 	    req->in.opcode != PXD_WRITE_SAME) {
@@ -1039,12 +1036,19 @@ __releases(fc->lock)
 __acquires(fc->lock)
 {
 	int i;
+
 	for (i = 0; i < FUSE_REQUEST_QUEUE_SIZE; ++i) {
 		struct fuse_req *req = fc->request_map[i];
 		if (req != NULL) {
 			request_end(fc, req, -ECONNABORTED);
 		}
 	}
+	spin_lock(&fc->queue->w.lock);
+	fc->queue->w.write = 0;
+	fc->queue->w.read = 0;
+	fc->queue->r.read = 0;
+	fc->queue->r.write = 0;
+	spin_unlock(&fc->queue->w.lock);
 }
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
@@ -1088,7 +1092,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	spin_lock_init(&fc->lock);
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
-	INIT_LIST_HEAD(&fc->entry);
 	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
 		GFP_KERNEL);
 
@@ -1127,8 +1130,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 		struct fuse_per_cpu_ids *my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 		memset(my_ids, 0, sizeof(*my_ids));
 	}
-
-	fc->reqctr = 0;
 
 	fuse_conn_queues_init(fc->queue);
 
