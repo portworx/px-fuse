@@ -1,4 +1,5 @@
 #include <linux/module.h>
+#include <linux/module.h>
 #include <linux/blkdev.h>
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
@@ -145,32 +146,6 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
-	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
-	struct fuse_conn *fc = &ctx->fc;
-	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
-
-	struct fuse_user_request *req;
-
-	uint32_t read = cb->r.read;
-	uint32_t write = smp_load_acquire(&cb->r.write);
-
-	while (read != write) {
-		for (; read != write; ++read) {
-			req = &fc->queue->user_requests[
-				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
-			fuse_process_user_request(fc, req);
-		}
-
-		smp_store_release(&cb->r.read, read);
-
-		write = smp_load_acquire(&cb->r.write);
-	}
-
-	return 0;
-}
-
-static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
 	switch (cmd) {
 	case PXD_IOC_DUMP_FC_INFO:
 		return pxd_ioctl_dump_fc_info();
@@ -207,13 +182,6 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
         part_stat_unlock();
 }
 
-/*
- * This is macroized because reqctr moves into a substructure
- * in Linux versions 4.2 and later.  However, we have a private
- * copy of fuse_i.h that uses the older layout.
- */
-#define	REQCTR(fc) (fc)->reqctr
-
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
 	pxd_printk("%s: receive reply to %px(%lld) at %lld\n",
@@ -224,7 +192,7 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
-	trace_pxd_reply(REQCTR(fc), req->in.unique, 0u);
+	trace_pxd_reply(req->in.unique, 0u);
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
@@ -234,9 +202,9 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	trace_pxd_reply(REQCTR(fc), req->in.unique, REQ_OP_WRITE);
+	trace_pxd_reply(req->in.unique, REQ_OP_WRITE);
 #else
-	trace_pxd_reply(REQCTR(fc), req->in.unique, REQ_WRITE);
+	trace_pxd_reply(req->in.unique, REQ_WRITE);
 #endif
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, status);
@@ -369,10 +337,9 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t op, uint32_t flags, bool qfn,
-			uint64_t reqctr)
+			uint32_t minor, uint32_t op, uint32_t flags, bool qfn)
 {
-	trace_pxd_request(reqctr, req->in.unique, size, off, minor, flags);
+	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
@@ -402,9 +369,9 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #else
 
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-	uint32_t minor, uint32_t flags, bool qfn, uint64_t reqctr)
+	uint32_t minor, uint32_t flags, bool qfn)
 {
-	trace_pxd_request(reqctr, req->in.unique, size, off, minor, flags);
+	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
@@ -479,11 +446,10 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	req->fastpath = pxd_dev->fastpath;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc))) {
+		pxd_dev->minor, bio_op(bio), bio->bi_opf, false)) {
 #else
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw, false,
-		    REQCTR(&pxd_dev->ctx->fc))) {
+		    pxd_dev->minor, bio->bi_rw, false)) {
 #endif
 		fuse_request_free(req);
 		bio_io_error(bio);
@@ -534,12 +500,10 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->fastpath = pxd_dev->fastpath;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
-			    REQCTR(&pxd_dev->ctx->fc))) {
+			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true)) {
 #else
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, rq->cmd_flags, true,
-			    REQCTR(&pxd_dev->ctx->fc))) {
+			    pxd_dev->minor, rq->cmd_flags, true)) {
 #endif
 			fuse_request_free(req);
 			spin_lock_irq(&pxd_dev->qlock);
@@ -577,8 +541,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	blk_mq_start_request(rq);
 
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-		pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
-		REQCTR(&pxd_dev->ctx->fc))) {
+		pxd_dev->minor, req_op(rq), rq->cmd_flags, true)) {
 		return BLK_STS_IOERR;
 	}
 
@@ -1644,7 +1607,6 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
-	INIT_LIST_HEAD(&ctx->pending_requests);
 	INIT_DELAYED_WORK(&ctx->abort_work, pxd_abort_context);
 	return 0;
 }

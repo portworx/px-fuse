@@ -206,14 +206,8 @@ struct fuse_conn {
 	/** per cpu id allocators */
 	struct fuse_per_cpu_ids __percpu *per_cpu_ids;
 
-	/** The next unique request id */
-	u64 reqctr;
-
 	/** Refcount */
 	atomic_t count;
-
-	/** Entry on the fuse_conn_list */
-	struct list_head entry;
 
 	/** O_ASYNC requests */
 	struct fasync_struct *fasync;

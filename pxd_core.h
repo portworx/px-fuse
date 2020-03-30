@@ -25,7 +25,6 @@ struct pxd_context {
 	char io_name[256];
 	struct io_ring_ctx io_ctx;
 #endif
-	struct list_head pending_requests;
 	struct delayed_work abort_work;
 	uint64_t open_seq;
 };

@@ -83,11 +83,10 @@ TRACE_EVENT(
 TRACE_EVENT(
 	pxd_request,
 	TP_PROTO(
-		uint64_t reqctr, uint64_t unique, uint32_t size, uint64_t off,
+		uint64_t unique, uint32_t size, uint64_t off,
 		uint32_t minor, uint32_t flags),
-	TP_ARGS(reqctr, unique, size, off, minor, flags),
+	TP_ARGS(unique, size, off, minor, flags),
 	TP_STRUCT__entry(
-		__field(uint64_t, reqctr)
 		__field(uint64_t, unique)
 		__field(uint32_t, size)
 		__field(uint64_t, off)
@@ -95,7 +94,6 @@ TRACE_EVENT(
 		__field(uint32_t, flags)
 	),
 	TP_fast_assign(
-		__entry->reqctr = reqctr,
 		__entry->unique = unique,
 		__entry->size = size,
 		__entry->off = off,
@@ -103,65 +101,28 @@ TRACE_EVENT(
 		__entry->flags = flags
 	),
 	TP_printk(
-		"reqctr %llu unique %llu size %u off %llu minor %u flags %x",
-		__entry->reqctr, __entry->unique, __entry->size, __entry->off,
+		"unique %llu size %u off %llu minor %u flags %x",
+		__entry->unique, __entry->size, __entry->off,
 		__entry->minor, __entry->flags)
 );
 
 TRACE_EVENT(
 	pxd_reply,
-	TP_PROTO(uint64_t reqctr, uint64_t unique, uint32_t flags),
-	TP_ARGS(reqctr, unique, flags),
+	TP_PROTO(uint64_t unique, uint32_t flags),
+	TP_ARGS(unique, flags),
 	TP_STRUCT__entry(
-		__field(uint64_t, reqctr)
 		__field(uint64_t, unique)
 		__field(uint32_t,flags)
 	),
 	TP_fast_assign(
-		__entry->reqctr = reqctr,
 		__entry->unique = unique,
 		__entry->flags = flags
 	),
 	TP_printk(
-		"reqctr %llu unique %llu flags %x",
-		__entry->reqctr, __entry->unique, __entry->flags)
+		"unique %llu flags %x",
+		__entry->unique, __entry->flags)
 );
 
-TRACE_EVENT(
-	pxd_get_fuse_req,
-	TP_PROTO(uint64_t reqctr, int nr_pages),
-	TP_ARGS(reqctr, nr_pages),
-	TP_STRUCT__entry(
-		__field(uint64_t, reqctr)
-		__field(int, nr_pages)
-	),
-	TP_fast_assign(
-		__entry->reqctr = reqctr,
-		__entry->nr_pages = nr_pages
-	),
-	TP_printk(
-		"reqctr %llu nr_pages %d",
-		__entry->reqctr, __entry->nr_pages)
-);
-
-TRACE_EVENT(
-	pxd_get_fuse_req_result,
-	TP_PROTO(uint64_t reqctr, int status, int eintr),
-	TP_ARGS(reqctr, status, eintr),
-	TP_STRUCT__entry(
-		__field(uint64_t, reqctr)
-		__field(int, status)
-		__field(int, eintr)
-	),
-	TP_fast_assign(
-		__entry->reqctr = reqctr,
-		__entry->status = status,
-		__entry->eintr = eintr
-	),
-	TP_printk(
-		"reqctr %llu status %d eintr %d",
-		__entry->reqctr, __entry->status, __entry->eintr)
-);
 #endif /* _PXD_TP_H */
 
 #include <trace/define_trace.h>
