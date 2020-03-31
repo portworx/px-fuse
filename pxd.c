@@ -140,6 +140,32 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	return pxd_read_init(&ctx->fc, &iter);
 }
 
+static long pxd_ioctl_run_user_queue(struct file *file)
+{
+	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
+	struct fuse_conn *fc = &ctx->fc;
+	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+
+	struct fuse_user_request *req;
+
+	uint32_t read = cb->r.read;
+	uint32_t write = smp_load_acquire(&cb->r.write);
+
+	while (read != write) {
+		for (; read != write; ++read) {
+			req = &fc->queue->user_requests[
+				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
+			fuse_process_user_request(fc, req);
+		}
+
+		smp_store_release(&cb->r.read, read);
+
+		write = smp_load_acquire(&cb->r.write);
+	}
+
+	return 0;
+}
+
 static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -149,6 +175,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_get_version((void __user *)arg);
 	case PXD_IOC_INIT:
 		return pxd_ioctl_init(file, (void __user *)arg);
+	case PXD_IOC_RUN_USER_QUEUE:
+		return pxd_ioctl_run_user_queue(file);
 	default:
 		return -ENOTTY;
 	}
@@ -1558,7 +1586,7 @@ static vm_fault_t pxd_vm_fault(struct vm_fault *vmf)
 #endif
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	void *map_addr = (void*)ctx->fc.queue + (vmf->pgoff << PAGE_SHIFT);
-	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct fuse_req_queue)) {
+	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct fuse_conn_queues)) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
 		return -EFAULT;
 #else

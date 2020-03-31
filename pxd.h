@@ -25,10 +25,11 @@
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
 
-#define PXD_IOCTL_MAGIC			(('P' << 8) | 'X')
+#define PXD_IOCTL_MAGIC		(('P' << 8) | 'X')
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
-#define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
+#define PXD_IOC_GET_VERSION	_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 #define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
+#define PXD_IOC_RUN_USER_QUEUE	_IO(PXD_IOCTL_MAGIC, 4)		/* 0x505804 */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -57,6 +58,7 @@ enum pxd_opcode {
 	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
 	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
 	PXD_GET_FEATURES,   /**< get features */
+	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_LAST,
 };
 
@@ -212,6 +214,12 @@ struct pxd_rdwr_in_v1 {
 	uint64_t offset;	/**< device offset in bytes */
 };
 
+/** completion of user operation */
+struct pxd_completion {
+	uint64_t user_data;	/**< user data passed in request */
+	int32_t res;		/**< result code */
+};
+
 /**
  * PXD_READ/PXD_WRITE kernel request structure
  */
@@ -229,7 +237,10 @@ struct rdwr_in {
 	rdwr_in() = default;
 #endif
 	struct fuse_in_header in;	/**< fuse header */
-	struct pxd_rdwr_in rdwr;	/**< read/write request */
+	union {
+		struct pxd_rdwr_in rdwr;	/**< read/write request */
+		struct pxd_completion completion; /**< user request completion */
+	};
 };
 
 struct rdwr_in_v1 {

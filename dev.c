@@ -173,21 +173,22 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
 	u32 write;
 	struct rdwr_in *rdwr;
+	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
 
-	spin_lock(&fc->queue->w.lock);
-	write = fc->queue->w.write;
-	if (write - fc->queue->w.read >= FUSE_REQUEST_QUEUE_SIZE) {
-		fc->queue->w.read = fc->queue->r.read;
-		BUG_ON(write - fc->queue->w.read >= FUSE_REQUEST_QUEUE_SIZE);
+	spin_lock(&cb->w.lock);
+	write = cb->w.write;
+	if (write - cb->w.read >= FUSE_REQUEST_QUEUE_SIZE) {
+		cb->w.read = cb->r.read;
+		BUG_ON(write - cb->w.read >= FUSE_REQUEST_QUEUE_SIZE);
 	}
 
 	rdwr = fuse_rdwr(fc, write);
 	rdwr->in = req->in;
 	rdwr->rdwr = req->pxd_rdwr_in;
-	req->sequence = fc->queue->w.sequence++;
-	fc->queue->w.write = write + 1;
-	smp_store_release(&fc->queue->r.write, write + 1);
-	spin_unlock(&fc->queue->w.lock);
+	req->sequence = cb->w.sequence++;
+	cb->w.write = write + 1;
+	smp_store_release(&cb->r.write, write + 1);
+	spin_unlock(&cb->w.lock);
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
@@ -238,9 +239,10 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	}
 }
 
-static int request_pending(struct fuse_conn *fc)
+static bool request_pending(struct fuse_conn *fc)
 {
-	return fc->queue->r.read != fc->queue->r.write;
+	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
+	return cb->r.read != cb->r.write;
 }
 
 /* Wait until a request is available on the pending list */
@@ -360,6 +362,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	ssize_t copied = 0, copied_this_time;
 	ssize_t remain = iter->count;
 	u32 read, write, idx;
+	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
 
 	if (!request_pending(fc)) {
 		if ((file->f_flags & O_NONBLOCK))
@@ -370,8 +373,8 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	}
 
 retry:
-	read = fc->queue->r.read;
-	write = smp_load_acquire(&fc->queue->r.write);
+	read = cb->r.read;
+	write = smp_load_acquire(&cb->r.write);
 
 	while (read != write && remain >= sizeof(struct rdwr_in)) {
 		idx = read & (FUSE_REQUEST_QUEUE_SIZE - 1);
@@ -389,7 +392,7 @@ retry:
 		remain -= copied_this_time;
 	}
 
-	fc->queue->r.read = read;
+	cb->r.read = read;
 
 	/* Check if more requests could be picked up */
 	if (remain && request_pending(fc))
@@ -890,6 +893,98 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	return nbytes;
 }
 
+void fuse_user_complete(struct fuse_conn *fc, uint64_t unique, uint64_t user_data,
+	int res)
+{
+	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
+	uint32_t write;
+
+	struct rdwr_in *rdwr;
+
+	spin_lock(&cb->w.lock);
+
+	write = cb->w.write;
+
+	if (write - cb->w.read >= FUSE_REQUEST_QUEUE_SIZE) {
+		cb->w.read = cb->r.read;
+		BUG_ON(write - cb->w.read >= FUSE_REQUEST_QUEUE_SIZE);
+	}
+
+	rdwr = fuse_rdwr(fc, write);
+
+	rdwr->in.opcode = PXD_COMPLETE;
+	rdwr->in.unique = unique;
+	rdwr->completion.res = res;
+	rdwr->completion.user_data = user_data;
+
+	smp_store_release(&cb->r.write, write + 1);
+	cb->w.write = write + 1;
+
+	spin_unlock(&cb->w.lock);
+
+	fuse_conn_wakeup(fc);
+}
+
+void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *ureq)
+{
+	struct fuse_req *req;
+	struct iov_iter iter;
+	int ret;
+
+	req = request_find(fc, ureq->unique);
+	if (!req) {
+		printk(KERN_ERR "%s: request %lld not found\n", __func__, ureq->unique);
+		fuse_user_complete(fc, ureq->unique, ureq->user_data, -ENOENT);
+		return;
+	}
+
+	ret = 0;
+	if (ureq->len > 0) {
+		struct iovec data_iov_inline[16];
+		struct iovec *data_iov = data_iov_inline;
+		size_t data_iov_len = sizeof(struct iovec) * ureq->len;
+		if (ureq->len > PXD_MAX_IO / PXD_LBS + 2) {
+			fuse_user_complete(fc, ureq->unique, ureq->user_data,
+					-EINVAL);
+			return;
+		}
+
+		if (ureq->len > ARRAY_SIZE(data_iov_inline)) {
+			data_iov = kmalloc(data_iov_len, GFP_KERNEL);
+			if (!data_iov) {
+				fuse_user_complete(fc, ureq->unique, ureq->user_data,
+					-ENOMEM);
+				return;
+			}
+		}
+
+		if (copy_from_user(data_iov, (void *)ureq->iov_addr, data_iov_len)) {
+			fuse_user_complete(fc, ureq->unique, ureq->user_data,
+				-EFAULT);
+			if (data_iov != data_iov_inline)
+				kfree(data_iov);
+			return;
+		}
+
+		iov_iter_init(&iter, READ, data_iov, ureq->len,
+			iov_length(data_iov, ureq->len));
+
+		ret = req->fastpath ?
+		      __fuse_dev_do_write_fastpath(fc, req, &iter) :
+		      __fuse_dev_do_write_slowpath(fc, req, &iter);
+
+		if (data_iov != data_iov_inline)
+			kfree(data_iov);
+	}
+
+	if (!ret)
+		request_end(fc, req, ureq->res);
+
+	/* user requests that need data copy and failed user requests need completions */
+	if (ureq->len > 0 || ret != 0)
+		fuse_user_complete(fc, ureq->unique, ureq->user_data, ret);
+}
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
 static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 			      unsigned long nr_segs, loff_t pos)
@@ -968,17 +1063,24 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 		vfree(fc->queue);
 }
 
-static void fuse_req_queue_init(struct fuse_req_queue *queue)
+static void fuse_queue_init_cb(struct fuse_queue_cb *cb)
 {
+	cb->w.sequence = 1;
+	cb->w.read = 0;
+	cb->w.write = 0;
+	spin_lock_init(&cb->w.lock);
+
+	cb->r.write = 0;
+	cb->r.read = 0;
+}
+
+static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
+{
+	fuse_queue_init_cb(&queue->requests_cb);
 	memset(queue->requests, 0, sizeof(queue->requests));
 
-	queue->w.sequence = 1;
-	queue->w.read = 0;
-	queue->w.write = 0;
-	spin_lock_init(&queue->w.lock);
-
-	queue->r.write = 0;
-	queue->r.read = 0;
+	fuse_queue_init_cb(&queue->user_requests_cb);
+	memset(queue->user_requests, 0, sizeof(queue->user_requests));
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1029,7 +1131,7 @@ int fuse_conn_init(struct fuse_conn *fc)
 		memset(my_ids, 0, sizeof(*my_ids));
 	}
 
-	fuse_req_queue_init(fc->queue);
+	fuse_conn_queues_init(fc->queue);
 
 	return 0;
 err_out:
@@ -1117,10 +1219,12 @@ static int compare_reqs(const void *lhs, const void *rhs)
  */
 int fuse_restart_requests(struct fuse_conn *fc)
 {
-	int i;
+	u32 i, index;
 	struct fuse_req **resend_reqs;
-	u32 read = fc->queue->r.read;	/* ok to access read part since user space is
- 					* inactive */
+	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
+
+	u32 read = cb->r.read;	/* ok to access read part since user space is
+ 				* inactive */
 	u32 write;
 	u64 sequence;
 	int resend_count = 0;
@@ -1131,15 +1235,51 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	 * Find the sequence of the first request unread by user space. If there are no
 	 * pending requests, use the next request sequence.
 	 */
-	spin_lock(&fc->queue->w.lock);
-	sequence = fc->queue->w.sequence;
-	write = fc->queue->w.write;
+	spin_lock(&cb->w.lock);
+	sequence = cb->w.sequence;
+	write = cb->w.write;
+
+	printk(KERN_INFO "read %d write %d sequence %lld", read, write, sequence);
+
 	if (read != write) {
-		int index = fuse_rdwr(fc, read)->in.unique &
-			(FUSE_MAX_REQUEST_IDS - 1);
-		sequence = fc->request_map[index]->sequence;
+		/*
+		 * Remove all completion entries, they will be invalid for the new
+		 * process.
+		 */
+		u32 move_idx = read;
+
+		for (; move_idx != write; ++move_idx) {
+			if (fuse_rdwr(fc, move_idx)->in.opcode == PXD_COMPLETE)
+				break;
+		}
+
+		pr_info("completion entry at %d", move_idx);
+
+		for (i = move_idx; i != write; ++i) {
+			if (fuse_rdwr(fc, i)->in.opcode != PXD_COMPLETE) {
+				pr_info("move from %d to %d", i, move_idx);
+				*fuse_rdwr(fc, move_idx) = *fuse_rdwr(fc, i);
+				++move_idx;
+			}
+		}
+
+		pr_info("set write to %d", move_idx);
+
+		write = move_idx;
+
+		if (read != write) {
+			pr_info("opcode %d unique %lld",
+				fuse_rdwr(fc, read)->in.opcode,
+				fuse_rdwr(fc, read)->in.unique);
+			index = fuse_rdwr(fc, read)->in.unique &
+				(FUSE_MAX_REQUEST_IDS - 1);
+			sequence = fc->request_map[index]->sequence;
+		}
 	}
-	spin_unlock(&fc->queue->w.lock);
+	/* Update write index if it changed because of removing completion entries. */
+	cb->r.write = write;
+	cb->w.write = write;
+	spin_unlock(&cb->w.lock);
 
 	printk(KERN_INFO "read %d write %d sequence %lld", read, write, sequence);
 
@@ -1166,12 +1306,11 @@ int fuse_restart_requests(struct fuse_conn *fc)
 		rdwr->rdwr = resend_reqs[i - 1]->pxd_rdwr_in;
 	}
 
-	spin_lock(&fc->queue->w.lock);
-	fc->queue->w.read = read;
+	spin_lock(&cb->w.lock);
 	/* update the reader part */
-	fc->queue->r.read = read;
-	fc->queue->r.write = fc->queue->w.write;
-	spin_unlock(&fc->queue->w.lock);
+	cb->w.read = read;
+	cb->r.read = read;
+	spin_unlock(&cb->w.lock);
 
 	spin_lock(&fc->lock);
 	fuse_conn_wakeup(fc);

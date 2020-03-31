@@ -92,35 +92,76 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 /** size of request ring buffer */
 #define FUSE_REQUEST_QUEUE_SIZE (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
-/** request queue */
-struct ____cacheline_aligned fuse_req_queue {
 #ifdef __KERNEL__
-	struct ____cacheline_aligned {
-		uint32_t write;         /** cached write pointer */
-		uint32_t read;		/** cached read pointer */
-		spinlock_t lock;	/** writer lock */
-		uint32_t pad_0;
-		uint64_t sequence;        /** next request sequence number */
-		uint64_t pad[5];
-	} w;
+/** writer control block */
+struct ____cacheline_aligned fuse_queue_writer {
+	uint32_t write;         /** cached write index */
+	uint32_t read;		/** cached read index */
+	spinlock_t lock;	/** writer lock */
+	uint32_t pad_0;
+	uint64_t sequence;        /** next request sequence number */
+	uint64_t pad[5];
+};
 
-	struct ____cacheline_aligned {
-		uint32_t read;          /** read index updated by reader */
-		uint32_t write;		/** write pointer updated by receive function */
-		uint64_t pad_2[7];
-	} r;
+/** reader control block */
+struct ____cacheline_aligned fuse_queue_reader {
+	uint32_t read;          /** read index updated by reader */
+	uint32_t write;		/** write index updated by writer */
+	uint64_t pad_2[7];
+};
+
 #else
-	struct alignas(64) {
-		uint64_t pad[8];
-	} w;
 
-	struct alignas(64) {
-		std::atomic<uint32_t> read;
-		std::atomic<uint32_t> write;
-		uint64_t pad_2[7];
-	} r;
+/** writer control block */
+struct alignas(64) fuse_queue_writer {
+	uint32_t write;         	/** cached write index */
+	uint32_t read;			/** cached read index */
+	pthread_spinlock_t lock;	/** writer lock */
+	bool in_runq;			/** a thread is processing the queue */
+	char pad_1[3];
+	uint64_t sequence;        	/** next request sequence number */
+	uint64_t pad[5];
+};
+
+/** reader control block */
+struct alignas(64) fuse_queue_reader {
+	std::atomic<uint32_t> read;	/** read index updated by reader */
+	std::atomic<uint32_t> write;	/** write index updated by writer */
+	uint64_t pad_2[7];
+};
+
 #endif
+
+/** opcodes for fuse_user_request */
+#define FUSE_USER_OP_NOP 0		/** nop */
+#define FUSE_USER_OP_REQ_DONE 1		/** request completion */
+
+/** request from user space to kernel */
+struct fuse_user_request {
+	uint8_t opcode;		/** operation code */
+	uint16_t len;		/** number of entries in iovec array */
+	uint8_t pad;		/** padding */
+	int32_t res;		/** result code */
+	uint64_t unique;	/** unique id of request */
+	uint64_t user_data;	/** user data returned in response */
+	uint64_t iov_addr;	/** address of iovec array */
+};
+
+/** queue control block */
+struct fuse_queue_cb {
+	struct fuse_queue_writer w;
+	struct fuse_queue_reader r;
+};
+
+/** fuse connection queues */
+struct ____cacheline_aligned fuse_conn_queues {
+	/** requests from kernel to user space */
+	struct fuse_queue_cb requests_cb;
 	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
+
+	/** requests from user space to kernel */
+	struct fuse_queue_cb user_requests_cb;
+	struct fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 #ifdef __KERNEL__
@@ -139,7 +180,7 @@ struct fuse_conn {
 	wait_queue_head_t waitq;
 
 	/** request queue */
-	struct fuse_req_queue *queue;
+	struct fuse_conn_queues *queue;
 
 	/** maps request ids to requests */
 	struct fuse_req **request_map;
@@ -242,5 +283,8 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
 void fuse_request_init(struct fuse_req *req);
 
 void fuse_convert_zero_writes(struct fuse_req *req);
+
+void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *ureq);
+
 #endif
 #endif /* _FS_FUSE_I_H */
