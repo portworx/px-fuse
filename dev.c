@@ -1043,12 +1043,12 @@ __acquires(fc->lock)
 			request_end(fc, req, -ECONNABORTED);
 		}
 	}
-	spin_lock(&fc->queue->w.lock);
-	fc->queue->w.write = 0;
-	fc->queue->w.read = 0;
-	fc->queue->r.read = 0;
-	fc->queue->r.write = 0;
-	spin_unlock(&fc->queue->w.lock);
+	spin_lock(&fc->queue->requests_cb.w.lock);
+	fc->queue->requests_cb.w.write = 0;
+	fc->queue->requests_cb.w.read = 0;
+	fc->queue->requests_cb.r.read = 0;
+	fc->queue->requests_cb.r.write = 0;
+	spin_unlock(&fc->queue->requests_cb.w.lock);
 }
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
