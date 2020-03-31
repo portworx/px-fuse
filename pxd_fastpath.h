@@ -13,11 +13,8 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-// atleast 2 per cpu
 // create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
-// writer threads are pinned on the same cpu.
-// reader threads are pinned on the same numa node
-#define PXD_MAX_THREAD_PER_CPU (4)
+#define PXD_MAX_THREAD_PER_CPU (8)
 
 struct pxd_device;
 struct pxd_context;
@@ -40,7 +37,6 @@ struct pxd_io_tracker {
 	atomic_t active; // only HEAD has refs to all active IO
 	atomic_t fails; // should be zero, non-zero indicates atleast one path failed
 	struct file* file;
-	int read; // if read is from the first target only
 
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
@@ -60,6 +56,8 @@ struct thread_context {
 	wait_queue_head_t   write_event;
 	struct list_head iot_writers;
 	struct task_struct *writer[PXD_MAX_THREAD_PER_CPU];
+
+	atomic_t ncount;
 };
 
 struct pxd_fastpath_extension {
@@ -132,5 +130,8 @@ int pxd_device_congested(void *, int);
 #else
 #define PXD_ACTIVE(pxd) (0)
 #endif
+
+// return the io count processed by a thread
+int get_thread_count(int id);
 
 #endif /* _PXD_FASTPATH_H_ */

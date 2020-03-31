@@ -107,9 +107,13 @@ struct ____cacheline_aligned fuse_queue_writer {
 struct ____cacheline_aligned fuse_queue_reader {
 	uint32_t read;          /** read index updated by reader */
 	uint32_t write;		/** write index updated by writer */
+<<<<<<< HEAD
 	uint32_t need_wake_up;	/** if true reader needs wake up call */
 	uint32_t pad;
 	uint64_t pad_2[6];
+=======
+	uint64_t pad_2[7];
+>>>>>>> master
 };
 
 #else
@@ -291,7 +295,10 @@ void fuse_convert_zero_writes(struct fuse_req *req);
 
 void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *ureq);
 
+<<<<<<< HEAD
 void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 
+=======
+>>>>>>> master
 #endif
 #endif /* _FS_FUSE_I_H */
