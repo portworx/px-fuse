@@ -1118,7 +1118,7 @@ static ssize_t pxd_distrib_show(struct device *dev,
 	int available = PAGE_SIZE - 1;
 	int i;
 
-	for (i=0; i<num_online_cpus(); i++) {
+	for (i = 0; i < num_online_cpus(); i++) {
 		size_t tmp = snprintf(cp, available, "[%d]=%d\n", i, get_thread_count(i));
 		cp += tmp;
 		available -= tmp;
@@ -1322,7 +1322,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 
 	i=0;
 	token = __strtok_r(tmp, delim, &saveptr);
-	for (i=0; i<MAX_PXD_BACKING_DEVS && token; i++) {
+	for (i = 0; i < MAX_PXD_BACKING_DEVS && token; i++) {
 		// strip the token of any newline/whitespace
 		__strip_nl(token, trimtoken, sizeof(trimtoken));
 		strncpy(update_out.devpath[i], trimtoken, MAX_PXD_DEVPATH_LEN);

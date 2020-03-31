@@ -834,7 +834,7 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 
 	// initialize the replicas only if the request is non-read
 	if (dir != READ) {
-		for (index=1; index<pxd_dev->fp.nfd; index++) {
+		for (index = 1; index < pxd_dev->fp.nfd; index++) {
 			repl = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[index]);
 			if (!repl) {
 				goto repl_cleanup;
