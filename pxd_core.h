@@ -6,9 +6,12 @@
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
 #endif
+#include "pxd.h"
 
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
+#include "io.h"
+
 struct pxd_context {
 	spinlock_t lock;
 	struct list_head list;
@@ -18,8 +21,11 @@ struct pxd_context {
 	char name[256];
 	int id;
 	struct miscdevice miscdev;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	char io_name[256];
+	struct io_ring_ctx io_ctx;
+#endif
 	struct delayed_work abort_work;
-
 	uint64_t open_seq;
 };
 
