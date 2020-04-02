@@ -10,7 +10,10 @@
 
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 #include "io.h"
+#endif
 
 struct pxd_context {
 	spinlock_t lock;
