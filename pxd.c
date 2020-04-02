@@ -22,8 +22,10 @@
 #include <linux/blk-mq.h>
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 #include "io.h"
 #include "pxd_io_uring.h"
+#endif
 
 /** enables time tracing */
 //#define GD_TIME_LOG
