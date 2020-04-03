@@ -1676,12 +1676,14 @@ int pxd_init(void)
 {
 	int err, i, j;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	err = -ENOMEM;
 	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
 	if (req_cachep == NULL) {
 		printk(KERN_ERR "pxd: failed to initialize request cache");
 		goto out;
 	}
+#endif
 
 	err = fuse_dev_init();
 	if (err) {
@@ -1791,7 +1793,9 @@ void pxd_exit(void)
 
 	kfree(pxd_contexts);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	kmem_cache_destroy(req_cachep);
+#endif
 
 	printk(KERN_INFO "pxd: driver unloaded\n");
 }
