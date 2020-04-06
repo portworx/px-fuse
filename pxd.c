@@ -686,6 +686,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	/* Enable flush support. */
 	BLK_QUEUE_FLUSH(q);
 
+	/* adjust queue limits to be compatible with backing device */
+	if (pxd_dev->fastpath) {
+		pxd_fastpath_adjust_limits(pxd_dev, q);
+	}
+
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
@@ -710,7 +715,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
 #ifdef __PX_BLKMQ__
-		blk_mq_free_tag_set(&pxd_dev->tag_set);
+		if (!pxd_dev->fastpath) blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
 	}
 	put_disk(disk);

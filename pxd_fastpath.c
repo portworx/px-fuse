@@ -1536,3 +1536,40 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
+
+void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque)
+{
+	int i;
+	struct file *file;
+	struct inode *inode;
+	struct block_device *bdev;
+	struct gendisk *disk;
+	struct request_queue *bque;
+	char name[BDEVNAME_SIZE];
+
+	printk(KERN_INFO"pxd device %llu: adjusting queue limits nfd %d\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
+
+	for (i=0; i<pxd_dev->fp.nfd; i++) {
+		file = pxd_dev->fp.file[i];
+		BUG_ON(!file);
+		inode = file_inode(file);
+		if (S_ISBLK(inode->i_mode)) {
+			bdev = lookup_bdev(pxd_dev->fp.device_path[i]);
+		} else {
+			bdev = inode->i_sb->s_bdev;
+		}
+		if (!bdev) continue;
+
+		disk = bdev->bd_disk;
+		if (disk) {
+			bque = bdev_get_queue(bdev);
+			if (bque) {
+				printk(KERN_INFO"pxd device %llu queue limits adjusted with block dev %p(%s)\n",
+					pxd_dev->dev_id, bdev, bdevname(bdev, name));
+				blk_queue_stack_limits(topque, bque);
+			}
+		}
+
+		if (S_ISBLK(inode->i_mode)) bdput(bdev);
+	}
+}
