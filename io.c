@@ -675,6 +675,7 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 	struct file *file;
 	size_t iov_count;
 	int ret;
+	ssize_t ret2;
 
 	ret = io_prep_rw(req, s, force_nonblock);
 	if (ret)
@@ -691,23 +692,18 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 		return ret;
 
 	iov_count = iov_iter_count(&iter);
-	ret = security_file_permission(file, MAY_READ);
-	if (!ret) {
-		ssize_t ret2;
-
-		/* Catch -EAGAIN return for forced non-blocking submission */
-		ret2 = call_read_iter(file, kiocb, &iter);
-		if (!force_nonblock || ret2 != -EAGAIN) {
-			io_rw_done(kiocb, ret2);
-		} else {
-			/*
-			 * If ->needs_lock is true, we're already in async
-			 * context.
-			 */
-			if (!s->needs_lock)
-				io_async_list_note(READ, req, iov_count);
-			ret = -EAGAIN;
-		}
+	/* Catch -EAGAIN return for forced non-blocking submission */
+	ret2 = call_read_iter(file, kiocb, &iter);
+	if (!force_nonblock || ret2 != -EAGAIN) {
+		io_rw_done(kiocb, ret2);
+	} else {
+		/*
+		 * If ->needs_lock is true, we're already in async
+		 * context.
+		 */
+		if (!s->needs_lock)
+			io_async_list_note(READ, req, iov_count);
+		ret = -EAGAIN;
 	}
 	kfree(iovec);
 	return ret;
@@ -722,6 +718,7 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	struct file *file;
 	size_t iov_count;
 	int ret;
+	ssize_t ret2;
 
 	ret = io_prep_rw(req, s, force_nonblock);
 	if (ret) {
@@ -751,37 +748,32 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 		goto out_free;
 	}
 
-	ret = security_file_permission(file, MAY_WRITE);
-	if (!ret) {
-		ssize_t ret2;
+	/*
+	 * Open-code file_start_write here to grab freeze protection,
+	 * which will be released by another thread in
+	 * io_complete_rw().  Fool lockdep by telling it the lock got
+	 * released so that it doesn't complain about the held lock when
+	 * we return to userspace.
+	 */
+	if (S_ISREG(file_inode(file)->i_mode)) {
+		__sb_start_write(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE, true);
+		__sb_writers_release(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE);
+	}
+	kiocb->ki_flags |= IOCB_WRITE;
 
+	ret2 = call_write_iter(file, kiocb, &iter);
+	if (!force_nonblock || ret2 != -EAGAIN) {
+		io_rw_done(kiocb, ret2);
+	} else {
 		/*
-		 * Open-code file_start_write here to grab freeze protection,
-		 * which will be released by another thread in
-		 * io_complete_rw().  Fool lockdep by telling it the lock got
-		 * released so that it doesn't complain about the held lock when
-		 * we return to userspace.
+		 * If ->needs_lock is true, we're already in async
+		 * context.
 		 */
-		if (S_ISREG(file_inode(file)->i_mode)) {
-			__sb_start_write(file_inode(file)->i_sb,
-						SB_FREEZE_WRITE, true);
-			__sb_writers_release(file_inode(file)->i_sb,
-						SB_FREEZE_WRITE);
-		}
-		kiocb->ki_flags |= IOCB_WRITE;
-
-		ret2 = call_write_iter(file, kiocb, &iter);
-		if (!force_nonblock || ret2 != -EAGAIN) {
-			io_rw_done(kiocb, ret2);
-		} else {
-			/*
-			 * If ->needs_lock is true, we're already in async
-			 * context.
-			 */
-			if (!s->needs_lock)
-				io_async_list_note(WRITE, req, iov_count);
-			ret = -EAGAIN;
-		}
+		if (!s->needs_lock)
+			io_async_list_note(WRITE, req, iov_count);
+		ret = -EAGAIN;
 	}
 out_free:
 	kfree(iovec);
