@@ -698,6 +698,7 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 	ret2 = call_read_iter(file, kiocb, &iter);
 	if (!force_nonblock || ret2 != -EAGAIN) {
 		io_rw_done(kiocb, ret2);
+		ret = 0;
 	} else {
 		/*
 		 * If ->needs_lock is true, we're already in async
@@ -768,6 +769,7 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	ret2 = call_write_iter(file, kiocb, &iter);
 	if (!force_nonblock || ret2 != -EAGAIN) {
 		io_rw_done(kiocb, ret2);
+		ret = 0;
 	} else {
 		/*
 		 * If ->needs_lock is true, we're already in async
