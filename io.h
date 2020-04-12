@@ -130,8 +130,11 @@ struct io_ring_ctx {
 
 	struct async_list	pending_async[2];
 
+	/* fields above 'miscdev' are cleared on each open */
+
 	struct miscdevice miscdev;
 	uint32_t context_id;
+	bool opened;
 };
 
 struct sqe_submit {

@@ -238,6 +238,8 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx)
 {
 	int i;
 
+	memset(ctx, 0, offsetof(struct io_ring_ctx, miscdev));
+
 	ctx->queue = vmalloc((sizeof(*ctx->queue) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
 	if (!ctx->queue) {
 		printk(KERN_ERR "failed to allocate request queue");
@@ -675,6 +677,7 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 	struct file *file;
 	size_t iov_count;
 	int ret;
+	ssize_t ret2;
 
 	ret = io_prep_rw(req, s, force_nonblock);
 	if (ret)
@@ -691,23 +694,19 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 		return ret;
 
 	iov_count = iov_iter_count(&iter);
-	ret = security_file_permission(file, MAY_READ);
-	if (!ret) {
-		ssize_t ret2;
-
-		/* Catch -EAGAIN return for forced non-blocking submission */
-		ret2 = call_read_iter(file, kiocb, &iter);
-		if (!force_nonblock || ret2 != -EAGAIN) {
-			io_rw_done(kiocb, ret2);
-		} else {
-			/*
-			 * If ->needs_lock is true, we're already in async
-			 * context.
-			 */
-			if (!s->needs_lock)
-				io_async_list_note(READ, req, iov_count);
-			ret = -EAGAIN;
-		}
+	/* Catch -EAGAIN return for forced non-blocking submission */
+	ret2 = call_read_iter(file, kiocb, &iter);
+	if (!force_nonblock || ret2 != -EAGAIN) {
+		io_rw_done(kiocb, ret2);
+		ret = 0;
+	} else {
+		/*
+		 * If ->needs_lock is true, we're already in async
+		 * context.
+		 */
+		if (!s->needs_lock)
+			io_async_list_note(READ, req, iov_count);
+		ret = -EAGAIN;
 	}
 	kfree(iovec);
 	return ret;
@@ -722,6 +721,7 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	struct file *file;
 	size_t iov_count;
 	int ret;
+	ssize_t ret2;
 
 	ret = io_prep_rw(req, s, force_nonblock);
 	if (ret) {
@@ -751,37 +751,33 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 		goto out_free;
 	}
 
-	ret = security_file_permission(file, MAY_WRITE);
-	if (!ret) {
-		ssize_t ret2;
+	/*
+	 * Open-code file_start_write here to grab freeze protection,
+	 * which will be released by another thread in
+	 * io_complete_rw().  Fool lockdep by telling it the lock got
+	 * released so that it doesn't complain about the held lock when
+	 * we return to userspace.
+	 */
+	if (S_ISREG(file_inode(file)->i_mode)) {
+		__sb_start_write(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE, true);
+		__sb_writers_release(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE);
+	}
+	kiocb->ki_flags |= IOCB_WRITE;
 
+	ret2 = call_write_iter(file, kiocb, &iter);
+	if (!force_nonblock || ret2 != -EAGAIN) {
+		io_rw_done(kiocb, ret2);
+		ret = 0;
+	} else {
 		/*
-		 * Open-code file_start_write here to grab freeze protection,
-		 * which will be released by another thread in
-		 * io_complete_rw().  Fool lockdep by telling it the lock got
-		 * released so that it doesn't complain about the held lock when
-		 * we return to userspace.
+		 * If ->needs_lock is true, we're already in async
+		 * context.
 		 */
-		if (S_ISREG(file_inode(file)->i_mode)) {
-			__sb_start_write(file_inode(file)->i_sb,
-						SB_FREEZE_WRITE, true);
-			__sb_writers_release(file_inode(file)->i_sb,
-						SB_FREEZE_WRITE);
-		}
-		kiocb->ki_flags |= IOCB_WRITE;
-
-		ret2 = call_write_iter(file, kiocb, &iter);
-		if (!force_nonblock || ret2 != -EAGAIN) {
-			io_rw_done(kiocb, ret2);
-		} else {
-			/*
-			 * If ->needs_lock is true, we're already in async
-			 * context.
-			 */
-			if (!s->needs_lock)
-				io_async_list_note(WRITE, req, iov_count);
-			ret = -EAGAIN;
-		}
+		if (!s->needs_lock)
+			io_async_list_note(WRITE, req, iov_count);
+		ret = -EAGAIN;
 	}
 out_free:
 	kfree(iovec);
@@ -2200,6 +2196,8 @@ static int io_run_queue(struct io_ring_ctx *ctx)
 	return 0;
 }
 
+static DEFINE_SPINLOCK(open_lock);
+
 static int io_uring_open(struct inode *inode, struct file *file)
 {
 	struct io_ring_ctx *ctx;
@@ -2207,18 +2205,19 @@ static int io_uring_open(struct inode *inode, struct file *file)
 	struct io_uring_params p = {};
 	struct miscdevice *dev = file->private_data;
 
-	/* don't allow multiple opens */
-	if (dev->fops->open != &io_uring_open) {
-		pr_info("%s: second open attempt", __func__);
-		return -EPERM;
-	}
-
 	ctx = container_of(dev, struct io_ring_ctx, miscdev);
 
-	ret = io_ring_ctx_init(ctx);
-	if (ret != 0) {
-		return ret;
+	spin_lock(&open_lock);
+	if (ctx->opened) {
+		spin_unlock(&open_lock);
+		return -EBUSY;
 	}
+	ctx->opened = true;
+	spin_unlock(&open_lock);
+
+	ret = io_ring_ctx_init(ctx);
+	if (ret != 0)
+		return ret;
 
 	ret = io_sq_offload_start(ctx, &p);
 	if (ret != 0) {
@@ -2237,6 +2236,10 @@ static int io_uring_release(struct inode *inode, struct file *file)
 
 	file->private_data = NULL;
 	io_ring_ctx_wait_and_kill(ctx);
+	spin_lock(&open_lock);
+	ctx->opened = false;
+	spin_unlock(&open_lock);
+
 	return 0;
 }
 
