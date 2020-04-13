@@ -238,7 +238,7 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx)
 {
 	int i;
 
-	memset(ctx, 0, offsetof(struct io_ring_ctx, miscdev));
+	memset(ctx, 0, sizeof(*ctx));
 
 	ctx->queue = vmalloc((sizeof(*ctx->queue) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
 	if (!ctx->queue) {
@@ -2037,6 +2037,8 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	io_mem_free(ctx->queue);
 
 	percpu_ref_exit(&ctx->refs);
+
+	kfree(ctx);
 }
 
 static void io_ring_ctx_wait_and_kill(struct io_ring_ctx *ctx)
@@ -2196,24 +2198,15 @@ static int io_run_queue(struct io_ring_ctx *ctx)
 	return 0;
 }
 
-static DEFINE_SPINLOCK(open_lock);
-
 static int io_uring_open(struct inode *inode, struct file *file)
 {
 	struct io_ring_ctx *ctx;
 	int ret;
 	struct io_uring_params p = {};
-	struct miscdevice *dev = file->private_data;
 
-	ctx = container_of(dev, struct io_ring_ctx, miscdev);
-
-	spin_lock(&open_lock);
-	if (ctx->opened) {
-		spin_unlock(&open_lock);
-		return -EBUSY;
-	}
-	ctx->opened = true;
-	spin_unlock(&open_lock);
+	ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+	if (ctx == NULL)
+		return -ENOMEM;
 
 	ret = io_ring_ctx_init(ctx);
 	if (ret != 0)
@@ -2236,9 +2229,6 @@ static int io_uring_release(struct inode *inode, struct file *file)
 
 	file->private_data = NULL;
 	io_ring_ctx_wait_and_kill(ctx);
-	spin_lock(&open_lock);
-	ctx->opened = false;
-	spin_unlock(&open_lock);
 
 	return 0;
 }
@@ -2349,15 +2339,15 @@ struct file_operations io_ring_fops = {
 	.mmap = io_uring_mmap,
 };
 
-int io_ring_register_device(char *name, struct io_ring_ctx *ctx, int context_id)
+int io_ring_register_device(struct io_dev *ctx, int context_id)
 {
 	struct miscdevice *dev = &ctx->miscdev;
 
 	ctx->context_id = context_id;
 
-	sprintf(name, "pxd/pxd-io-%d", context_id);
+	sprintf(ctx->name, "pxd/pxd-io-%d", context_id);
 	dev->minor = MISC_DYNAMIC_MINOR;
-	dev->name = name;
+	dev->name = ctx->name;
 	dev->fops = &io_ring_fops;
 	return misc_register(dev);
 }
