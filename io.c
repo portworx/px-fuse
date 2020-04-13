@@ -1668,25 +1668,36 @@ static void io_finish_async(struct io_ring_ctx *ctx)
 static int io_sqe_register_file(struct io_ring_ctx *ctx, int fd)
 {
 	int i;
+	int err;
+
+	mutex_lock(&ctx->uring_lock);
+
 	for (i = 0; i < ctx->nr_user_files; ++i) {
 		if (!ctx->user_files[i])
 			break;
 	}
 
+	err = -ENFILE;
 	if (i == ctx->nr_user_files)
-		return -ENFILE;
+		goto out;
 
+	err = -EBADF;
 	ctx->user_files[i] = fget(fd);
 	if (!ctx->user_files[i])
-		return -EBADF;
+		goto out;
 
 	if (ctx->user_files[i]->f_op == &fuse_dev_operations) {
 		fput(ctx->user_files[i]);
 		ctx->user_files[i] = NULL;
-		return -EBADF;
+		goto out;
 	}
 
+	mutex_unlock(&ctx->uring_lock);
 	return i;
+
+out:
+	mutex_unlock(&ctx->uring_lock);
+	return err;
 }
 
 static int io_sqe_unregister_file(struct io_ring_ctx *ctx, int index)
@@ -1694,11 +1705,17 @@ static int io_sqe_unregister_file(struct io_ring_ctx *ctx, int index)
 	if (index >= ctx->nr_user_files)
 		return -EINVAL;
 
-	if (!ctx->user_files[index])
+	mutex_lock(&ctx->uring_lock);
+
+	if (!ctx->user_files[index]) {
+		mutex_unlock(&ctx->uring_lock);
 		return -ENOENT;
+	}
 
 	fput(ctx->user_files[index]);
 	ctx->user_files[index] = NULL;
+
+	mutex_unlock(&ctx->uring_lock);
 
 	return 0;
 }
