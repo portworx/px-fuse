@@ -130,11 +130,7 @@ struct io_ring_ctx {
 
 	struct async_list	pending_async[2];
 
-	/* fields above 'miscdev' are cleared on each open */
-
-	struct miscdevice miscdev;
 	uint32_t context_id;
-	bool opened;
 };
 
 struct sqe_submit {
@@ -193,7 +189,8 @@ struct io_kiocb {
 extern struct kmem_cache *req_cachep;
 
 struct io_uring_params;
+struct io_dev;
 
-int io_ring_register_device(char *name, struct io_ring_ctx *ctx, int context_id);
+int io_ring_register_device(struct io_dev *ctx, int context_id);
 
 #endif //PXFUSE_IO_H

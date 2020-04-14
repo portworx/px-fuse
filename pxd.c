@@ -1668,7 +1668,7 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	misc_deregister(&ctx->io_ctx.miscdev);
+	misc_deregister(&ctx->io_dev.miscdev);
 #endif
 	cancel_delayed_work_sync(&ctx->abort_work);
 	if (ctx->id < pxd_num_contexts_exported) {
@@ -1720,10 +1720,10 @@ int pxd_init(void)
 		}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-		err = io_ring_register_device(ctx->io_name, &ctx->io_ctx, i);
+		err = io_ring_register_device(&ctx->io_dev, i);
 		if (err) {
 			printk(KERN_ERR "pxd: failed to register io dev %s %d: %d\n",
-				ctx->io_ctx.miscdev.name, i, err);
+				ctx->io_dev.name, i, err);
 			goto out_fuse;
 		}
 #endif
