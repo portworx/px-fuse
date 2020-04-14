@@ -779,7 +779,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	struct pxd_io_tracker* iot;
 	struct address_space *mapping = fileh->f_mapping;
 	struct inode *inode = mapping->host;
-	struct block_device *bdi = I_BDEV(inode);
+	struct block_device *bdev = I_BDEV(inode);
 
 	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px with blkg %px\n",
 			pxd_dev, bio, fileh, bio->bi_blkg);
@@ -810,7 +810,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 
 	clone_bio->bi_private = pxd_dev;
 	if (S_ISBLK(inode->i_mode)) {
-		BIO_SET_DEV(clone_bio, bdi);
+		BIO_SET_DEV(clone_bio, bdev);
 		clone_bio->bi_end_io = pxd_complete_io;
 	} else {
 		clone_bio->bi_end_io = pxd_complete_io_dummy;
@@ -1549,7 +1549,7 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 	printk(KERN_INFO"pxd device %llu: adjusting queue limits nfd %d\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 
-	for (i=0; i<pxd_dev->fp.nfd; i++) {
+	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		file = pxd_dev->fp.file[i];
 		BUG_ON(!file);
 		inode = file_inode(file);
