@@ -1662,9 +1662,6 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	misc_deregister(&ctx->io_dev.miscdev);
-#endif
 	cancel_delayed_work_sync(&ctx->abort_work);
 	if (ctx->id < pxd_num_contexts_exported) {
 		fuse_abort_conn(&ctx->fc);
@@ -1681,6 +1678,12 @@ int pxd_init(void)
 	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
 	if (req_cachep == NULL) {
 		printk(KERN_ERR "pxd: failed to initialize request cache");
+		goto out;
+	}
+
+	err = io_ring_register_device();
+	if (err) {
+		printk(KERN_ERR "pxd: failed to register io dev: %d\n", err);
 		goto out;
 	}
 #endif
@@ -1713,15 +1716,6 @@ int pxd_init(void)
 				ctx->miscdev.name, i, err);
 			goto out_fuse;
 		}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-		err = io_ring_register_device(&ctx->io_dev, i);
-		if (err) {
-			printk(KERN_ERR "pxd: failed to register io dev %s %d: %d\n",
-				ctx->io_dev.name, i, err);
-			goto out_fuse;
-		}
-#endif
 	}
 
 	pxd_miscdev.fops = &pxd_contexts[0].fops;
@@ -1777,6 +1771,10 @@ out:
 void pxd_exit(void)
 {
 	int i;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	io_ring_unregister_device();
+#endif
 
 	fastpath_cleanup();
 	pxd_sysfs_exit();

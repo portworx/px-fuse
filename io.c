@@ -2356,16 +2356,19 @@ struct file_operations io_ring_fops = {
 	.mmap = io_uring_mmap,
 };
 
-int io_ring_register_device(struct io_dev *ctx, int context_id)
+static struct miscdevice miscdev;
+
+int io_ring_register_device()
 {
-	struct miscdevice *dev = &ctx->miscdev;
-
-	ctx->context_id = context_id;
-
-	sprintf(ctx->name, "pxd/pxd-io-%d", context_id);
-	dev->minor = MISC_DYNAMIC_MINOR;
-	dev->name = ctx->name;
-	dev->fops = &io_ring_fops;
-	return misc_register(dev);
+	miscdev.minor = MISC_DYNAMIC_MINOR;
+	miscdev.name = "pxd/pxd-io";
+	miscdev.fops = &io_ring_fops;
+	return misc_register(&miscdev);
 }
+
+void io_ring_unregister_device()
+{
+	misc_deregister(&miscdev);
+}
+
 #endif
