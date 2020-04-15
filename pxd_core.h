@@ -24,13 +24,6 @@ struct pxd_context {
 	char name[256];
 	int id;
 	struct miscdevice miscdev;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	struct io_dev {
-		char name[256];
-		struct miscdevice miscdev;
-		uint32_t context_id;
-	} io_dev;
-#endif
 	struct delayed_work abort_work;
 	uint64_t open_seq;
 };

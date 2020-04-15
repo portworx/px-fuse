@@ -189,8 +189,8 @@ struct io_kiocb {
 extern struct kmem_cache *req_cachep;
 
 struct io_uring_params;
-struct io_dev;
 
-int io_ring_register_device(struct io_dev *ctx, int context_id);
+int io_ring_register_device(void);
+void io_ring_unregister_device(void);
 
 #endif //PXFUSE_IO_H
