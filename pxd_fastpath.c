@@ -1554,11 +1554,16 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 		BUG_ON(!file);
 		inode = file_inode(file);
 		if (S_ISBLK(inode->i_mode)) {
-			bdev = lookup_bdev(pxd_dev->fp.device_path[i]);
+			bdev = COMPAT_CALL_LOOKUP_BDEV(pxd_dev->fp.device_path[i]);
 		} else {
 			bdev = inode->i_sb->s_bdev;
 		}
-		if (!bdev) continue;
+
+		if (!bdev || IS_ERR(bdev)) {
+			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
+				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
+			continue;
+		}
 
 		disk = bdev->bd_disk;
 		if (disk) {

@@ -100,4 +100,17 @@
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
 
 
+#define __COMPAT_CALL_LOOKUP_BDEV_0(fn, path) ({ struct block_device* (*f)(const char*) = fn; struct block_device *p = NULL; if (f) { p = f(path);}  p; })
+#define __COMPAT_CALL_LOOKUP_BDEV_1(fn, path) ({ struct block_device* (*f)(const char*, int) = fn; struct block_device *p = NULL; if (f) { p = f(path, 0);}  p; })
+
+#define __lookup_bdev_singlearg(fn) __builtin_types_compatible_p(typeof(fn), struct block_device* (*)(const char*))
+#define __lookup_bdev_twoarg(fn) __builtin_types_compatible_p(typeof(fn), struct block_device* (*)(const char*, int))
+#define __singlearg_method_or_null(fn) __builtin_choose_expr(__lookup_bdev_singlearg(fn), fn, NULL)
+#define __doublearg_method_or_null(fn) __builtin_choose_expr(__lookup_bdev_twoarg(fn), fn, NULL)
+#define COMPAT_CALL_LOOKUP_BDEV(path) \
+	__builtin_choose_expr(__lookup_bdev_singlearg(lookup_bdev), \
+			__COMPAT_CALL_LOOKUP_BDEV_0(__singlearg_method_or_null(lookup_bdev), path), \
+			__COMPAT_CALL_LOOKUP_BDEV_1(__doublearg_method_or_null(lookup_bdev), path))
+
+
 #endif //GDFS_PXD_COMPAT_H
