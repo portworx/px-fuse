@@ -44,8 +44,8 @@ struct fuse_conn;
  * A request to the client
  */
 struct fuse_req {
-	/** Request to use fastpath */
-	unsigned fastpath:1;
+	/** Block IO requests are processed through blk request queue */
+	unsigned using_blkque:1;
 
 	/** The request input header */
 	struct fuse_in_header in;
