@@ -611,7 +611,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #ifndef __PX_FASTPATH__
 	if (!pxd_dev->using_blkque) {
 		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it.");
-		pxd_dev->fastpath = true;
+		pxd_dev->using_blkque = true;
 	}
 #else
 	if (!pxd_dev->using_blkque) {
