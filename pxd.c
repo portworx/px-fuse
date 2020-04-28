@@ -309,7 +309,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 
 static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_READ;
 	if (!req->using_blkque) {
@@ -322,7 +322,7 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 
 static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_WRITE;
 	if (!req->using_blkque) {
@@ -338,7 +338,7 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 
 static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_DISCARD;
 	if (!req->using_blkque) {
@@ -351,7 +351,7 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 }
 
 static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool qfn)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_WRITE_SAME;
 	if (!req->using_blkque) {
@@ -365,25 +365,25 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t op, uint32_t flags, bool qfn)
+			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
-		pxd_write_same_request(req, size, off, minor, flags, qfn);
+		pxd_write_same_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_WRITE:
-		pxd_write_request(req, size, off, minor, flags, qfn);
+		pxd_write_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_READ:
-		pxd_read_request(req, size, off, minor, flags, qfn);
+		pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags, qfn);
+		pxd_discard_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_FLUSH:
-		pxd_write_request(req, 0, 0, minor, REQ_FUA, qfn);
+		pxd_write_request(req, 0, 0, minor, REQ_FUA);
 		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
@@ -397,7 +397,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #else
 
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-	uint32_t minor, uint32_t flags, bool qfn)
+	uint32_t minor, uint32_t flags)
 {
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
@@ -406,17 +406,17 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		/* FALLTHROUGH */
 	case (REQ_WRITE | REQ_WRITE_SAME):
 		if (flags & REQ_WRITE_SAME)
-			pxd_write_same_request(req, size, off, minor, flags, qfn);
+			pxd_write_same_request(req, size, off, minor, flags);
 		else
-			pxd_write_request(req, size, off, minor, flags, qfn);
+			pxd_write_request(req, size, off, minor, flags);
 		break;
 	case 0:
-		pxd_read_request(req, size, off, minor, flags, qfn);
+		pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
 	case REQ_WRITE | REQ_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags, qfn);
+		pxd_discard_request(req, size, off, minor, flags);
 		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
@@ -474,10 +474,10 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	req->using_blkque = false;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf, false)) {
+		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
 #else
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw, false)) {
+		    pxd_dev->minor, bio->bi_rw)) {
 #endif
 		fuse_request_free(req);
 		bio_io_error(bio);
@@ -528,10 +528,10 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->using_blkque = true;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true)) {
+			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 #else
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, rq->cmd_flags, true)) {
+			    pxd_dev->minor, rq->cmd_flags)) {
 #endif
 			fuse_request_free(req);
 			spin_lock_irq(&pxd_dev->qlock);
@@ -570,7 +570,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	req->using_blkque = true;
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-		pxd_dev->minor, req_op(rq), rq->cmd_flags, true)) {
+		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 		return BLK_STS_IOERR;
 	}
 
@@ -967,10 +967,17 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
+	int err = 0;
 	/// This seems risky to update paths on the fly while the px device is active
 	/// Need to confirm behavior while IOs are active and handle it right!!!!
-	pxd_init_fastpath_target(pxd_dev, update_path);
-	return 0;
+	if (pxd_dev->using_blkque) {
+		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
+		return -EINVAL;
+	}
+	disableFastPath(pxd_dev);
+	err = pxd_init_fastpath_target(pxd_dev, update_path);
+	enableFastPath(pxd_dev, true);
+	return err;
 
 }
 
@@ -992,13 +999,11 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 	spin_unlock(&ctx->lock);
 
 	if (!found) {
-		err = -ENOENT;
-		goto out;
+		return -ENOENT;
 	}
 
-	err=__pxd_update_path(pxd_dev, update_path);
-out:
-	if (found) spin_unlock(&pxd_dev->lock);
+	err = __pxd_update_path(pxd_dev, update_path);
+	spin_unlock(&pxd_dev->lock);
 	return err;
 }
 
@@ -1008,7 +1013,6 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	bool found = false;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev;
-	int err;
 
 	printk(KERN_WARNING"device %llu, set fastpath enable %d, cleanup %d\n",
 			fp->dev_id, fp->enable, fp->cleanup);
@@ -1023,23 +1027,17 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	spin_unlock(&ctx->lock);
 
 	if (!found) {
-		err = -ENOENT;
-		goto out;
+		return -ENOENT;
 	}
 
-	/* setup whether access is block or file access */
 	if (fp->enable) {
-		enableFastPath(pxd_dev, false);
+		enableFastPath(pxd_dev, fp->cleanup);
 	} else {
-		if (fp->cleanup) disableFastPath(pxd_dev);
+		disableFastPath(pxd_dev);
 	}
 
 	spin_unlock(&pxd_dev->lock);
-
 	return 0;
-out:
-	if (found) spin_unlock(&pxd_dev->lock);
-	return err;
 }
 
 static struct bus_type pxd_bus_type = {

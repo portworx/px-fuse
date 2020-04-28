@@ -66,6 +66,7 @@ struct pxd_fastpath_extension {
 	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
 
 	// Below information has to be set through new PXD_UPDATE_PATH ioctl
+	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
