@@ -719,14 +719,12 @@ static void pxd_complete_io(struct bio* bio, int error)
 		return;
 	}
 
-	pxd_io_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
+	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%lx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
+			bio->bi_vcnt, bio->bi_flags);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
@@ -781,8 +779,8 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	struct inode *inode = mapping->host;
 	struct block_device *bdev = I_BDEV(inode);
 
-	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px with blkg %px\n",
-			pxd_dev, bio, fileh, bio->bi_blkg);
+	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px\n",
+			pxd_dev, bio, fileh);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 	clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
@@ -1496,16 +1494,12 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return pxd_make_request_slowpath(q, bio);
 	}
 
-	pxd_printk("pxd_make_fastpath_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
+	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%lx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
+			bio->bi_vcnt, bio->bi_flags);
 
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
 	if (!head) {
@@ -1538,12 +1532,12 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 		file = pxd_dev->fp.file[i];
 		BUG_ON(!file);
 		inode = file_inode(file);
-		if (S_ISBLK(inode->i_mode)) {
-			bdev = COMPAT_CALL_LOOKUP_BDEV(pxd_dev->fp.device_path[i]);
-		} else {
-			bdev = inode->i_sb->s_bdev;
+		if (!S_ISBLK(inode->i_mode)) {
+			// not needed for non-block based backing devices
+			continue;
 		}
 
+		bdev = COMPAT_CALL_LOOKUP_BDEV(pxd_dev->fp.device_path[i]);
 		if (!bdev || IS_ERR(bdev)) {
 			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
 				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
