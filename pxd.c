@@ -691,7 +691,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	/* adjust queue limits to be compatible with backing device */
 	if (!pxd_dev->using_blkque) {
-		enableFastPath(pxd_dev, true);
 		pxd_fastpath_adjust_limits(pxd_dev, q);
 	}
 
@@ -975,10 +974,7 @@ static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
 	}
-	disableFastPath(pxd_dev);
-	err = pxd_init_fastpath_target(pxd_dev, update_path);
-	enableFastPath(pxd_dev, true);
-	return err;
+	return pxd_init_fastpath_target(pxd_dev, update_path);
 
 }
 

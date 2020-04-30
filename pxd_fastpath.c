@@ -1396,7 +1396,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 			pxd_dev->dev_id, mode, modestr, update_path->count);
 
 	// fastpath cannot be active while updating paths
-	BUG_ON(pxd_dev->fp.fastpath);
+	disableFastPath(pxd_dev);
 	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 			update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
@@ -1408,12 +1408,14 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 			pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
 	}
 	pxd_dev->fp.nfd = update_path->count;
+	enableFastPath(pxd_dev, true);
 
-	if (!update_path->count && pxd_dev->strict) goto out_file_failed;
+	if (!pxd_dev->fp.nfd && pxd_dev->strict) goto out_file_failed;
 
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
 out_file_failed:
+	disableFastPath(pxd_dev);
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 	}
