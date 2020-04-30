@@ -967,7 +967,6 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-	int err = 0;
 	/// This seems risky to update paths on the fly while the px device is active
 	/// Need to confirm behavior while IOs are active and handle it right!!!!
 	if (pxd_dev->using_blkque) {
