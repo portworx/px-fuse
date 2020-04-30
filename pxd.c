@@ -458,7 +458,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 
 	flags = bio->bi_flags;
 
-	pxd_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
@@ -557,7 +557,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
 
-	pxd_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 		   "flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
@@ -691,6 +691,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	/* adjust queue limits to be compatible with backing device */
 	if (!pxd_dev->using_blkque) {
+		enableFastPath(pxd_dev, true);
 		pxd_fastpath_adjust_limits(pxd_dev, q);
 	}
 
