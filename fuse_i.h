@@ -116,6 +116,7 @@ struct ____cacheline_aligned fuse_queue_reader {
 
 #include <pthread.h>
 #include <atomic>
+#include "spin_lock.h"
 
 /** writer control block */
 struct alignas(64) fuse_queue_writer {
@@ -132,7 +133,8 @@ struct alignas(64) fuse_queue_writer {
 struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
-	uint64_t pad_2[7];
+	px::spinlock lock;
+	uint64_t pad_2[6];
 };
 
 #endif
