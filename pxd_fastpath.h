@@ -94,6 +94,7 @@ struct pxd_fastpath_extension {
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests
+	atomic_t nerror; // [global] total IO error
 	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu

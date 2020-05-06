@@ -748,11 +748,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
-		bio_io_error(iot->orig);
-	} else {
-		bio_endio(iot->orig);
-	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
+	bio_endio(iot->orig, status);
 }
 #else
 {
@@ -760,6 +757,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
 	bio_endio(iot->orig, status);
 }
 #endif
@@ -1370,6 +1368,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nwrite_counter,0);
 	atomic_set(&pxd_dev->fp.ncount, 0);
 	atomic_set(&pxd_dev->fp.ncomplete, 0);
+	atomic_set(&pxd_dev->fp.nerror, 0);
 
 	for (i = 0; i < MAX_NUMNODES; i++) {
 		atomic_set(&fp->index[i], 0);
