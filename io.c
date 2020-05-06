@@ -2196,12 +2196,14 @@ static void io_ring_submit(struct io_ring_ctx *ctx)
 		}
 		io_commit_sqring(ctx);
 
+		if (statep) {
+			io_submit_state_end(statep);
+			statep = NULL;
+		}
+
 		read = ctx->queue->requests_cb.r.read;
 		write = smp_load_acquire(&ctx->queue->requests_cb.r.write);
 	}
-
-	if (statep)
-		io_submit_state_end(statep);
 }
 
 static int io_run_queue(struct io_ring_ctx *ctx)
