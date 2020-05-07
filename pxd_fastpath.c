@@ -740,6 +740,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		iot->orig->bi_status = -EIO; // mark failure
 	}
+	if (iot->orig->bi_status) atomic_inc(&pxd_dev->fp.nerror);
 	bio_endio(iot->orig);
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
