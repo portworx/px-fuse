@@ -46,7 +46,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
-	bool fastpath;
+	bool using_blkque; // this is persistent, how the block device registered with kernel
 	bool strict;
 #ifdef __PX_BLKMQ__
         struct blk_mq_tag_set tag_set;
