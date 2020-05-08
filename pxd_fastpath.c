@@ -1209,9 +1209,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	int rw = bio_data_dir(bio);
-
 	struct pxd_io_tracker *head;
-	//struct thread_context *tc;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	if (!pxd_dev) {
@@ -1269,12 +1267,13 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		suspend = READ_ONCE(statep->suspend);
 		if (suspend) {
 			list_add_tail(&head->item, &pxd_dev->fp.suspend_queue);
+			spin_unlock(&pxd_dev->fp.suspend_lock);
+			put_cpu();
+			printk_ratelimited("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
+				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
+			return BLK_QC_RETVAL;
 		}
 		spin_unlock(&pxd_dev->fp.suspend_lock);
-		put_cpu();
-		printk_ratelimited("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
-				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
-		return BLK_QC_RETVAL;
 	}
 	put_cpu();
 
