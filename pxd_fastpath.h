@@ -41,6 +41,8 @@ struct pxd_io_tracker {
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
 
+	struct work_struct wi; // work item
+
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
 };
@@ -71,15 +73,17 @@ struct pxd_fastpath_extension {
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
-	struct thread_context *tc;
+	struct thread_context *tc; // NOT NEEDED
 	unsigned int qdepth;
 	bool congested;
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
+	struct workqueue_struct *wq;
 	// if set, then newer IOs shall block, until reactivated.
 	int suspend;
 	wait_queue_head_t  suspend_wait;
+	struct list_head  suspend_queue;
 
 	wait_queue_head_t   sync_event;
 	atomic_t nsync_active; // [global] currently active?
