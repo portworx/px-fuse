@@ -876,7 +876,7 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 
 static void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
-	int cpu, new, old;
+	int cpu, new = 0, old = 0;
 	int need_flush = 0;
 
 	for_each_online_cpu(cpu) {
@@ -917,7 +917,7 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 {
 	LIST_HEAD(tmpQ);
 	bool wakeup;
-	int cpu, new, old;
+	int cpu, new = 0, old = 0;
 
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
