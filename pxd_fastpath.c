@@ -532,8 +532,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 	}
 	if (status) {
 		atomic_inc(&pxd_dev->fp.nerror);
-		iot->orig->bi_status = status;
 	}
+	iot->orig->bi_status = status;
 	bio_endio(iot->orig);
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -544,8 +544,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 	}
 	if (status) {
 		atomic_inc(&pxd_dev->fp.nerror);
-		iot->orig->bi_error = status;
 	}
+	iot->orig->bi_error = status;
 	bio_endio(iot->orig);
 }
 #else
