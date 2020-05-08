@@ -120,16 +120,7 @@ static struct bio_set pxd_bio_set;
 #define PXD_MIN_POOL_PAGES (128)
 static struct bio_set* ppxd_bio_set;
 
-// global thread contexts
-static struct thread_context *g_tc;
-
-// forward decl
-static int pxd_io_writer(void *data);
-static int pxd_io_reader(void *data);
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head);
-static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw);
-#define pxd_get_writeio(tc)  pxd_get_io(tc, WRITE)
-#define pxd_get_readio(tc)   pxd_get_io(tc, READ)
 
 // congestion callback from kernel writeback module
 int pxd_device_congested(void *data, int bits)
@@ -170,215 +161,14 @@ int pxd_device_congested(void *data, int bits)
 	return 0;
 }
 
-static inline
-int pxd_io_empty(struct thread_context *tc, int rw)
-{
-	int empty;
-
-	if (rw == WRITE) {
-		spin_lock(&tc->write_lock);
-		empty = list_empty(&tc->iot_writers);
-		spin_unlock(&tc->write_lock);
-	} else {
-		spin_lock(&tc->read_lock);
-		empty = list_empty(&tc->iot_readers);
-		spin_unlock(&tc->read_lock);
-	}
-
-	return empty;
-}
-
-static inline
-void pxd_wait_io(struct thread_context *tc, int rw)
-{
-	if (rw == READ) {
-		wait_event_interruptible(tc->read_event,
-                            !pxd_io_empty(tc, rw) || kthread_should_stop());
-	} else {
-		wait_event_interruptible(tc->write_event,
-                            !pxd_io_empty(tc, rw) || kthread_should_stop());
-	}
-}
-
-// helper routine to setup a single thread for fastpath
-static
-struct task_struct* fastpath_thread_init(void *ctx, int dir, int cpuid, int inst)
-{
-#define READERFMT "pxrd%d:%d/%d"
-#define WRITERFMT "pxwr%d:%d/%d"
-	struct task_struct *tsk;
-	int node = cpu_to_node(cpuid);
-	int (*tfn)(void*);
-	const char *namefmt;
-
-	if (dir == WRITE) {
-		tfn = pxd_io_writer;
-		namefmt = WRITERFMT;
-	} else {
-		tfn = pxd_io_reader;
-		namefmt = READERFMT;
-	}
-
-	tsk = kthread_create_on_node(tfn, ctx, node, namefmt, node, cpuid, inst);
-	if (IS_ERR(tsk)) {
-		return tsk;
-	}
-
-	set_cpus_allowed_ptr(tsk, cpumask_of_node(node));
-	set_user_nice(tsk, MIN_NICE);
-	wake_up_process(tsk);
-	return tsk;
-}
-
-// logic to spread the IO equally to all CPUs to avoid head of line blocking.
-STATIC
-struct thread_context* get_thread_context(int dir)
-{
-	static int spread[NR_CPUS] = {-1};
-
-	int cpu = smp_processor_id();
-	int node = cpu_to_node(cpu); // numa_node_id();
-	const struct cpumask *cpumask = cpumask_of_node(node);
-	int curr = spread[cpu];
-
-	struct thread_context *tc;
-	int next;
-
-	if (unlikely(curr == -1)) {
-		next = cpu;
-	} else {
-		next = cpumask_next(curr, cpumask);
-		if (next >= nr_cpu_ids) next = cpumask_first(cpumask);
-	}
-
-	// failsafe to handle cpu hot plugs
-	if (next >= __px_ncpus) next = 0;
-
-	// its okay to use it unprotected, spreading IO can be slightly undistributed.
-	spread[cpu] = next;
-	tc = &g_tc[next];
-	BUG_ON(!tc);
-	return tc;
-}
-
-// exported method to get IO processed each thread context
-int get_thread_count(int id)
-{
-	if (id < __px_ncpus) {
-		struct thread_context *tc = &g_tc[id];
-		return atomic_read(&tc->ncount);
-	}
-
-	return -1;
-}
-
-static
-int fastpath_global_threadctx_init(struct thread_context *tc, int cpuid)
-{
-	int i;
-	int err;
-
-	atomic_set(&tc->ncount, 0);
-	spin_lock_init(&tc->read_lock);
-	init_waitqueue_head(&tc->read_event);
-	INIT_LIST_HEAD(&tc->iot_readers);
-
-	spin_lock_init(&tc->write_lock);
-	init_waitqueue_head(&tc->write_event);
-	INIT_LIST_HEAD(&tc->iot_writers);
-
-	// setup readers
-	for (i = 0; i < PXD_MAX_THREAD_PER_CPU; i++) {
-		// set dedicated thread function
-		tc->reader[i] = fastpath_thread_init(tc, READ, cpuid, i);
-		if (IS_ERR(tc->reader[i])) {
-			printk(KERN_ERR"Init global reader kthread for cpu %d failed %lu\n",
-				cpuid, PTR_ERR(tc->reader[i]));
-			err = -EINVAL;
-			goto fail_rd;
-		}
-	}
-
-	// setup writers
-	for (i = 0; i < PXD_MAX_THREAD_PER_CPU; i++) {
-		// set dedicated thread function
-		tc->writer[i] = fastpath_thread_init(tc, WRITE, cpuid, i);
-		if (IS_ERR(tc->writer[i])) {
-			printk(KERN_ERR"Init global writer kthread for cpu %d failed %lu\n",
-				cpuid, PTR_ERR(tc->writer[i]));
-			err = -EINVAL;
-			goto fail_wr;
-		}
-	}
-
-	return 0;
-
-fail_wr:
-	for(;i >= 0; i--) {
-		if (tc->writer[i]) kthread_stop(tc->writer[i]);
-	}
-	i = PXD_MAX_THREAD_PER_CPU - 1;
-fail_rd:
-	for(;i >= 0; i--) {
-		if (tc->reader[i]) kthread_stop(tc->reader[i]);
-	}
-	return err;
-}
-
-static void fastpath_global_threadctx_cleanup(void)
-{
-	int i,t;
-	struct pxd_io_tracker *head;
-	struct thread_context *tc;
-
-	if (!g_tc) return;
-
-	for (i = 0; i < __px_ncpus; i++) {
-		tc = &g_tc[i];
-		for (t=0;t<PXD_MAX_THREAD_PER_CPU; t++) {
-			if (tc->writer[t]) kthread_stop(tc->writer[t]);
-			if (tc->reader[t]) kthread_stop(tc->reader[t]);
-		}
-
-		// fail all enqueue'd IOs
-		while ((head = pxd_get_readio(tc)) != NULL) {
-			if (head->orig) BIO_ENDIO(head->orig, -ENXIO);
-			__pxd_cleanup_block_io(head);
-		}
-
-		while ((head = pxd_get_writeio(tc)) != NULL) {
-			if (head->orig) BIO_ENDIO(head->orig, -ENXIO);
-			__pxd_cleanup_block_io(head);
-		}
-	}
-}
-
 int fastpath_init(void)
 {
-	int i, err;
-
 	// cache the count of cpu information at module load time.
 	// if there is any subsequent hot plugging of cpus, will still handle gracefully.
 	__px_ncpus = num_online_cpus();
 
 	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", __px_ncpus, NR_CPUS, num_online_nodes(), MAX_NUMNODES);
-	g_tc = kzalloc(sizeof(struct thread_context) * __px_ncpus, GFP_KERNEL);
-	if (!g_tc) {
-		printk(KERN_ERR "pxd: failed to initialize global thread context: -ENOMEM\n");
-		return -ENOMEM;
-	}
-
 	// capturing all the cpu's on a given numa node during run-time
-	for (i = 0; i < __px_ncpus; i++) {
-		// initialize global thread context
-		err = fastpath_global_threadctx_init(&g_tc[i], i);
-		if (err) {
-			fastpath_global_threadctx_cleanup();
-			kfree(g_tc);
-			return err;
-		}
-	}
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES,
 			offsetof(struct pxd_io_tracker, clone), 0)) {
@@ -394,8 +184,6 @@ int fastpath_init(void)
 
 	if (!ppxd_bio_set) {
 		printk(KERN_ERR "pxd: bioset init failed");
-		fastpath_global_threadctx_cleanup();
-		kfree(g_tc);
 		return -ENOMEM;
 	}
 
@@ -404,8 +192,6 @@ int fastpath_init(void)
 
 void fastpath_cleanup(void)
 {
-	fastpath_global_threadctx_cleanup();
-
 	if (ppxd_bio_set) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 		bioset_exit(ppxd_bio_set);
@@ -414,9 +200,7 @@ void fastpath_cleanup(void)
 #endif
 	}
 
-	if (g_tc) kfree(g_tc);
 	ppxd_bio_set = NULL;
-	g_tc = NULL;
 }
 
 static int _pxd_flush(struct pxd_device *pxd_dev, struct file *file)
@@ -1092,146 +876,6 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 	} else {
 		queue_work(pxd_dev->fp.wq, &head->wi);
 	}
-}
-
-static
-int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker *head, int dir)
-{
-	struct pxd_device *pxd_dev = head->pxd_dev;
-	struct bio *bio = head->orig;
-
-	//
-	// Based on the nfd mapped on pxd_dev, that many cloned bios shall be
-	// setup, then each replica takes its own processing path, which could be
-	// either file backup or block device backup.
-	//
-	struct pxd_io_tracker *curr;
-
-	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	// NOTE NOTE NOTE accessing out of lock
-	if (!pxd_dev->connected || pxd_dev->removing) {
-		printk(KERN_ERR"px is disconnected, failing IO.\n");
-		__pxd_cleanup_block_io(head);
-		BIO_ENDIO(bio, -ENXIO);
-		return -ENXIO;
-	}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
-	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
-	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#endif
-
-	// initialize active io to configured replicas
-	if (dir != READ) {
-		atomic_set(&head->active, pxd_dev->fp.nfd);
-		// submit all replicas linked from head, if not read
-		list_for_each_entry(curr, &head->replicas, item) {
-			if (S_ISBLK(curr->file->f_inode->i_mode)) {
-				SUBMIT_BIO(&curr->clone);
-				atomic_inc(&pxd_dev->fp.nswitch);
-			} else {
-				__do_bio_filebacked(pxd_dev, curr);
-			}
-		}
-	} else {
-		atomic_set(&head->active, 1);
-	}
-
-	// submit head bio the last
-	if (S_ISBLK(head->file->f_inode->i_mode)) {
-		SUBMIT_BIO(&head->clone);
-		atomic_inc(&pxd_dev->fp.nswitch);
-	} else {
-		__do_bio_filebacked(pxd_dev, head);
-	}
-
-	return 0; // all good
-}
-
-STATIC
-void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw)
-{
-	struct pxd_device *pxd_dev = head->pxd_dev;
-
-	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	if (rw != READ) {
-		spin_lock(&tc->write_lock);
-		list_add_tail(&head->item, &tc->iot_writers);
-		wake_up(&tc->write_event);
-		spin_unlock(&tc->write_lock);
-	} else {
-		spin_lock(&tc->read_lock);
-		list_add_tail(&head->item, &tc->iot_readers);
-		wake_up(&tc->read_event);
-		spin_unlock(&tc->read_lock);
-	}
-	atomic_inc(&pxd_dev->fp.ncount);
-	atomic_inc(&tc->ncount);
-}
-
-static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
-{
-	struct pxd_io_tracker* head = NULL;
-
-	if (rw != READ) {
-		spin_lock(&tc->write_lock);
-		if (!list_empty(&tc->iot_writers)) {
-			head = list_first_entry(&tc->iot_writers, struct pxd_io_tracker, item);
-			list_del(&head->item);
-		}
-		spin_unlock(&tc->write_lock);
-	} else {
-		spin_lock(&tc->read_lock);
-		if (!list_empty(&tc->iot_readers)) {
-			head = list_first_entry(&tc->iot_readers, struct pxd_io_tracker, item);
-			list_del(&head->item);
-		}
-		spin_unlock(&tc->read_lock);
-	}
-
-	return head;
-}
-
-static int pxd_io_thread(void *data, int rw)
-{
-	struct thread_context *tc = data;
-	struct pxd_io_tracker *head;
-	struct pxd_device *pxd_dev;
-
-	while (!kthread_should_stop()) {
-		pxd_wait_io(tc, rw);
-
-		head = pxd_get_io(tc, rw);
-		if (!head) {
-			continue;
-		}
-
-		pxd_dev = head->pxd_dev;
-		BUG_ON(head->magic != PXD_IOT_MAGIC);
-		BUG_ON(!pxd_dev);
-		BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-
-		if (unlikely(pxd_handle_io(tc, head, rw) != 0)) {
-			/* if early fail, then force wakeup */
-			BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-			atomic_inc(&pxd_dev->fp.ncomplete);
-			atomic_dec(&pxd_dev->fp.ncount);
-		}
-	}
-	return 0;
-}
-
-static int pxd_io_reader(void *data)
-{
-	return pxd_io_thread(data, READ);
-}
-
-static int pxd_io_writer(void *data)
-{
-	return pxd_io_thread(data, WRITE);
 }
 
 static void pxd_suspend_io(struct pxd_device *pxd_dev)

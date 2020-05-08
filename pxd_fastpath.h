@@ -19,13 +19,6 @@
 struct pxd_device;
 struct pxd_context;
 
-// A one-time built, static lookup table to distribute requests to cpu within
-// same numa node
-struct node_cpu_map {
-	int cpu[NR_CPUS];
-	int ncpu;
-};
-
 // Added metadata for each bio
 struct pxd_io_tracker {
 #define PXD_IOT_MAGIC (0xbeefcafe)
@@ -45,21 +38,6 @@ struct pxd_io_tracker {
 
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
-};
-
-struct pxd_device;
-struct thread_context {
-	spinlock_t  	    read_lock;
-	wait_queue_head_t   read_event;
-	struct list_head iot_readers;
-	struct task_struct *reader[PXD_MAX_THREAD_PER_CPU];
-
-	spinlock_t  	    write_lock;
-	wait_queue_head_t   write_event;
-	struct list_head iot_writers;
-	struct task_struct *writer[PXD_MAX_THREAD_PER_CPU];
-
-	atomic_t ncount;
 };
 
 struct pxd_fastpath_extension {
