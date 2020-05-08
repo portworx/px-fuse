@@ -127,10 +127,15 @@ int pxd_device_congested(void *data, int bits)
 {
 	struct pxd_device *pxd_dev = data;
 	int ncount = PXD_ACTIVE(pxd_dev);
+	int cpu = get_cpu();
+	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
+	int suspend = READ_ONCE(statep->suspend);
+
+	put_cpu();
 
 	// notify congested if device is suspended as well.
 	// modified under lock, read outside lock.
-	if (pxd_dev->fp.suspend) {
+	if (suspend) {
 		return 1;
 	}
 
@@ -873,15 +878,23 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 
 static void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
+	int cpu, new, old;
 	int need_flush = 0;
-	spin_lock(&pxd_dev->fp.suspend_wait.lock);
-	if (!pxd_dev->fp.suspend++) {
+
+	for_each_online_cpu(cpu) {
+		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
+		do {
+			new = old = READ_ONCE(statep->suspend);
+			new = statep->suspend + 1;
+		} while (cmpxchg(&statep->suspend, old, new) != old);
+	}
+	BUG_ON(new <= 0);
+	if (!old) {
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 		need_flush = 1;
 	} else {
 		printk("For pxd device %llu IO already suspended\n", pxd_dev->dev_id);
 	}
-	spin_unlock(&pxd_dev->fp.suspend_wait.lock);
 
 	// need to wait for inflight IOs to complete
 	if (need_flush) {
@@ -906,20 +919,23 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 {
 	LIST_HEAD(tmpQ);
 	bool wakeup;
+	int cpu, new, old;
 
-	spin_lock(&pxd_dev->fp.suspend_wait.lock);
-	pxd_dev->fp.suspend--;
-	wakeup = (pxd_dev->fp.suspend == 0);
-#if 1
-	if (wakeup) {
-		list_splice_init(&pxd_dev->fp.suspend_queue, &tmpQ);
+	for_each_online_cpu(cpu) {
+		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
+		do {
+			new = old = READ_ONCE(statep->suspend);
+			new = statep->suspend - 1;
+		} while (cmpxchg(&statep->suspend, old, new) != old);
 	}
-#endif
-	spin_unlock(&pxd_dev->fp.suspend_wait.lock);
-
+	BUG_ON(new < 0);
+	wakeup = (new == 0);
 	if (wakeup) {
+		spin_lock(&pxd_dev->fp.suspend_lock);
+		list_splice_init(&pxd_dev->fp.suspend_queue, &tmpQ);
+		spin_unlock(&pxd_dev->fp.suspend_lock);
+
 		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
-#if 1
 		while (!list_empty(&tmpQ)) {
 			bool freeme = true;
 			struct pxd_io_tracker *head = list_first_entry(&tmpQ, struct pxd_io_tracker, item);
@@ -943,12 +959,9 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 				__pxd_cleanup_block_io(head);
 			}
 		}
-#else
-		wake_up(&pxd_dev->fp.suspend_wait);
-#endif
 	} else {
 		printk("For pxd device %llu IO still suspended(%d)\n",
-				pxd_dev->dev_id, pxd_dev->fp.suspend);
+				pxd_dev->dev_id, new);
 	}
 }
 
@@ -1085,11 +1098,16 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	// device temporary IO suspend
-	init_waitqueue_head(&fp->suspend_wait);
-	fp->suspend = 0;
-	INIT_LIST_HEAD(&pxd_dev->fp.suspend_queue);
+	fp->state = alloc_percpu(struct pcpu_fpstate);
+	if (!fp->state) {
+		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
+		return -ENOMEM;
+	}
+	spin_lock_init(&fp->suspend_lock);
+	INIT_LIST_HEAD(&fp->suspend_queue);
 	fp->wq = alloc_workqueue("pxd%llu", WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
 	if (!fp->wq) {
+		free_percpu(fp->state);
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
 		return -ENOMEM;
 	}
@@ -1129,6 +1147,7 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
 	disableFastPath(pxd_dev);
 
+	free_percpu(pxd_dev->fp.state);
 	destroy_workqueue(pxd_dev->fp.wq);
 }
 
@@ -1241,25 +1260,28 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-#if 1
+{
 	// If IO suspended, then hang IO onto the suspend wait queue
-	if (pxd_dev->fp.suspend) {
-		spin_lock(&pxd_dev->fp.suspend_wait.lock);
-		if (pxd_dev->fp.suspend) {
-			printk_ratelimited("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
-				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
+	int cpu = get_cpu();
+	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
+	int suspend = READ_ONCE(statep->suspend);
+	if (suspend) {
+		spin_lock(&pxd_dev->fp.suspend_lock);
+		// read again within lock
+		suspend = READ_ONCE(statep->suspend);
+		if (suspend) {
 			list_add_tail(&head->item, &pxd_dev->fp.suspend_queue);
-			spin_unlock(&pxd_dev->fp.suspend_wait.lock);
-			return BLK_QC_RETVAL;
 		}
-		spin_unlock(&pxd_dev->fp.suspend_wait.lock);
+		spin_unlock(&pxd_dev->fp.suspend_lock);
+		put_cpu();
+		printk_ratelimited("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
+				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
+		return BLK_QC_RETVAL;
 	}
+	put_cpu();
 
 	pxd_process_io(head);
-#else
-	tc = get_thread_context(rw);
-	pxd_add_io(tc, head, rw);
-#endif
+}
 
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
