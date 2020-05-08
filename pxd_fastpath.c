@@ -8,8 +8,6 @@
 #include "pxd_core.h"
 #include "pxd_compat.h"
 
-#define STATIC
-
 #ifndef MIN_NICE
 #define MIN_NICE (-20)
 #endif
