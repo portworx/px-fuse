@@ -744,7 +744,8 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	iov_count = iov_iter_count(&iter);
 
 	ret = -EAGAIN;
-	if (force_nonblock && !(kiocb->ki_flags & IOCB_DIRECT)) {
+	if (force_nonblock &&
+	    ((s->sqe->flags & IOSQE_FORCE_ASYNC) || !(kiocb->ki_flags & IOCB_DIRECT))) {
 		/* If ->needs_lock is true, we're already in async context. */
 		if (!s->needs_lock)
 			io_async_list_note(WRITE, req, iov_count);
@@ -1339,7 +1340,8 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct sqe_submit *s,
 	int ret;
 
 	/* enforce forwards compatibility on users */
-	if (unlikely(s->sqe->flags & ~(IOSQE_FIXED_FILE | IOSQE_IO_DRAIN))) {
+	if (unlikely(s->sqe->flags &
+		     ~(IOSQE_FIXED_FILE | IOSQE_IO_DRAIN | IOSQE_FORCE_ASYNC))) {
 		pr_info("%s: invalid flags", __func__);
 		return -EINVAL;
 	}

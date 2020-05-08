@@ -41,6 +41,7 @@ struct io_uring_sqe {
  */
 #define IOSQE_FIXED_FILE	(1U << 0)	/* use fixed fileset */
 #define IOSQE_IO_DRAIN		(1U << 1)	/* issue after inflight IO */
+#define IOSQE_FORCE_ASYNC	(1U << 2)	/* force async i/o even if opened direct */
 
 /*
  * io_uring_setup() flags
