@@ -682,13 +682,6 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
-	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
-	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#endif
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n", PXD_ACTIVE(pxd_dev));
 	pos = ((loff_t) bio->bi_iter.bi_sector << SECTOR_SHIFT);
