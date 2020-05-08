@@ -879,6 +879,8 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 	int cpu, new = 0, old = 0;
 	int need_flush = 0;
 
+	BUG_ON(!pxd_dev->fp.state);
+
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
 		do {
@@ -919,6 +921,7 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 	bool wakeup;
 	int cpu, new = 0, old = 0;
 
+	BUG_ON(!pxd_dev->fp.state);
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
 		do {
@@ -1145,8 +1148,15 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
 	disableFastPath(pxd_dev);
 
-	free_percpu(pxd_dev->fp.state);
-	destroy_workqueue(pxd_dev->fp.wq);
+	if (pxd_dev->fp.state) {
+		free_percpu(pxd_dev->fp.state);
+		pxd_dev->fp.state = NULL;
+	}
+
+	if (pxd_dev->fp.wq) {
+		destroy_workqueue(pxd_dev->fp.wq);
+		pxd_dev->fp.wq = NULL;
+	}
 }
 
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
@@ -1309,7 +1319,7 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 		if (!bdev || IS_ERR(bdev)) {
 			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
 				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
-			continue;
+			goto out;	
 		}
 
 		disk = bdev->bd_disk;
@@ -1324,4 +1334,8 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 		if (S_ISBLK(inode->i_mode)) bdput(bdev);
 	}
+	return;
+
+out:
+	disableFastPath(pxd_dev);
 }
