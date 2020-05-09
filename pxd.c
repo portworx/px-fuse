@@ -711,7 +711,6 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (!disk)
 		return;
 
-	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
@@ -875,9 +874,9 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	}
 
 	spin_unlock(&pxd_dev->lock);
-	pxd_fastpath_cleanup(pxd_dev);
 
 	device_unregister(&pxd_dev->dev);
+	pxd_fastpath_cleanup(pxd_dev);
 
 	module_put(THIS_MODULE);
 

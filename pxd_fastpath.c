@@ -176,8 +176,6 @@ int fastpath_init(void)
 	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES,
 			offsetof(struct pxd_io_tracker, clone), 0)) {
 		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
-		fastpath_global_threadctx_cleanup();
-		kfree(g_tc);
 		return -ENOMEM;
 	}
 	ppxd_bio_set = &pxd_bio_set;
@@ -881,6 +879,7 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 
 	BUG_ON(!pxd_dev->fp.state);
 
+	spin_lock(&pxd_dev->fp.suspend_lock);
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
 		do {
@@ -889,6 +888,7 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 		} while (cmpxchg(&statep->suspend, old, new) != old);
 	}
 	BUG_ON(new <= 0);
+	spin_unlock(&pxd_dev->fp.suspend_lock);
 	if (!old) {
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 		need_flush = 1;
@@ -922,6 +922,7 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 	int cpu, new = 0, old = 0;
 
 	BUG_ON(!pxd_dev->fp.state);
+	spin_lock(&pxd_dev->fp.suspend_lock);
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
 		do {
@@ -931,11 +932,9 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 	}
 	BUG_ON(new < 0);
 	wakeup = (new == 0);
+	if (wakeup) list_splice_init(&pxd_dev->fp.suspend_queue, &tmpQ);
+	spin_unlock(&pxd_dev->fp.suspend_lock);
 	if (wakeup) {
-		spin_lock(&pxd_dev->fp.suspend_lock);
-		list_splice_init(&pxd_dev->fp.suspend_queue, &tmpQ);
-		spin_unlock(&pxd_dev->fp.suspend_lock);
-
 		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
 		while (!list_empty(&tmpQ)) {
 			bool freeme = true;
@@ -945,13 +944,15 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 
 			// NOTE NOTE pxd_dev may not be in fastpath
 			if (!pxd_dev->connected || pxd_dev->removing) {
-				printk_ratelimited(KERN_ERR"pxd%llu: px is disconnected, failing IO.\n", pxd_dev->dev_id);
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
 				BIO_ENDIO(head->orig, -ENXIO);
 			} else if (pxd_dev->fp.fastpath) {
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming suspending IO in fastpath.\n", __func__, pxd_dev->dev_id);
 				freeme = false;
 				pxd_process_io(head);
 			} else {
 				// switch to native path
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming suspending IO in native path.\n", __func__, pxd_dev->dev_id);
 				atomic_inc(&pxd_dev->fp.nslowPath);
 				pxd_make_request_slowpath(pxd_dev->disk->queue, head->orig);
 			}
@@ -961,8 +962,7 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 			}
 		}
 	} else {
-		printk("For pxd device %llu IO still suspended(%d)\n",
-				pxd_dev->dev_id, new);
+		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, new);
 	}
 }
 
@@ -980,7 +980,11 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd) return;
+	printk("%s: entering enableFastPath with fastpath %d\n", __func__, pxd_dev->fp.fastpath);
+	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd) {
+		pxd_dev->fp.fastpath = false;
+		return;
+	}
 
 	pxd_suspend_io(pxd_dev);
 
@@ -1029,8 +1033,8 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_dev->fp.fastpath = true;
 	pxd_resume_io(pxd_dev);
 
-	printk(KERN_INFO"pxd_dev %llu mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
-		pxd_dev->dev_id, mode, fp->nfd,
+	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
+		pxd_dev->dev_id, fp->fastpath, mode, fp->nfd,
 		fp->file[0], fp->file[1], fp->file[2]);
 
 	return;
@@ -1045,8 +1049,8 @@ out_file_failed:
 
 	pxd_dev->fp.fastpath = false;
 	pxd_resume_io(pxd_dev);
-	printk(KERN_INFO"Device %llu no backing volume setup, will take slow path\n",
-		pxd_dev->dev_id);
+	printk(KERN_INFO"%s: Device %llu no backing volume setup, will take slow path\n",
+		__func__, pxd_dev->dev_id);
 }
 
 void disableFastPath(struct pxd_device *pxd_dev)
@@ -1055,6 +1059,7 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	int nfd = fp->nfd;
 	int i;
 
+	printk("%s: entering with fastpath %d\n", __func__, pxd_dev->fp.fastpath);
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) return;
 
 	pxd_suspend_io(pxd_dev);
@@ -1072,6 +1077,7 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	pxd_dev->fp.fastpath = false;
 
 	pxd_resume_io(pxd_dev);
+	printk("%s: exit with fastpath %d\n", __func__, pxd_dev->fp.fastpath);
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev)
@@ -1186,7 +1192,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	pxd_dev->fp.nfd = update_path->count;
 	enableFastPath(pxd_dev, true);
 
-	if (!pxd_dev->fp.nfd && pxd_dev->strict) goto out_file_failed;
+	if (!pxd_dev->fp.fastpath && pxd_dev->strict) goto out_file_failed;
 
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
@@ -1246,7 +1252,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	if (!pxd_dev->fp.fastpath) {
-		pxd_printk("px has no backing path yet, should take slow path IO.\n");
+		printk("px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}
@@ -1308,14 +1314,14 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		file = pxd_dev->fp.file[i];
-		BUG_ON(!file);
-		inode = file_inode(file);
+		BUG_ON(!file || !file->f_mapping);
+		inode = file->f_mapping->host;
 		if (!S_ISBLK(inode->i_mode)) {
 			// not needed for non-block based backing devices
 			continue;
 		}
 
-		bdev = COMPAT_CALL_LOOKUP_BDEV(pxd_dev->fp.device_path[i]);
+		bdev = I_BDEV(inode);
 		if (!bdev || IS_ERR(bdev)) {
 			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
 				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
