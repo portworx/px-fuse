@@ -108,9 +108,6 @@ void _generic_start_io_acct(struct request_queue *q, int rw,
 #endif
 #endif
 
-// cached info at px loadtime, to gracefully handle hot plugging cpus
-static int __px_ncpus;
-
 // A private global bio mempool for punting requests bypassing vfs
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 static struct bio_set pxd_bio_set;
@@ -166,12 +163,8 @@ int pxd_device_congested(void *data, int bits)
 
 int fastpath_init(void)
 {
-	// cache the count of cpu information at module load time.
-	// if there is any subsequent hot plugging of cpus, will still handle gracefully.
-	__px_ncpus = num_online_cpus();
+	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 
-	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", __px_ncpus, NR_CPUS, num_online_nodes(), MAX_NUMNODES);
-	// capturing all the cpu's on a given numa node during run-time
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES,
 			offsetof(struct pxd_io_tracker, clone), 0)) {
@@ -1083,8 +1076,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 	memset(fp, 0, sizeof(struct pxd_fastpath_extension));
 	// will take slow path, if additional info not provided.
-
-	pxd_printk("Number of cpu ids %d\n", __px_ncpus);
 #if 0
 	// configure bg flush based on passed mode of operation
 	if (pxd_dev->mode & O_DIRECT) {
@@ -1108,7 +1099,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	}
 	spin_lock_init(&fp->suspend_lock);
 	INIT_LIST_HEAD(&fp->suspend_queue);
-	fp->wq = alloc_workqueue("pxd%llu", WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
+	fp->wq = alloc_workqueue("pxd%llu", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
 	if (!fp->wq) {
 		free_percpu(fp->state);
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
