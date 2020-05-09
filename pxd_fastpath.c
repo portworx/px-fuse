@@ -1337,8 +1337,6 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 				blk_queue_stack_limits(topque, bque);
 			}
 		}
-
-		if (S_ISBLK(inode->i_mode)) bdput(bdev);
 	}
 	return;
 
