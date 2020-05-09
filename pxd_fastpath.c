@@ -980,7 +980,6 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	printk("%s: entering enableFastPath with fastpath %d\n", __func__, pxd_dev->fp.fastpath);
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd) {
 		pxd_dev->fp.fastpath = false;
 		return;
@@ -989,7 +988,6 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_suspend_io(pxd_dev);
 
 	decode_mode(mode, modestr);
-	printk("device %llu mode %#x(%s), nfd %d\n", pxd_dev->dev_id, mode, modestr, nfd);
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
 			if (force) {
@@ -1059,7 +1057,6 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	int nfd = fp->nfd;
 	int i;
 
-	printk("%s: entering with fastpath %d\n", __func__, pxd_dev->fp.fastpath);
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) return;
 
 	pxd_suspend_io(pxd_dev);
@@ -1077,7 +1074,6 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	pxd_dev->fp.fastpath = false;
 
 	pxd_resume_io(pxd_dev);
-	printk("%s: exit with fastpath %d\n", __func__, pxd_dev->fp.fastpath);
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev)
@@ -1252,7 +1248,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	if (!pxd_dev->fp.fastpath) {
-		printk("px has no backing path yet, should take slow path IO.\n");
+		printk_ratelimited(KERN_NOTICE"px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}
@@ -1285,7 +1281,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			list_add_tail(&head->item, &pxd_dev->fp.suspend_queue);
 			spin_unlock(&pxd_dev->fp.suspend_lock);
 			put_cpu();
-			printk_ratelimited("pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
+			printk_ratelimited(KERN_NOTICE"pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 			return BLK_QC_RETVAL;
 		}
@@ -1325,7 +1321,7 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 		if (!bdev || IS_ERR(bdev)) {
 			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
 				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
-			goto out;	
+			goto out;
 		}
 
 		disk = bdev->bd_disk;
