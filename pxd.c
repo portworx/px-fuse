@@ -1028,7 +1028,7 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	if (fp->enable) {
 		enableFastPath(pxd_dev, fp->cleanup);
 	} else {
-		disableFastPath(pxd_dev);
+		disableFastPath(pxd_dev, false);
 	}
 
 	spin_unlock(&pxd_dev->lock);

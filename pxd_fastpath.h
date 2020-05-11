@@ -115,7 +115,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 #endif
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
-void disableFastPath(struct pxd_device *pxd_dev);
+void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
 
 // congestion
 int pxd_device_congested(void *, int);

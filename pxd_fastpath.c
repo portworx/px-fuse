@@ -455,24 +455,20 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 	bio_put(&head->clone);
 }
 
-static void pxd_failover_unwatch(struct pxd_device *pxd_dev)
-{
-	cancel_delayed_work(&pxd_dev->fp.fowi);
-}
-
-static void pxd_failover_watch(struct pxd_device *pxd_dev)
-{
-	cancel_delayed_work(&pxd_dev->fp.fowi);
-	schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
-}
-
 // called with fail_lock held
 static void __pxd_failover_complete(struct pxd_device *pxd_dev)
 {
-	pxd_failover_unwatch(pxd_dev);	
-	disableFastPath(pxd_dev, true);
-	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
-	pxd_resume_io(pxd_dev);
+	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
+		if (PXD_ACTIVE(pxd_dev)) {
+			printk_ratelimited(KERN_WARNING"pxd%llu: in failover with %d pending IO",
+				pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
+			schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
+		} else {
+			disableFastPath(pxd_dev, true);
+			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+			pxd_resume_io(pxd_dev);
+		}
+	}
 }
 
 static void pxd_failover_watcher(struct work_struct *wi)
@@ -484,30 +480,15 @@ static void pxd_failover_watcher(struct work_struct *wi)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
-		if (PXD_ACTIVE(pxd_dev)) {
-			printk(KERN_WARNING"pxd%llu: in failover with %d pending IO",
-				pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
-			schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
-		} else {
-			__pxd_failover_complete(pxd_dev);
-		}
-	}
+	__pxd_failover_complete(pxd_dev);
 	spin_unlock(&pxd_dev->fp.fail_lock);
 }
 
 static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 {
-	bool initiate = false;
-
 	spin_lock(&pxd_dev->fp.fail_lock);
 	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
-		initiate = true;
 		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
-	}
-	spin_unlock(&pxd_dev->fp.fail_lock);
-	
-	if (initiate) {
 		pxd_suspend_io(pxd_dev);
 	}
 
@@ -516,14 +497,8 @@ static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_trac
 	list_add(&iot->item, &pxd_dev->fp.suspend_queue);
 	spin_unlock(&pxd_dev->fp.suspend_lock);
 
-	if (!PXD_ACTIVE(pxd_dev)) {
-		spin_lock(&pxd_dev->fp.fail_lock);
-		__pxd_failover_complete(pxd_dev);
-		spin_unlock(&pxd_dev->fp.fail_lock);
-	} else if (initiate) {
-		/* add a safety watcher on this pxd_dev to watch for active IO count drop to zero */
-		pxd_failover_watch(pxd_dev);
-	}
+	__pxd_failover_complete(pxd_dev);
+	spin_unlock(&pxd_dev->fp.fail_lock);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -1228,7 +1203,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
-	pxd_failover_unwatch(pxd_dev);
+	cancel_delayed_work(&pxd_dev->fp.fowi);
 	disableFastPath(pxd_dev, false);
 
 	if (pxd_dev->fp.state) {
