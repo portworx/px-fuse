@@ -784,7 +784,6 @@ out_free:
 	return ret;
 }
 
-// This call is processed synchronous
 static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	bool force_nonblock)
 {
@@ -795,6 +794,10 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	loff_t pos = s->pos;
 	size_t bytes = s->len;
 	
+	/* discard always requires a blocking context */
+	if (force_nonblock)
+		return -EAGAIN;
+
 	if (unlikely(!(req->file->f_mode & FMODE_WRITE)))
 		return -EBADF;
 
@@ -812,17 +815,19 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 		sector_t start_sector = (pos >> SECTOR_SHIFT);
 		sector_t nsectors = sector_div(bytes, SECTOR_SIZE);
 		ret = blkdev_issue_discard(bdev, start_sector, nsectors, GFP_KERNEL, 0);
+	} else {
+		return -EINVAL;
 	}
 
-	io_cqring_add_event(req->ctx, req->user_data, ret);
-
-	// only for success free up the request
-	if (!ret) io_put_req(req);
+	// only for success do the below, as its done through the wq caller context
+	if (!req) {
+		io_cqring_add_event(req->ctx, req->user_data, ret);
+		io_put_req(req);
+	}
 
 	return ret;
 }
 
-// This call is processed synchronous
 static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 	bool force_nonblock)
 {
@@ -830,21 +835,27 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 	struct inode *inode = file->f_mapping->host;
 	int ret = -EINVAL;
 
+	/* syncfs always requires a blocking context */
+	if (force_nonblock)
+		return -EAGAIN;
+
 	if (S_ISREG(inode->i_mode)) {
 		struct super_block *sb = file->f_path.dentry.d_sb;
 		down_read(&sb->s_umount);
 		ret = sync_filesystem(sb);
 		up_read(&sb->s_umount);
-	} else {
+	} else if (S_ISBLK(inode->i_mode)) {
 		struct block_device *bdev = I_BDEV(inode);
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
+	} else {
 		return -EOPNOTSUPP;
 	}
 
-	io_cqring_add_event(req->ctx, req->user_data, ret);
-
-	// only for success free up the request
-	if (!ret) io_put_req(req);
+	// only for success do the below, as its done through the wq caller context
+	if (!req) {
+		io_cqring_add_event(req->ctx, req->user_data, ret);
+		io_put_req(req);
+	}
 
 	return ret;
 }
