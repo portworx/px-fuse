@@ -736,11 +736,12 @@ static void pxd_complete_io(struct bio* bio, int error)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
-	iot->orig->bi_status = bio->bi_status;
+	blk_status_t status = bio->bi_status;
 	if (atomic_read(&head->fails)) {
-		iot->orig->bi_status = -EIO; // mark failure
+		status = -EIO; // mark failure
 	}
-	if (iot->orig->bi_status) atomic_inc(&pxd_dev->fp.nerror);
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
+	iot->orig->bi_status = status;
 	bio_endio(iot->orig);
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -750,7 +751,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 		status = -EIO; // mark failure
 	}
 	if (status) atomic_inc(&pxd_dev->fp.nerror);
-	bio_endio(iot->orig, status);
+	iot->orig->bi_error = status;
+	bio_endio(iot->orig);
 }
 #else
 {
@@ -1532,14 +1534,14 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		file = pxd_dev->fp.file[i];
-		BUG_ON(!file);
-		inode = file_inode(file);
+		BUG_ON(!file || !file->f_mapping);
+		inode = file->f_mapping->host;
 		if (!S_ISBLK(inode->i_mode)) {
 			// not needed for non-block based backing devices
 			continue;
 		}
 
-		bdev = COMPAT_CALL_LOOKUP_BDEV(pxd_dev->fp.device_path[i]);
+		bdev = I_BDEV(inode);
 		if (!bdev || IS_ERR(bdev)) {
 			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
 				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
@@ -1555,7 +1557,5 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 				blk_queue_stack_limits(topque, bque);
 			}
 		}
-
-		if (S_ISBLK(inode->i_mode)) bdput(bdev);
 	}
 }
