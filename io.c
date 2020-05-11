@@ -784,6 +784,33 @@ out_free:
 	return ret;
 }
 
+// This call is processed inline
+static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	const int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+	int ret;
+
+	if (unlikely(!(req->file->f_mode & FMODE_WRITE)))
+		return -EBADF;
+	if (unlikely(!req->file->f_op->fallocate)) {
+		pr_info("%s: fallocate is NULL", __func__);
+		return -EOPNOTSUPP;
+	}
+
+	pos = s->pos;
+	bytes = s->len;
+	ret = req->file->f_op->fallocate(req->file, mode, pos, bytes);
+	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+		ret = -EIO;
+	io_cqring_add_event(req->ctx, req->user_data, ret);
+
+	// only for success free up the request
+	if (!ret) io_put_req(req);
+
+	return ret;
+}
+
 /*
  * IORING_OP_NOP just posts a completion event, nothing else.
  */
@@ -1116,15 +1143,15 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	case IORING_OP_POLL_REMOVE:
 		ret = io_poll_remove(req, s->sqe);
 		break;
+	case IORING_OP_DISCARD_FIXED:
+		ret = io_discard(req, s, force_nonblock);
+		break;	
 	default:
 		ret = -EINVAL;
 		break;
 	}
 
-	if (ret)
-		return ret;
-
-	return 0;
+	return ret;
 }
 
 static struct async_list *io_async_list_from_sqe(struct io_ring_ctx *ctx,
