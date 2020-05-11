@@ -521,9 +521,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
-		atomic_inc(&pxd_dev->fp.nerror);
-	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
 	iot->orig->bi_status = status;
 	bio_endio(iot->orig);
 }
@@ -533,9 +531,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
-		atomic_inc(&pxd_dev->fp.nerror);
-	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
 	iot->orig->bi_error = status;
 	bio_endio(iot->orig);
 }
