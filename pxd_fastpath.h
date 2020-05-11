@@ -72,6 +72,8 @@ struct pxd_fastpath_extension {
 	struct delayed_work fowi;
 	spinlock_t  fail_lock;
 	pxd_failover_state_t active_failover;
+	// debug
+	bool force_fail;
 
 	wait_queue_head_t   sync_event;
 	atomic_t nsync_active; // [global] currently active?

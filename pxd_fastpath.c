@@ -572,6 +572,10 @@ static void pxd_complete_io(struct bio* bio, int error)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->fp.ncount);
+
+	// debug force fail IO
+	if (pxd_dev->fp.force_fail) atomic_inc(&head->fails);
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
 	blk_status_t status = bio->bi_status;
@@ -1176,6 +1180,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	spin_lock_init(&fp->fail_lock);
 	fp->active_failover = PXD_FP_FAILOVER_NONE;
 	PREPARE_DELAYED_WORK(&fp->fowi, pxd_failover_watcher);
+	fp->force_fail = false; // debug to force faspath failover
 
 	// congestion init
 	// hard coded congestion limits within driver
@@ -1418,5 +1423,13 @@ int pxd_switch_fastpath(struct pxd_device* pxd_dev)
 
 int pxd_switch_nativepath(struct pxd_device* pxd_dev)
 {
+	if (pxd_dev->fp.fastpath) {
+		printk(KERN_WARNING"pxd_dev %llu in fastpath, forcing failover\n",
+			pxd_dev->dev_id);
+		pxd_dev->fp.force_fail = true;
+	} else {
+		printk(KERN_WARNING"pxd_dev %llu in already in native path, skipping failover\n",
+			pxd_dev->dev_id);
+	}
 	return 0;
 }
