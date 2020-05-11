@@ -865,7 +865,7 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 	}
 }
 
-static void pxd_suspend_io(struct pxd_device *pxd_dev)
+void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
 	int cpu, new = 0, old = 0;
 	int need_flush = 0;
@@ -908,7 +908,7 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 	}
 }
 
-static void pxd_resume_io(struct pxd_device *pxd_dev)
+void pxd_resume_io(struct pxd_device *pxd_dev)
 {
 	LIST_HEAD(tmpQ);
 	bool wakeup;
@@ -1329,4 +1329,22 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 out:
 	disableFastPath(pxd_dev);
+}
+
+/*** debug routines */
+int pxd_suspend_state(struct pxd_device *pxd_dev)
+{
+	int cpu = smp_processor_id();
+	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
+	return READ_ONCE(statep->suspend);
+}
+
+int pxd_switch_fastpath(struct pxd_device* pxd_dev)
+{
+	return 0;
+}
+
+int pxd_switch_nativepath(struct pxd_device* pxd_dev)
+{
+	return 0;
 }

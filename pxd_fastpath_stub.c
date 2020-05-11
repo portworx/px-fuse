@@ -25,4 +25,10 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 }
 
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque) {}
+int pxd_suspend_state(struct pxd_device *pxd_dev) {return 0;}
+
+void pxd_suspend_io(struct pxd_device*) { }
+void pxd_resume_io(struct pxd_device*) { }
+int pxd_switch_fastpath(struct pxd_device*) {return -1;}
+int pxd_switch_nativepath(struct pxd_device*) {return -1;}
 #endif

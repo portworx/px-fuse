@@ -1242,7 +1242,7 @@ static ssize_t pxd_fastpath_state(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	return sprintf(buf, "%d\n", pxd_dev->fp.nfd);
+	return sprintf(buf, "%d\n", pxd_dev->fp.fastpath);
 }
 
 static char* __strtok_r(char *src, const char delim, char **saveptr) {
@@ -1355,6 +1355,46 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	return count;
 }
 
+static ssize_t pxd_debug_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d\n",
+			pxd_dev->fp.nfd,
+			pxd_suspend_state(pxd_dev),
+			pxd_dev->fp.fastpath);
+}
+
+static ssize_t pxd_debug_store(struct device *dev,
+			struct device_attribute *attr,
+		        const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	switch (buf[0]) {
+	case 'x': /* switch fastpath*/
+		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
+		pxd_switch_fastpath(pxd_dev);
+		break;
+	case 'X': /* switch native path */
+		printk("dev:%llu - IO native path switch\n", pxd_dev->dev_id);
+		pxd_switch_nativepath(pxd_dev);
+		break;
+	case 's': /* suspend */
+		printk("dev:%llu - IO suspend\n", pxd_dev->dev_id);
+		pxd_suspend_io(pxd_dev);
+		break;
+	case 'r': /* resume */
+		printk("dev:%llu - IO resume\n", pxd_dev->dev_id);
+		pxd_resume_io(pxd_dev);
+		break;
+	default:
+		/* no action */
+		printk("dev:%llu - no action for %c\n", pxd_dev->dev_id, buf[0]);
+	}
+
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
@@ -1365,6 +1405,8 @@ static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congesti
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
+
+static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);;
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -1377,6 +1419,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_writesegment.attr,
 	&dev_attr_fastpath.attr,
 	&dev_attr_mode.attr,
+	&dev_attr_debug.attr,
 	NULL
 };
 
