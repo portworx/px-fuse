@@ -784,25 +784,63 @@ out_free:
 	return ret;
 }
 
-// This call is processed inline
+// This call is processed synchronous
 static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	bool force_nonblock)
 {
 	const int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-	int ret;
-
+	struct file *file = req->file;
+	struct inode *inode = file->f_mapping->host;
+	int ret = -EINVAL;
+	loff_t pos = s->pos;
+	size_t bytes = s->len;
+	
 	if (unlikely(!(req->file->f_mode & FMODE_WRITE)))
 		return -EBADF;
-	if (unlikely(!req->file->f_op->fallocate)) {
-		pr_info("%s: fallocate is NULL", __func__);
+
+	if (S_ISREG(inode->i_mode)) {
+		if (unlikely(!req->file->f_op->fallocate)) {
+			pr_info("%s: fallocate is NULL", __func__);
+			return -EOPNOTSUPP;
+		}
+
+		ret = req->file->f_op->fallocate(req->file, mode, pos, bytes);
+		if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+			ret = -EIO;
+	} else  if (S_ISBLK(inode->i_mode)) {
+		struct block_device *bdev = I_BDEV(inode);
+		sector_t start_sector = (pos >> SECTOR_SHIFT);
+		sector_t nsectors = sector_div(bytes, SECTOR_SIZE);
+		ret = blkdev_issue_discard(bdev, start_sector, nsectors, GFP_KERNEL, 0);
+	}
+
+	io_cqring_add_event(req->ctx, req->user_data, ret);
+
+	// only for success free up the request
+	if (!ret) io_put_req(req);
+
+	return ret;
+}
+
+// This call is processed synchronous
+static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	struct file *file = req->file;
+	struct inode *inode = file->f_mapping->host;
+	int ret = -EINVAL;
+
+	if (S_ISREG(inode->i_mode)) {
+		struct super_block *sb = file->f_path.dentry.d_sb;
+		down_read(&sb->s_umount);
+		ret = sync_filesystem(sb);
+		up_read(&sb->s_umount);
+	} else {
+		struct block_device *bdev = I_BDEV(inode);
+		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
 		return -EOPNOTSUPP;
 	}
 
-	pos = s->pos;
-	bytes = s->len;
-	ret = req->file->f_op->fallocate(req->file, mode, pos, bytes);
-	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-		ret = -EIO;
 	io_cqring_add_event(req->ctx, req->user_data, ret);
 
 	// only for success free up the request
@@ -1146,6 +1184,9 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	case IORING_OP_DISCARD_FIXED:
 		ret = io_discard(req, s, force_nonblock);
 		break;	
+	case IORING_OP_SYNCFS_FIXED:
+		ret = io_syncfs(req, s, force_nonblock);
+		break;
 	default:
 		ret = -EINVAL;
 		break;

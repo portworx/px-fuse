@@ -60,6 +60,8 @@ struct io_uring_sqe {
 #define IORING_OP_SYNC_FILE_RANGE	8
 #define IORING_OP_REQ_DONE	9
 #define IORING_OP_COPY_DATA	10
+#define IORING_OP_DISCARD_FIXED 11
+#define IORING_OP_SYNCFS_FIXED  12
 
 /*
  * sqe->fsync_flags
