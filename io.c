@@ -814,6 +814,11 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 		struct block_device *bdev = I_BDEV(inode);
 		sector_t start_sector = (pos >> SECTOR_SHIFT);
 		sector_t nsectors = sector_div(bytes, SECTOR_SIZE);
+
+		// santize byte range for sector granularity
+		if ((pos & (SECTOR_SIZE-1)) || (nsectors & (SECTOR_SIZE-1))) {
+			return -EINVAL;
+		}
 		ret = blkdev_issue_discard(bdev, start_sector, nsectors, GFP_KERNEL, 0);
 	} else {
 		return -EINVAL;
