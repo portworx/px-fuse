@@ -455,6 +455,77 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 	bio_put(&head->clone);
 }
 
+static void pxd_failover_unwatch(struct pxd_device *pxd_dev)
+{
+	cancel_delayed_work(&pxd_dev->fp.fowi);
+}
+
+static void pxd_failover_watch(struct pxd_device *pxd_dev)
+{
+	cancel_delayed_work(&pxd_dev->fp.fowi);
+	schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
+}
+
+// called with fail_lock held
+static void __pxd_failover_complete(struct pxd_device *pxd_dev)
+{
+	pxd_failover_unwatch(pxd_dev);	
+	disableFastPath(pxd_dev, true);
+	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+	pxd_resume_io(pxd_dev);
+}
+
+static void pxd_failover_watcher(struct work_struct *wi)
+{
+	struct delayed_work  *fowi = to_delayed_work(wi);
+	struct pxd_fastpath_extension *fp = container_of(fowi, struct pxd_fastpath_extension, fowi);
+	struct pxd_device *pxd_dev = container_of(fp, struct pxd_device, fp);
+
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
+
+	spin_lock(&pxd_dev->fp.fail_lock);
+	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
+		if (PXD_ACTIVE(pxd_dev)) {
+			printk(KERN_WARNING"pxd%llu: in failover with %d pending IO",
+				pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
+			schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
+		} else {
+			__pxd_failover_complete(pxd_dev);
+		}
+	}
+	spin_unlock(&pxd_dev->fp.fail_lock);
+}
+
+static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
+{
+	bool initiate = false;
+
+	spin_lock(&pxd_dev->fp.fail_lock);
+	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
+		initiate = true;
+		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
+	}
+	spin_unlock(&pxd_dev->fp.fail_lock);
+	
+	if (initiate) {
+		pxd_suspend_io(pxd_dev);
+	}
+
+	/* Add this IO to the suspend IO list */
+	spin_lock(&pxd_dev->fp.suspend_lock);
+	list_add(&iot->item, &pxd_dev->fp.suspend_queue);
+	spin_unlock(&pxd_dev->fp.suspend_lock);
+
+	if (!PXD_ACTIVE(pxd_dev)) {
+		spin_lock(&pxd_dev->fp.fail_lock);
+		__pxd_failover_complete(pxd_dev);
+		spin_unlock(&pxd_dev->fp.fail_lock);
+	} else if (initiate) {
+		/* add a safety watcher on this pxd_dev to watch for active IO count drop to zero */
+		pxd_failover_watch(pxd_dev);
+	}
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 static void pxd_complete_io_dummy(struct bio* bio)
 #else
@@ -474,6 +545,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
+	bool dofree = true;
 
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
@@ -515,15 +587,23 @@ static void pxd_complete_io(struct bio* bio, int error)
 	_generic_end_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
 
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
+	atomic_inc(&pxd_dev->fp.ncomplete);
+	atomic_dec(&pxd_dev->fp.ncount);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
 	blk_status_t status = bio->bi_status;
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) atomic_inc(&pxd_dev->fp.nerror);
-	iot->orig->bi_status = status;
-	bio_endio(iot->orig);
+	if (status) {
+		dofree = false;
+		atomic_inc(&pxd_dev->fp.nerror);
+		pxd_failover_initiate(pxd_dev, head);
+	} else {
+		iot->orig->bi_status = status;
+		bio_endio(iot->orig);
+	}
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
@@ -531,9 +611,14 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) atomic_inc(&pxd_dev->fp.nerror);
-	iot->orig->bi_error = status;
-	bio_endio(iot->orig);
+	if (status) {
+		dofree = false;
+		atomic_inc(&pxd_dev->fp.nerror);
+		pxd_failover_initiate(pxd_dev, head);
+	} else {
+		iot->orig->bi_error = status;
+		bio_endio(iot->orig);
+	}
 }
 #else
 {
@@ -541,16 +626,17 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) atomic_inc(&pxd_dev->fp.nerror);
-	bio_endio(iot->orig, status);
+	if (status) {
+		dofree = false;
+		atomic_inc(&pxd_dev->fp.nerror);
+		pxd_failover_initiate(pxd_dev, head);
+	} else {
+		bio_endio(iot->orig, status);
+	}
 }
 #endif
 
-	__pxd_cleanup_block_io(head);
-
-	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	atomic_inc(&pxd_dev->fp.ncomplete);
-	atomic_dec(&pxd_dev->fp.ncount);
+	if (dofree) __pxd_cleanup_block_io(head);
 }
 
 static void pxd_process_fileio(struct work_struct *wi);
@@ -642,7 +728,7 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	if (!enable) {
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = false;
-		disableFastPath(pxd_dev);
+		disableFastPath(pxd_dev, false);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
 		enableFastPath(pxd_dev, true);
@@ -1040,7 +1126,7 @@ out_file_failed:
 		__func__, pxd_dev->dev_id);
 }
 
-void disableFastPath(struct pxd_device *pxd_dev)
+void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int nfd = fp->nfd;
@@ -1052,9 +1138,11 @@ void disableFastPath(struct pxd_device *pxd_dev)
 
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) {
-			int ret = vfs_fsync(fp->file[i], 0);
-			if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
-				printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
+			if (!skipsync) {
+				int ret = vfs_fsync(fp->file[i], 0);
+				if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
+					printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
+				}
 			}
 			filp_close(fp->file[i], NULL);
 			fp->file[i] = NULL;
@@ -1102,6 +1190,11 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 		return -ENOMEM;
 	}
 
+	// failover init
+	spin_lock_init(&fp->fail_lock);
+	fp->active_failover = PXD_FP_FAILOVER_NONE;
+	PREPARE_DELAYED_WORK(&fp->fowi, pxd_failover_watcher);
+
 	// congestion init
 	// hard coded congestion limits within driver
 	fp->congested = false;
@@ -1135,7 +1228,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
-	disableFastPath(pxd_dev);
+	pxd_failover_unwatch(pxd_dev);
+	disableFastPath(pxd_dev, false);
 
 	if (pxd_dev->fp.state) {
 		free_percpu(pxd_dev->fp.state);
@@ -1161,7 +1255,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 			pxd_dev->dev_id, mode, modestr, update_path->count);
 
 	// fastpath cannot be active while updating paths
-	disableFastPath(pxd_dev);
+	disableFastPath(pxd_dev, false);
 	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 			update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
@@ -1180,7 +1274,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
 out_file_failed:
-	disableFastPath(pxd_dev);
+	disableFastPath(pxd_dev, false);
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 	}
@@ -1324,7 +1418,7 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	return;
 
 out:
-	disableFastPath(pxd_dev);
+	disableFastPath(pxd_dev, false);
 }
 
 /*** debug routines */

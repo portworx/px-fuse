@@ -13,11 +13,13 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-// create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
-#define PXD_MAX_THREAD_PER_CPU (8)
-
 struct pxd_device;
 struct pxd_context;
+
+typedef enum pxd_failover_state {
+        PXD_FP_FAILOVER_NONE = 0,
+        PXD_FP_FAILOVER_ACTIVE = 1,
+} pxd_failover_state_t;
 
 // Added metadata for each bio
 struct pxd_io_tracker {
@@ -65,6 +67,11 @@ struct pxd_fastpath_extension {
 	struct pcpu_fpstate *state;
 	spinlock_t suspend_lock;
 	struct list_head  suspend_queue;
+
+	// failover work item
+	struct delayed_work fowi;
+	spinlock_t  fail_lock;
+	pxd_failover_state_t active_failover;
 
 	wait_queue_head_t   sync_event;
 	atomic_t nsync_active; // [global] currently active?
