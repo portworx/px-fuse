@@ -455,6 +455,12 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 	bio_put(&head->clone);
 }
 
+static void pxd_failover_watch(struct pxd_device *pxd_dev)
+{
+	cancel_delayed_work(&pxd_dev->fp.fowi);
+	schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
+}
+
 // called with fail_lock held
 static void __pxd_failover_complete(struct pxd_device *pxd_dev)
 {
@@ -462,8 +468,9 @@ static void __pxd_failover_complete(struct pxd_device *pxd_dev)
 		if (PXD_ACTIVE(pxd_dev)) {
 			printk_ratelimited(KERN_WARNING"pxd%llu: in failover with %d pending IO",
 				pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
-			schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
+			pxd_failover_watch(pxd_dev);
 		} else {
+			cancel_delayed_work(&pxd_dev->fp.fowi);
 			disableFastPath(pxd_dev, true);
 			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 			pxd_resume_io(pxd_dev);
