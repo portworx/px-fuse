@@ -936,12 +936,12 @@ static void pxd_resume_io(struct pxd_device *pxd_dev)
 				printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
 				BIO_ENDIO(head->orig, -ENXIO);
 			} else if (pxd_dev->fp.fastpath) {
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming suspending IO in fastpath.\n", __func__, pxd_dev->dev_id);
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in fastpath.\n", __func__, pxd_dev->dev_id);
 				freeme = false;
 				pxd_process_io(head);
 			} else {
 				// switch to native path
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming suspending IO in native path.\n", __func__, pxd_dev->dev_id);
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
 				atomic_inc(&pxd_dev->fp.nslowPath);
 				pxd_make_request_slowpath(pxd_dev->disk->queue, head->orig);
 			}
