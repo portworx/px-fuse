@@ -43,9 +43,11 @@ struct fuse_conn;
 /**
  * A request to the client
  */
+struct pxd_device;
 struct fuse_req {
 	/** Block IO requests are processed through blk request queue */
 	unsigned using_blkque:1;
+	struct pxd_device *pxd_dev;
 
 	/** The request input header */
 	struct fuse_in_header in;

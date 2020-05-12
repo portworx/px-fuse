@@ -57,11 +57,6 @@ struct pxd_fastpath_extension {
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
-	unsigned int qdepth;
-	bool congested;
-	unsigned int nr_congestion_on;
-	unsigned int nr_congestion_off;
-
 	struct workqueue_struct *wq;
 	// if set, then newer IOs shall block, until reactivated.
 	struct pcpu_fpstate *state;
@@ -89,7 +84,6 @@ struct pxd_fastpath_extension {
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests
 	atomic_t nerror; // [global] total IO error
-	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
@@ -121,11 +115,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
 
 // congestion
 int pxd_device_congested(void *, int);
-#ifdef __PX_FASTPATH__
-#define PXD_ACTIVE(pxd)  (atomic_read(&pxd_dev->fp.ncount))
-#else
-#define PXD_ACTIVE(pxd) (0)
-#endif
 
 // return the io count processed by a thread
 int get_thread_count(int id);

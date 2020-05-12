@@ -210,8 +210,75 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
         part_stat_unlock();
 }
 
+static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
+{
+	int ncount = PXD_ACTIVE(pxd_dev);
+
+	// does not care about async or sync request.
+	if (ncount > pxd_dev->qdepth) {
+		spin_lock(&pxd_dev->lock);
+		if (!pxd_dev->congested) {
+			pxd_dev->congested = true;
+			pxd_dev->nr_congestion_on++;
+		}
+		spin_unlock(&pxd_dev->lock);
+		return 1;
+	}
+
+	if (pxd_dev->congested) {
+		if (ncount < (3*pxd_dev->qdepth)/4) {
+			spin_lock(&pxd_dev->lock);
+			if (pxd_dev->congested) {
+				pxd_dev->congested = false;
+				pxd_dev->nr_congestion_off++;
+			}
+			spin_unlock(&pxd_dev->lock);
+			return 0;
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
+// congestion callback from kernel writeback module
+int pxd_device_congested(void *data, int bits)
+{
+	struct pxd_device *pxd_dev = data;
+	int cpu = get_cpu();
+	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
+	int suspend = READ_ONCE(statep->suspend);
+
+	put_cpu();
+
+	// notify congested if device is suspended as well.
+	// modified under lock, read outside lock.
+	if (suspend) {
+		return 1;
+	}
+
+	return __pxd_device_qfull(pxd_dev);
+}
+
+void pxd_check_q_congested(struct pxd_device *pxd_dev)
+{
+	if (__pxd_device_qfull(pxd_dev)) {
+		wait_event_interruptible(pxd_dev->suspend_wq,
+			!__pxd_device_qfull(pxd_dev));
+	}
+}
+
+void pxd_check_q_decongested(struct pxd_device *pxd_dev)
+{
+	if (!__pxd_device_qfull(pxd_dev)) {
+		wake_up(&pxd_dev->suspend_wq);
+	}
+}
+
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
+	atomic_dec(&req->pxd_dev->ncount);
+	pxd_check_q_decongested(req->pxd_dev);
 	pxd_printk("%s: receive reply to %px(%lld) at %lld\n",
 			__func__, req, req->in.unique,
 			req->pxd_rdwr_in.offset);
@@ -369,6 +436,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
+	atomic_inc(&req->pxd_dev->ncount);
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
 		pxd_write_same_request(req, size, off, minor, flags);
@@ -401,6 +469,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
+	atomic_inc(&req->pxd_dev->ncount);
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
 		/* FALLTHROUGH */
@@ -472,6 +541,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	}
 
 	req->using_blkque = false;
+	req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
@@ -526,6 +596,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 
 		req->using_blkque = true;
+		req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
@@ -569,6 +640,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	blk_mq_start_request(rq);
 
 	req->using_blkque = true;
+	req->pxd_dev = pxd_dev;
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 		return BLK_STS_IOERR;
@@ -768,6 +840,16 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->using_blkque = !add->enable_fp;
 	pxd_dev->strict = add->strict;
+
+	// congestion init
+	init_waitqueue_head(&pxd_dev->suspend_wq);
+	// hard coded congestion limits within driver
+	pxd_dev->congested = false;
+	pxd_dev->qdepth = DEFAULT_CONGESTION_THRESHOLD;
+	pxd_dev->nr_congestion_on = 0;
+	pxd_dev->nr_congestion_off = 0;
+	atomic_set(&pxd_dev->ncount, 0);
+
 
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d(%d) npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->strict, add->paths.count);
@@ -1123,7 +1205,7 @@ static ssize_t pxd_active_show(struct device *dev,
 	int i;
 
 	ncount = snprintf(cp, available, "active/complete: %u/%u, failed: %u, [write: %u, flush: %u(nop: %u), fua: %u, discard: %u, preflush: %u], switched: %u, slowpath: %u\n",
-                atomic_read(&pxd_dev->fp.ncount), atomic_read(&pxd_dev->fp.ncomplete),
+                atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->fp.ncomplete),
 		atomic_read(&pxd_dev->fp.nerror),
 		atomic_read(&pxd_dev->fp.nio_write),
 		atomic_read(&pxd_dev->fp.nio_flush), atomic_read(&pxd_dev->fp.nio_flush_nop),
@@ -1210,9 +1292,9 @@ static ssize_t pxd_congestion_show(struct device *dev,
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	return sprintf(buf, "congested: %s (%d/%d)\n",
-			pxd_dev->fp.congested ? "yes" : "no",
-			pxd_dev->fp.nr_congestion_on,
-			pxd_dev->fp.nr_congestion_off);
+			pxd_dev->congested ? "yes" : "no",
+			pxd_dev->nr_congestion_on,
+			pxd_dev->nr_congestion_off);
 }
 
 static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *attr,
@@ -1224,7 +1306,7 @@ static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *a
 	sscanf(buf, "%d", &thresh);
 
 	if (thresh < 0) {
-		thresh = pxd_dev->fp.qdepth;
+		thresh = pxd_dev->qdepth;
 	}
 
 	if (thresh > MAX_CONGESTION_THRESHOLD) {
@@ -1232,7 +1314,7 @@ static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *a
 	}
 
 	spin_lock(&pxd_dev->lock);
-	pxd_dev->fp.qdepth = thresh;
+	pxd_dev->qdepth = thresh;
 	spin_unlock(&pxd_dev->lock);
 
 	return count;

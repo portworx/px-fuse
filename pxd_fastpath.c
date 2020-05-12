@@ -116,51 +116,6 @@ static struct bio_set pxd_bio_set;
 static struct bio_set* ppxd_bio_set;
 
 static void __pxd_cleanup_block_io(struct pxd_io_tracker *head);
-
-// congestion callback from kernel writeback module
-int pxd_device_congested(void *data, int bits)
-{
-	struct pxd_device *pxd_dev = data;
-	int ncount = PXD_ACTIVE(pxd_dev);
-	int cpu = get_cpu();
-	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-	int suspend = READ_ONCE(statep->suspend);
-
-	put_cpu();
-
-	// notify congested if device is suspended as well.
-	// modified under lock, read outside lock.
-	if (suspend) {
-		return 1;
-	}
-
-	// does not care about async or sync request.
-	if (ncount > pxd_dev->fp.qdepth) {
-		spin_lock(&pxd_dev->lock);
-		if (!pxd_dev->fp.congested) {
-			pxd_dev->fp.congested = true;
-			pxd_dev->fp.nr_congestion_on++;
-		}
-		spin_unlock(&pxd_dev->lock);
-		return 1;
-	}
-
-	if (pxd_dev->fp.congested) {
-		if (ncount < (3*pxd_dev->fp.qdepth)/4) {
-			spin_lock(&pxd_dev->lock);
-			if (pxd_dev->fp.congested) {
-				pxd_dev->fp.congested = false;
-				pxd_dev->fp.nr_congestion_off++;
-			}
-			spin_unlock(&pxd_dev->lock);
-			return 0;
-		}
-		return 1;
-	}
-
-	return 0;
-}
-
 int fastpath_init(void)
 {
 	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
@@ -571,7 +526,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	atomic_inc(&pxd_dev->fp.ncomplete);
-	atomic_dec(&pxd_dev->fp.ncount);
+	atomic_dec(&pxd_dev->ncount);
 
 	// debug force fail IO
 	if (pxd_dev->fp.force_fail) atomic_inc(&head->fails);
@@ -623,6 +578,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 #endif
 
 	if (dofree) __pxd_cleanup_block_io(head);
+	pxd_check_q_decongested(pxd_dev);
 }
 
 static void pxd_process_fileio(struct work_struct *wi);
@@ -899,15 +855,7 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
-	atomic_inc(&pxd_dev->fp.ncount);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
-	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
-	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#endif
-
+	atomic_inc(&pxd_dev->ncount);
 	// initialize active io to configured replicas
 	if (dir != READ) {
 		atomic_set(&head->active, pxd_dev->fp.nfd);
@@ -1167,13 +1115,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	INIT_DELAYED_WORK(&fp->fowi, pxd_failover_watcher);
 	fp->force_fail = false; // debug to force faspath failover
 
-	// congestion init
-	// hard coded congestion limits within driver
-	fp->congested = false;
-	fp->qdepth = DEFAULT_CONGESTION_THRESHOLD;
-	fp->nr_congestion_on = 0;
-	fp->nr_congestion_off = 0;
-
 	init_waitqueue_head(&fp->sync_event);
 
 	atomic_set(&fp->nsync_active, 0);
@@ -1187,7 +1128,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nswitch,0);
 	atomic_set(&fp->nslowPath,0);
 	atomic_set(&fp->nwrite_counter,0);
-	atomic_set(&pxd_dev->fp.ncount, 0);
 	atomic_set(&pxd_dev->fp.ncomplete, 0);
 	atomic_set(&pxd_dev->fp.nerror, 0);
 
@@ -1300,6 +1240,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
+	pxd_check_q_congested(pxd_dev);
 	if (!pxd_dev->fp.fastpath) {
 		printk_ratelimited(KERN_NOTICE"px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
@@ -1321,6 +1262,14 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
+	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
+#else
+	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
+#endif
+
 {
 	// If IO suspended, then hang IO onto the suspend wait queue
 	int cpu = get_cpu();
@@ -1334,6 +1283,9 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			list_add_tail(&head->item, &pxd_dev->fp.suspend_queue);
 			spin_unlock(&pxd_dev->fp.suspend_lock);
 			put_cpu();
+
+			// slow down the rate of IO consumption
+			schedule_timeout_interruptible(msecs_to_jiffies(100));
 			printk_ratelimited(KERN_NOTICE"pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
 				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
 			return BLK_QC_RETVAL;
