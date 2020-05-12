@@ -795,6 +795,23 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	put_disk(disk);
 }
 
+struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
+{
+	struct pxd_device *pxd_dev_itr, *pxd_dev;
+
+	pxd_dev = NULL;
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
+		if (pxd_dev_itr->dev_id == dev_id) {
+			pxd_dev = pxd_dev_itr;
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	return pxd_dev;
+}
+
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
@@ -811,6 +828,15 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (ctx->num_devices >= PXD_MAX_DEVICES) {
 		printk(KERN_ERR "Too many devices attached..\n");
 		goto out_module;
+	}
+
+	// if device already exists, then return it
+	pxd_dev = find_pxd_device(ctx, add->dev_id);
+	if (pxd_dev) {
+		module_put(THIS_MODULE);
+
+		// TODO need to revise setting based on new parameters
+		return pxd_dev->minor;
 	}
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
