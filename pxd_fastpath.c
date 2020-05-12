@@ -425,6 +425,7 @@ static void __pxd_failover_complete(struct pxd_device *pxd_dev)
 				pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
 			pxd_failover_watch(pxd_dev);
 		} else {
+			printk_ratelimited(KERN_WARNING"pxd%llu: failover completed", pxd_dev->dev_id);
 			cancel_delayed_work(&pxd_dev->fp.fowi);
 			disableFastPath(pxd_dev, true);
 			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
@@ -950,6 +951,7 @@ void pxd_resume_io(struct pxd_device *pxd_dev)
 				__pxd_cleanup_block_io(head);
 			}
 		}
+		pxd_check_q_decongested(pxd_dev);
 	} else {
 		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, new);
 	}
@@ -1270,32 +1272,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #endif
 
-{
-	// If IO suspended, then hang IO onto the suspend wait queue
-	int cpu = get_cpu();
-	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-	int suspend = READ_ONCE(statep->suspend);
-	if (suspend) {
-		spin_lock(&pxd_dev->fp.suspend_lock);
-		// read again within lock
-		suspend = READ_ONCE(statep->suspend);
-		if (suspend) {
-			list_add_tail(&head->item, &pxd_dev->fp.suspend_queue);
-			spin_unlock(&pxd_dev->fp.suspend_lock);
-			put_cpu();
-
-			// slow down the rate of IO consumption
-			schedule_timeout_interruptible(msecs_to_jiffies(100));
-			printk_ratelimited(KERN_NOTICE"pxd device %llu is suspended, IO blocked until device activated[bio %px, wr %d]\n",
-				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
-			return BLK_QC_RETVAL;
-		}
-		spin_unlock(&pxd_dev->fp.suspend_lock);
-	}
-	put_cpu();
-
 	pxd_process_io(head);
-}
 
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
@@ -1346,11 +1323,25 @@ out:
 }
 
 /*** debug routines */
-int pxd_suspend_state(struct pxd_device *pxd_dev)
+int pxd_suspend_state(struct pxd_device *pxd_dev, int *count)
 {
+	int suspend;
+	int ncount = 0;
 	int cpu = smp_processor_id();
 	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-	return READ_ONCE(statep->suspend);
+	suspend =  READ_ONCE(statep->suspend);
+
+	if (suspend) {
+		struct list_head *item;
+		spin_lock(&pxd_dev->fp.suspend_lock);
+		list_for_each(item, &pxd_dev->fp.suspend_queue) {
+			ncount++;
+		}
+		spin_unlock(&pxd_dev->fp.suspend_lock);
+	}
+
+	*count = ncount;
+	return suspend;
 }
 
 int pxd_switch_fastpath(struct pxd_device* pxd_dev)

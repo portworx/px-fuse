@@ -262,15 +262,15 @@ int pxd_device_congested(void *data, int bits)
 
 void pxd_check_q_congested(struct pxd_device *pxd_dev)
 {
-	if (__pxd_device_qfull(pxd_dev)) {
+	if (pxd_device_congested(pxd_dev, 0)) {
 		wait_event_interruptible(pxd_dev->suspend_wq,
-			!__pxd_device_qfull(pxd_dev));
+			!pxd_device_congested(pxd_dev, 0));
 	}
 }
 
 void pxd_check_q_decongested(struct pxd_device *pxd_dev)
 {
-	if (!__pxd_device_qfull(pxd_dev)) {
+	if (!pxd_device_congested(pxd_dev, 0)) {
 		wake_up(&pxd_dev->suspend_wq);
 	}
 }
@@ -1441,9 +1441,13 @@ static ssize_t pxd_debug_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d\n",
+	int nsuspend, suspend;
+
+	suspend=pxd_suspend_state(pxd_dev, &nsuspend);
+	
+	return sprintf(buf, "nfd:%d,suspend:%d(%d),fastpath:%d\n",
 			pxd_dev->fp.nfd,
-			pxd_suspend_state(pxd_dev),
+			suspend, nsuspend,
 			pxd_dev->fp.fastpath);
 }
 
