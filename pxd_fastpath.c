@@ -936,7 +936,6 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
 	int cpu, new = 0, old = 0;
-	int need_flush = 0;
 
 	BUG_ON(!pxd_dev->fp.state);
 
@@ -952,27 +951,8 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 	spin_unlock(&pxd_dev->fp.suspend_lock);
 	if (!old) {
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
-		need_flush = 1;
 	} else {
 		printk("For pxd device %llu IO already suspended\n", pxd_dev->dev_id);
-	}
-
-	// need to wait for inflight IOs to complete
-	if (need_flush) {
-		int nactive = 0;
-		int retry = 30; // do not wait forever
-		while (retry--) {
-			mb();
-			nactive = PXD_ACTIVE(pxd_dev);
-			if (!nactive) break;
-			printk(KERN_WARNING"pxd device %llu still has %d active IO, waiting completion to suspend",
-					pxd_dev->dev_id, nactive);
-			msleep_interruptible(100);
-
-			if (!retry) {
-				printk(KERN_WARNING"pxd device %llu suspended with active IO(%d)", pxd_dev->dev_id, nactive);
-			}
-		}
 	}
 }
 
@@ -1122,6 +1102,11 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	pxd_suspend_io(pxd_dev);
 
+	if (PXD_ACTIVE(pxd_dev)) {
+		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
+			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
+	}
+
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) {
 			if (!skipsync) {
@@ -1179,7 +1164,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	// failover init
 	spin_lock_init(&fp->fail_lock);
 	fp->active_failover = PXD_FP_FAILOVER_NONE;
-	PREPARE_DELAYED_WORK(&fp->fowi, pxd_failover_watcher);
+	INIT_DELAYED_WORK(&fp->fowi, pxd_failover_watcher);
 	fp->force_fail = false; // debug to force faspath failover
 
 	// congestion init
