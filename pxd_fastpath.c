@@ -719,14 +719,12 @@ static void pxd_complete_io(struct bio* bio, int error)
 		return;
 	}
 
-	pxd_io_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
+	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%lx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
+			bio->bi_vcnt, bio->bi_flags);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
@@ -738,10 +736,12 @@ static void pxd_complete_io(struct bio* bio, int error)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 {
-	iot->orig->bi_status = bio->bi_status;
+	blk_status_t status = bio->bi_status;
 	if (atomic_read(&head->fails)) {
-		iot->orig->bi_status = -EIO; // mark failure
+		status = -EIO; // mark failure
 	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
+	iot->orig->bi_status = status;
 	bio_endio(iot->orig);
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -750,11 +750,9 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
-		bio_io_error(iot->orig);
-	} else {
-		bio_endio(iot->orig);
-	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
+	iot->orig->bi_error = status;
+	bio_endio(iot->orig);
 }
 #else
 {
@@ -762,6 +760,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
+	if (status) atomic_inc(&pxd_dev->fp.nerror);
 	bio_endio(iot->orig, status);
 }
 #endif
@@ -781,8 +780,8 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	struct inode *inode = mapping->host;
 	struct block_device *bdev = I_BDEV(inode);
 
-	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px with blkg %px\n",
-			pxd_dev, bio, fileh, bio->bi_blkg);
+	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px\n",
+			pxd_dev, bio, fileh);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 	clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
@@ -860,15 +859,12 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	if (!enable) {
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = false;
+		disableFastPath(pxd_dev);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
-	}
-
-	if (enable) {
 		enableFastPath(pxd_dev, true);
+		pxd_dev->connected = true;
 	}
-
-	if (enable) pxd_dev->connected = true;
 }
 
 void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
@@ -1184,7 +1180,7 @@ static void pxd_suspend_io(struct pxd_device *pxd_dev)
 	// need to wait for inflight IOs to complete
 	if (need_flush) {
 		int nactive = 0;
-		int retry = 5; // do not wait forever
+		int retry = 30; // do not wait forever
 		while (retry--) {
 			mb();
 			nactive = PXD_ACTIVE(pxd_dev);
@@ -1231,7 +1227,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) return;
+	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd) return;
 
 	pxd_suspend_io(pxd_dev);
 
@@ -1277,6 +1273,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		}
 	}
 
+	pxd_dev->fp.fastpath = true;
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
@@ -1293,6 +1290,7 @@ out_file_failed:
 	memset(fp->file, 0, sizeof(fp->file));
 	memset(fp->device_path, 0, sizeof(fp->device_path));
 
+	pxd_dev->fp.fastpath = false;
 	pxd_resume_io(pxd_dev);
 	printk(KERN_INFO"Device %llu no backing volume setup, will take slow path\n",
 		pxd_dev->dev_id);
@@ -1304,7 +1302,7 @@ void disableFastPath(struct pxd_device *pxd_dev)
 	int nfd = fp->nfd;
 	int i;
 
-	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) return;
+	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) return;
 
 	pxd_suspend_io(pxd_dev);
 
@@ -1315,9 +1313,10 @@ void disableFastPath(struct pxd_device *pxd_dev)
 				printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
 			}
 			filp_close(fp->file[i], NULL);
+			fp->file[i] = NULL;
 		}
 	}
-	fp->nfd = 0;
+	pxd_dev->fp.fastpath = false;
 
 	pxd_resume_io(pxd_dev);
 }
@@ -1372,6 +1371,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nwrite_counter,0);
 	atomic_set(&pxd_dev->fp.ncount, 0);
 	atomic_set(&pxd_dev->fp.ncomplete, 0);
+	atomic_set(&pxd_dev->fp.nerror, 0);
 
 	for (i = 0; i < MAX_NUMNODES; i++) {
 		atomic_set(&fp->index[i], 0);
@@ -1387,50 +1387,37 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
+	char modestr[32];
 	mode_t mode = 0;
 	int err = 0;
 	int i;
-	struct file* f;
-	char modestr[32];
 
 	mode = open_mode(pxd_dev->mode);
 	decode_mode(mode, modestr);
 	printk("device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
 			pxd_dev->dev_id, mode, modestr, update_path->count);
+
+	// fastpath cannot be active while updating paths
+	disableFastPath(pxd_dev);
 	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
-				update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
-		if (pxd_dev->fp.file[i]) {
-			BUG_ON(pxd_dev->fp.nfd <= i);
-			if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
-				// if previous paths are same.. then skip anymore config
-				printk(KERN_INFO"pxd%llu already configured for path %s\n",
-					pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
-				continue;
-			}
+			update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
+		BUG_ON(pxd_dev->fp.file[i]);
 
-			filp_close(pxd_dev->fp.file[i], NULL);
-		}
-
-		f = filp_open(update_path->devpath[i], mode, 0600);
-		if (IS_ERR_OR_NULL(f)) {
-			printk(KERN_ERR"Failed attaching path: device %llu, path %s, err %ld\n",
-				pxd_dev->dev_id, update_path->devpath[i], PTR_ERR(f));
-			err = PTR_ERR(f);
-			goto out_file_failed;
-		}
-		pxd_dev->fp.file[i] = f;
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i], MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
-		pxd_printk("dev %llu: successfully installed fastpath %s at %px\n", pxd_dev->dev_id, pxd_dev->fp.device_path[i], f);
+		pxd_printk("dev %llu: successfully installed fastpath %s\n",
+			pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
 	}
 	pxd_dev->fp.nfd = update_path->count;
+	enableFastPath(pxd_dev, true);
 
-	if (!update_path->count && pxd_dev->strict) goto out_file_failed;
+	if (!pxd_dev->fp.nfd && pxd_dev->strict) goto out_file_failed;
 
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
 out_file_failed:
+	disableFastPath(pxd_dev);
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
 	}
@@ -1505,22 +1492,18 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-	if (!pxd_dev->fp.nfd) {
+	if (!pxd_dev->fp.fastpath) {
 		pxd_printk("px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}
 
-	pxd_printk("pxd_make_fastpath_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
+	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%lx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
+			bio->bi_vcnt, bio->bi_flags);
 
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
 	if (!head) {
@@ -1551,14 +1534,14 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
 		file = pxd_dev->fp.file[i];
-		BUG_ON(!file);
-		inode = file_inode(file);
-		if (S_ISBLK(inode->i_mode)) {
-			bdev = COMPAT_CALL_LOOKUP_BDEV(pxd_dev->fp.device_path[i]);
-		} else {
-			bdev = inode->i_sb->s_bdev;
+		BUG_ON(!file || !file->f_mapping);
+		inode = file->f_mapping->host;
+		if (!S_ISBLK(inode->i_mode)) {
+			// not needed for non-block based backing devices
+			continue;
 		}
 
+		bdev = I_BDEV(inode);
 		if (!bdev || IS_ERR(bdev)) {
 			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
 				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
@@ -1574,7 +1557,5 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 				blk_queue_stack_limits(topque, bque);
 			}
 		}
-
-		if (S_ISBLK(inode->i_mode)) bdput(bdev);
 	}
 }
