@@ -788,44 +788,29 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	bool force_nonblock)
 {
 	const int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
-	struct file *file = req->file;
-	struct inode *inode = file->f_mapping->host;
 	int ret = -EINVAL;
-	loff_t pos = s->pos;
-	size_t bytes = s->len;
+	const struct io_uring_sqe *sqe = s->sqe;
+	loff_t off = READ_ONCE(sqe->off);
+	loff_t bytes = READ_ONCE(sqe->len);
 	
 	/* discard always requires a blocking context */
 	if (force_nonblock)
 		return -EAGAIN;
 
 	if (unlikely(!(req->file->f_mode & FMODE_WRITE)))
-		return -EBADF;
-
-	if (S_ISREG(inode->i_mode)) {
-		if (unlikely(!req->file->f_op->fallocate)) {
-			pr_info("%s: fallocate is NULL", __func__);
-			return -EOPNOTSUPP;
-		}
-
-		ret = req->file->f_op->fallocate(req->file, mode, pos, bytes);
-		if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-			ret = -EIO;
-	} else  if (S_ISBLK(inode->i_mode)) {
-		struct block_device *bdev = I_BDEV(inode);
-		sector_t start_sector = (pos >> SECTOR_SHIFT);
-		sector_t nsectors = sector_div(bytes, SECTOR_SIZE);
-
-		// santize byte range for sector granularity
-		if ((pos & (SECTOR_SIZE-1)) || (nsectors & (SECTOR_SIZE-1))) {
-			return -EINVAL;
-		}
-		ret = blkdev_issue_discard(bdev, start_sector, nsectors, GFP_KERNEL, 0);
-	} else {
 		return -EINVAL;
+
+	if (unlikely(!req->file->f_op->fallocate)) {
+		pr_info("%s: fallocate is NULL", __func__);
+		return -EOPNOTSUPP;
 	}
 
+	ret = req->file->f_op->fallocate(req->file, mode, off, bytes);
+	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+		ret = -EIO;
+
 	// only for success do the below, as its done through the wq caller context
-	if (!req) {
+	if (!ret) {
 		io_cqring_add_event(req->ctx, req->user_data, ret);
 		io_put_req(req);
 	}
@@ -845,7 +830,7 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 		return -EAGAIN;
 
 	if (S_ISREG(inode->i_mode)) {
-		struct super_block *sb = file->f_path.dentry.d_sb;
+		struct super_block *sb = file->f_path.dentry->d_sb;
 		down_read(&sb->s_umount);
 		ret = sync_filesystem(sb);
 		up_read(&sb->s_umount);
@@ -857,7 +842,7 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 	}
 
 	// only for success do the below, as its done through the wq caller context
-	if (!req) {
+	if (!ret) {
 		io_cqring_add_event(req->ctx, req->user_data, ret);
 		io_put_req(req);
 	}
