@@ -1467,14 +1467,12 @@ static ssize_t pxd_debug_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	int nsuspend, suspend;
+	int suspend;
 
-	suspend=pxd_suspend_state(pxd_dev, &nsuspend);
+	suspend=pxd_suspend_state(pxd_dev);
 	
-	return sprintf(buf, "nfd:%d,suspend:%d(%d),fastpath:%d\n",
-			pxd_dev->fp.nfd,
-			suspend, nsuspend,
-			pxd_dev->fp.fastpath);
+	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d\n",
+			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath);
 }
 
 static ssize_t pxd_debug_store(struct device *dev,

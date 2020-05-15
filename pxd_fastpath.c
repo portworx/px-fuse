@@ -410,58 +410,52 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 	bio_put(&head->clone);
 }
 
-static void pxd_failover_watch(struct pxd_device *pxd_dev)
+static void pxd_io_failover(struct work_struct *ws)
 {
-	cancel_delayed_work(&pxd_dev->fp.fowi);
-	schedule_delayed_work(&pxd_dev->fp.fowi, msecs_to_jiffies(1000));
-}
+	struct pxd_io_tracker *head = container_of(ws, struct pxd_io_tracker, wi);
+	struct pxd_device *pxd_dev = head->pxd_dev;
+	bool cleanup = false;
 
-// called with fail_lock held
-static void __pxd_failover_complete(struct pxd_device *pxd_dev)
-{
-	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
-		if (PXD_ACTIVE(pxd_dev)) {
-			printk_ratelimited(KERN_WARNING"pxd%llu: in failover with %d pending IO",
-				pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
-			pxd_failover_watch(pxd_dev);
-		} else {
-			printk_ratelimited(KERN_WARNING"pxd%llu: failover completed", pxd_dev->dev_id);
-			cancel_delayed_work(&pxd_dev->fp.fowi);
-			disableFastPath(pxd_dev, true);
-			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
-			pxd_resume_io(pxd_dev);
-		}
-	}
-}
-
-static void pxd_failover_watcher(struct work_struct *wi)
-{
-	struct delayed_work  *fowi = to_delayed_work(wi);
-	struct pxd_fastpath_extension *fp = container_of(fowi, struct pxd_fastpath_extension, fowi);
-	struct pxd_device *pxd_dev = container_of(fp, struct pxd_device, fp);
-
+	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	__pxd_failover_complete(pxd_dev);
+	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
+		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_COMPLETE;
+		cleanup = true;
+	}
 	spin_unlock(&pxd_dev->fp.fail_lock);
+
+	if (cleanup) {
+		disableFastPath(pxd_dev, true);
+		pxd_resume_io(pxd_dev);
+	}
+
+	if (!pxd_dev->connected || pxd_dev->removing) {
+		printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
+		BIO_ENDIO(head->orig, -ENXIO);
+	} else {
+		// switch to native path
+		printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
+		atomic_inc(&pxd_dev->fp.nslowPath);
+		pxd_make_request_slowpath(pxd_dev->disk->queue, head->orig);
+	}
+
+	__pxd_cleanup_block_io(head);
+	pxd_check_q_decongested(pxd_dev);
 }
 
-static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
+static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_tracker *head)
 {
 	spin_lock(&pxd_dev->fp.fail_lock);
 	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
 		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
 		pxd_suspend_io(pxd_dev);
 	}
-
-	/* Add this IO to the suspend IO list */
-	spin_lock(&pxd_dev->fp.suspend_lock);
-	list_add(&iot->item, &pxd_dev->fp.suspend_queue);
-	spin_unlock(&pxd_dev->fp.suspend_lock);
-
-	__pxd_failover_complete(pxd_dev);
 	spin_unlock(&pxd_dev->fp.fail_lock);
+
+	INIT_WORK(&head->wi, pxd_io_failover);
+	queue_work(pxd_dev->fp.wq, &head->wi);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
@@ -888,7 +882,6 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 
 	BUG_ON(!pxd_dev->fp.state);
 
-	spin_lock(&pxd_dev->fp.suspend_lock);
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
 		do {
@@ -897,7 +890,6 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 		} while (cmpxchg(&statep->suspend, old, new) != old);
 	}
 	BUG_ON(new <= 0);
-	spin_unlock(&pxd_dev->fp.suspend_lock);
 	if (!old) {
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 	} else {
@@ -907,12 +899,10 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 
 void pxd_resume_io(struct pxd_device *pxd_dev)
 {
-	LIST_HEAD(tmpQ);
 	bool wakeup;
 	int cpu, new = 0, old = 0;
 
 	BUG_ON(!pxd_dev->fp.state);
-	spin_lock(&pxd_dev->fp.suspend_lock);
 	for_each_online_cpu(cpu) {
 		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
 		do {
@@ -922,36 +912,8 @@ void pxd_resume_io(struct pxd_device *pxd_dev)
 	}
 	BUG_ON(new < 0);
 	wakeup = (new == 0);
-	if (wakeup) list_splice_init(&pxd_dev->fp.suspend_queue, &tmpQ);
-	spin_unlock(&pxd_dev->fp.suspend_lock);
 	if (wakeup) {
-		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
-		while (!list_empty(&tmpQ)) {
-			bool freeme = true;
-			struct pxd_io_tracker *head = list_first_entry(&tmpQ, struct pxd_io_tracker, item);
-			BUG_ON(head->magic != PXD_IOT_MAGIC);
-			list_del(&head->item);
-
-			// NOTE NOTE pxd_dev may not be in fastpath
-			if (!pxd_dev->connected || pxd_dev->removing) {
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
-				BIO_ENDIO(head->orig, -ENXIO);
-			} else if (pxd_dev->fp.fastpath) {
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in fastpath.\n", __func__, pxd_dev->dev_id);
-				freeme = false;
-				pxd_process_io(head);
-			} else {
-				// switch to native path
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
-				atomic_inc(&pxd_dev->fp.nslowPath);
-				pxd_make_request_slowpath(pxd_dev->disk->queue, head->orig);
-			}
-
-			if (freeme) {
-				__pxd_cleanup_block_io(head);
-			}
-		}
-		pxd_check_q_decongested(pxd_dev);
+		printk("For pxd device %llu IO resumed(%d)\n", pxd_dev->dev_id, new);
 	} else {
 		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, new);
 	}
@@ -1102,8 +1064,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
 		return -ENOMEM;
 	}
-	spin_lock_init(&fp->suspend_lock);
-	INIT_LIST_HEAD(&fp->suspend_queue);
 	fp->wq = alloc_workqueue("pxd%llu", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
 	if (!fp->wq) {
 		free_percpu(fp->state);
@@ -1114,7 +1074,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	// failover init
 	spin_lock_init(&fp->fail_lock);
 	fp->active_failover = PXD_FP_FAILOVER_NONE;
-	INIT_DELAYED_WORK(&fp->fowi, pxd_failover_watcher);
 	fp->force_fail = false; // debug to force faspath failover
 
 	init_waitqueue_head(&fp->sync_event);
@@ -1142,7 +1101,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
-	cancel_delayed_work(&pxd_dev->fp.fowi);
 	disableFastPath(pxd_dev, false);
 
 	if (pxd_dev->fp.state) {
@@ -1323,25 +1281,10 @@ out:
 }
 
 /*** debug routines */
-int pxd_suspend_state(struct pxd_device *pxd_dev, int *count)
+int pxd_suspend_state(struct pxd_device *pxd_dev)
 {
-	int suspend;
-	int ncount = 0;
-	int cpu = smp_processor_id();
-	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-	suspend =  READ_ONCE(statep->suspend);
-
-	if (suspend) {
-		struct list_head *item;
-		spin_lock(&pxd_dev->fp.suspend_lock);
-		list_for_each(item, &pxd_dev->fp.suspend_queue) {
-			ncount++;
-		}
-		spin_unlock(&pxd_dev->fp.suspend_lock);
-	}
-
-	*count = ncount;
-	return suspend;
+	struct pcpu_fpstate *statep = this_cpu_ptr(pxd_dev->fp.state);
+	return READ_ONCE(statep->suspend);
 }
 
 int pxd_switch_fastpath(struct pxd_device* pxd_dev)
@@ -1354,7 +1297,8 @@ int pxd_switch_nativepath(struct pxd_device* pxd_dev)
 	if (pxd_dev->fp.fastpath) {
 		printk(KERN_WARNING"pxd_dev %llu in fastpath, forcing failover\n",
 			pxd_dev->dev_id);
-		pxd_dev->fp.force_fail = true;
+		//pxd_dev->fp.force_fail = true;
+		disableFastPath(pxd_dev, false);
 	} else {
 		printk(KERN_WARNING"pxd_dev %llu in already in native path, skipping failover\n",
 			pxd_dev->dev_id);

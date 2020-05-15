@@ -19,6 +19,7 @@ struct pxd_context;
 typedef enum pxd_failover_state {
         PXD_FP_FAILOVER_NONE = 0,
         PXD_FP_FAILOVER_ACTIVE = 1,
+        PXD_FP_FAILOVER_COMPLETE = 2,
 } pxd_failover_state_t;
 
 // Added metadata for each bio
@@ -60,11 +61,8 @@ struct pxd_fastpath_extension {
 	struct workqueue_struct *wq;
 	// if set, then newer IOs shall block, until reactivated.
 	struct pcpu_fpstate *state;
-	spinlock_t suspend_lock;
-	struct list_head  suspend_queue;
 
 	// failover work item
-	struct delayed_work fowi;
 	spinlock_t  fail_lock;
 	pxd_failover_state_t active_failover;
 	// debug
@@ -120,7 +118,7 @@ int pxd_device_congested(void *, int);
 int get_thread_count(int id);
 
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque);
-int pxd_suspend_state(struct pxd_device *pxd_dev, int*);
+int pxd_suspend_state(struct pxd_device *pxd_dev);
 int pxd_switch_fastpath(struct pxd_device*);
 int pxd_switch_nativepath(struct pxd_device*);
 void pxd_suspend_io(struct pxd_device*);
