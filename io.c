@@ -798,25 +798,22 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	if (force_nonblock)
 		return -EAGAIN;
 
-	if (unlikely(!(req->file->f_mode & FMODE_WRITE)))
-		return -EINVAL;
-
-	if (unlikely(!req->file->f_op->fallocate)) {
-		pr_info("%s: fallocate is NULL", __func__);
-		return -EOPNOTSUPP;
+	if (unlikely(!(req->file->f_mode & FMODE_WRITE))) {
+		ret = -EINVAL;
+	} else if (unlikely(!req->file->f_op->fallocate)) {
+		printk("%s: fallocate is NULL", __func__);
+		ret = -EOPNOTSUPP;
+	} else {
+		ret = req->file->f_op->fallocate(req->file, mode, off, bytes);
+		if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+			ret = -EIO;
 	}
 
-	ret = req->file->f_op->fallocate(req->file, mode, off, bytes);
-	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-		ret = -EIO;
+	io_cqring_add_event(req->ctx, req->user_data, ret);
+	io_put_req(req);
 
-	// only for success do the below, as its done through the wq caller context
-	if (!ret) {
-		io_cqring_add_event(req->ctx, req->user_data, ret);
-		io_put_req(req);
-	}
-
-	return ret;
+	// always pass submission
+	return 0;
 }
 
 static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
@@ -824,7 +821,7 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 {
 	struct file *file = req->file;
 	struct inode *inode = file->f_mapping->host;
-	int ret = -EINVAL;
+	int ret = -EOPNOTSUPP;
 
 	/* syncfs always requires a blocking context */
 	if (force_nonblock)
@@ -838,17 +835,13 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 	} else if (S_ISBLK(inode->i_mode)) {
 		struct block_device *bdev = I_BDEV(inode);
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
-	} else {
-		return -EOPNOTSUPP;
 	}
 
-	// only for success do the below, as its done through the wq caller context
-	if (!ret) {
-		io_cqring_add_event(req->ctx, req->user_data, ret);
-		io_put_req(req);
-	}
+	io_cqring_add_event(req->ctx, req->user_data, ret);
+	io_put_req(req);
 
-	return ret;
+	// always pass submission
+	return 0;
 }
 
 /*
