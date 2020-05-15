@@ -1202,7 +1202,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 	pxd_check_q_congested(pxd_dev);
 	if (!pxd_dev->fp.fastpath) {
-		printk_ratelimited(KERN_NOTICE"px has no backing path yet, should take slow path IO.\n");
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}

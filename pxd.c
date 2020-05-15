@@ -245,15 +245,11 @@ static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 int pxd_device_congested(void *data, int bits)
 {
 	struct pxd_device *pxd_dev = data;
-	int cpu = get_cpu();
-	struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-	int suspend = READ_ONCE(statep->suspend);
-
-	put_cpu();
+	struct pcpu_fpstate *statep = this_cpu_ptr(pxd_dev->fp.state);
 
 	// notify congested if device is suspended as well.
 	// modified under lock, read outside lock.
-	if (suspend) {
+	if (READ_ONCE(statep->suspend)) {
 		return 1;
 	}
 
