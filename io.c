@@ -785,6 +785,112 @@ out_free:
 	return ret;
 }
 
+static int io_import_bvec(struct io_ring_ctx *ctx, int rw,
+			   const struct sqe_submit *s, struct iovec **iovec,
+			   struct iov_iter *iter)
+{
+	const struct io_uring_sqe *sqe = s->sqe;
+	uint32_t kidx = u64_to_user_ptr(READ_ONCE(sqe->addr));
+	size_t sqe_len = READ_ONCE(sqe->len);
+	u8 opcode;
+
+	/*
+	 * We're reading ->opcode for the second time, but the first read
+	 * doesn't care whether it's _FIXED or not, so it doesn't matter
+	 * whether ->opcode changes concurrently. The first read does care
+	 * about whether it is a READ or a WRITE, so we don't trust this read
+	 * for that purpose and instead let the caller pass in the read/write
+	 * flag.
+	 */
+	opcode = READ_ONCE(sqe->opcode);
+	if (opcode == IORING_OP_READ_FIXED ||
+	    opcode == IORING_OP_WRITE_FIXED) {
+		int ret = io_import_fixed(ctx, rw, sqe, iter);
+		*iovec = NULL;
+		return ret;
+	}
+
+	if (!s->has_user)
+		return -EFAULT;
+
+	return import_iovec(rw, buf, sqe_len, UIO_FASTIOV, iovec, iter);
+	return 0;
+}
+
+static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
+		    bool force_nonblock)
+{
+	struct iovec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
+	struct kiocb *kiocb = &req->rw;
+	struct iov_iter iter;
+	struct file *file;
+	size_t iov_count;
+	int ret;
+	ssize_t ret2;
+	const struct io_uring_sqe *sqe = s->sqe;	
+
+	ret = io_prep_rw(req, s, force_nonblock);
+	if (ret) {
+		pr_info("%s: io prep rw fail: %d", __func__, ret);
+		return ret;
+	}
+
+	file = kiocb->ki_filp;
+	if (unlikely(!(file->f_mode & FMODE_WRITE)))
+		return -EBADF;
+	if (unlikely(!file->f_op->write_iter)) {
+		pr_info("%s: write iter is NULL", __func__);
+		return -EINVAL;
+	}
+
+	ret = io_import_bvec(req->ctx, WRITE, s, &iovec, &iter);
+	if (ret)
+		return ret;
+
+	iov_count = iov_iter_count(&iter);
+
+	ret = -EAGAIN;
+	if (force_nonblock &&
+	    ((s->sqe->flags & IOSQE_FORCE_ASYNC) || !(kiocb->ki_flags & IOCB_DIRECT))) {
+		/* If ->needs_lock is true, we're already in async context. */
+		if (!s->needs_lock)
+			io_async_list_note(WRITE, req, iov_count);
+		goto out_free;
+	}
+
+	/*
+	 * Open-code file_start_write here to grab freeze protection,
+	 * which will be released by another thread in
+	 * io_complete_rw().  Fool lockdep by telling it the lock got
+	 * released so that it doesn't complain about the held lock when
+	 * we return to userspace.
+	 */
+	if (S_ISREG(file_inode(file)->i_mode)) {
+		__sb_start_write(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE, true);
+		__sb_writers_release(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE);
+	}
+	kiocb->ki_flags |= IOCB_WRITE;
+
+	ret2 = call_write_iter(file, kiocb, &iter);
+	if (!force_nonblock || ret2 != -EAGAIN) {
+		io_rw_done(kiocb, ret2);
+		ret = 0;
+	} else {
+		/*
+		 * If ->needs_lock is true, we're already in async
+		 * context.
+		 */
+		if (!s->needs_lock)
+			io_async_list_note(WRITE, req, iov_count);
+		ret = -EAGAIN;
+	}
+out_free:
+	kfree(iovec);
+	return ret;
+}
+
 /*
  * IORING_OP_NOP just posts a completion event, nothing else.
  */
@@ -1116,6 +1222,9 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		break;
 	case IORING_OP_POLL_REMOVE:
 		ret = io_poll_remove(req, s->sqe);
+		break;
+	case IORING_OP_DATA_SWITCH:
+		ret = io_switch(req, s->sqe, force_nonblock);
 		break;
 	default:
 		ret = -EINVAL;
