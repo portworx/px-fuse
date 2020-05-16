@@ -914,6 +914,7 @@ void pxd_resume_io(struct pxd_device *pxd_dev)
 	wakeup = (new == 0);
 	if (wakeup) {
 		printk("For pxd device %llu IO resumed(%d)\n", pxd_dev->dev_id, new);
+		pxd_check_q_decongested(pxd_dev);
 	} else {
 		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, new);
 	}
