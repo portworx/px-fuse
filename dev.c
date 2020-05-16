@@ -212,8 +212,11 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 	if (req->end)
 		req->end(fc, req, status);
 	fuse_put_unique(fc, uid);
+
 #ifndef __PX_BLKMQ__
 	fuse_request_free(req);
+#else
+	if (!req->pxd_dev->using_blkque) fuse_request_free(req);
 #endif
 }
 
