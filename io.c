@@ -891,6 +891,65 @@ out_free:
 	return ret;
 }
 
+static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	const int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
+	int ret = -EINVAL;
+	const struct io_uring_sqe *sqe = s->sqe;
+	loff_t off = READ_ONCE(sqe->off);
+	loff_t bytes = READ_ONCE(sqe->len);
+	
+	/* discard always requires a blocking context */
+	if (force_nonblock)
+		return -EAGAIN;
+
+	if (unlikely(!(req->file->f_mode & FMODE_WRITE))) {
+		ret = -EINVAL;
+	} else if (unlikely(!req->file->f_op->fallocate)) {
+		printk("%s: fallocate is NULL", __func__);
+		ret = -EOPNOTSUPP;
+	} else {
+		ret = req->file->f_op->fallocate(req->file, mode, off, bytes);
+		if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
+			ret = -EIO;
+	}
+
+	io_cqring_add_event(req->ctx, req->user_data, ret);
+	io_put_req(req);
+
+	// always pass submission
+	return 0;
+}
+
+static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	struct file *file = req->file;
+	struct inode *inode = file->f_mapping->host;
+	int ret = -EOPNOTSUPP;
+
+	/* syncfs always requires a blocking context */
+	if (force_nonblock)
+		return -EAGAIN;
+
+	if (S_ISREG(inode->i_mode)) {
+		struct super_block *sb = file->f_path.dentry->d_sb;
+		down_read(&sb->s_umount);
+		ret = sync_filesystem(sb);
+		up_read(&sb->s_umount);
+	} else if (S_ISBLK(inode->i_mode)) {
+		struct block_device *bdev = I_BDEV(inode);
+		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
+	}
+
+	io_cqring_add_event(req->ctx, req->user_data, ret);
+	io_put_req(req);
+
+	// always pass submission
+	return 0;
+}
+
 /*
  * IORING_OP_NOP just posts a completion event, nothing else.
  */
@@ -1226,15 +1285,18 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	case IORING_OP_DATA_SWITCH:
 		ret = io_switch(req, s->sqe, force_nonblock);
 		break;
+	case IORING_OP_DISCARD_FIXED:
+		ret = io_discard(req, s, force_nonblock);
+		break;	
+	case IORING_OP_SYNCFS_FIXED:
+		ret = io_syncfs(req, s, force_nonblock);
+		break;
 	default:
 		ret = -EINVAL;
 		break;
 	}
 
-	if (ret)
-		return ret;
-
-	return 0;
+	return ret;
 }
 
 static struct async_list *io_async_list_from_sqe(struct io_ring_ctx *ctx,
