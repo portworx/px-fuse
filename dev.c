@@ -26,6 +26,7 @@
 #include <linux/sort.h>
 #include <linux/vmalloc.h>
 #include "pxd_compat.h"
+#include "pxd_core.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)

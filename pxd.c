@@ -1477,12 +1477,12 @@ static ssize_t pxd_debug_store(struct device *dev,
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	switch (buf[0]) {
-	case 'x': /* switch fastpath*/
-		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
-		pxd_switch_fastpath(pxd_dev);
+	case 'Y': /* switch native path through IO failover */
+		printk("dev:%llu - IO native path switch - IO failover\n", pxd_dev->dev_id);
+		pxd_dev->fp.force_fail = true;
 		break;
 	case 'X': /* switch native path */
-		printk("dev:%llu - IO native path switch\n", pxd_dev->dev_id);
+		printk("dev:%llu - IO native path switch - ctrl failover\n", pxd_dev->dev_id);
 		pxd_switch_nativepath(pxd_dev);
 		break;
 	case 's': /* suspend */
@@ -1492,6 +1492,10 @@ static ssize_t pxd_debug_store(struct device *dev,
 	case 'r': /* resume */
 		printk("dev:%llu - IO resume\n", pxd_dev->dev_id);
 		pxd_resume_io(pxd_dev);
+		break;
+	case 'x': /* switch fastpath*/
+		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
+		pxd_switch_fastpath(pxd_dev);
 		break;
 	default:
 		/* no action */
@@ -1511,7 +1515,6 @@ static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congesti
 static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
-
 static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);;
 
 static struct attribute *pxd_attrs[] = {
