@@ -808,6 +808,7 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
+static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
@@ -831,7 +832,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (pxd_dev) {
 		module_put(THIS_MODULE);
 
-		// TODO need to revise setting based on new parameters
+		if (add->enable_fp) {
+			__pxd_update_path(pxd_dev, &add->paths);
+		} else {
+			disableFastPath(pxd_dev, false);
+		}
 		return pxd_dev->minor;
 	}
 
@@ -861,7 +866,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->using_blkque = !add->enable_fp;
-	pxd_dev->strict = add->strict;
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -872,9 +876,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->nr_congestion_off = 0;
 	atomic_set(&pxd_dev->ncount, 0);
 
-
-	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d(%d) npath %lu\n",
-			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->strict, add->paths.count);
+	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
+			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
 
 	// initializes fastpath context part of pxd_dev
 	err = pxd_fastpath_init(pxd_dev);
@@ -1070,14 +1073,14 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-	/// This seems risky to update paths on the fly while the px device is active
-	/// Need to confirm behavior while IOs are active and handle it right!!!!
 	if (pxd_dev->using_blkque) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
+	} else if (pxd_dev->fp.fastpath) {
+		printk(KERN_ERR"%llu: device already in fast path - cannot update\n", pxd_dev->dev_id);
+		return -EINVAL;
 	}
 	return pxd_init_fastpath_target(pxd_dev, update_path);
-
 }
 
 ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path)

@@ -1130,13 +1130,11 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	printk("device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
 			pxd_dev->dev_id, mode, modestr, update_path->count);
 
-	// fastpath cannot be active while updating paths
-	disableFastPath(pxd_dev, false);
+	pxd_suspend_io(pxd_dev);
+	// update only the path below
 	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 			update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
-		BUG_ON(pxd_dev->fp.file[i]);
-
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i], MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
 		pxd_printk("dev %llu: successfully installed fastpath %s\n",
@@ -1144,8 +1142,9 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	}
 	pxd_dev->fp.nfd = update_path->count;
 	enableFastPath(pxd_dev, true);
+	pxd_resume_io(pxd_dev);
 
-	if (!pxd_dev->fp.fastpath && pxd_dev->strict) goto out_file_failed;
+	if (!pxd_dev->fp.fastpath) goto out_file_failed;
 
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
@@ -1157,12 +1156,6 @@ out_file_failed:
 	pxd_dev->fp.nfd = 0;
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
-
-	// fail the call if in strict mode.
-	if (pxd_dev->strict) {
-		printk(KERN_ERR"device %llu fastpath setup failed %d\n", pxd_dev->dev_id, err);
-		return err;
-	}
 
 	// Allow fallback to native path and not report failure outside.
 	printk("device %llu setup through nativepath (%d)", pxd_dev->dev_id, err);
