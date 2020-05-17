@@ -1033,6 +1033,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		}
 	}
 	pxd_dev->fp.fastpath = false;
+	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 
 	pxd_resume_io(pxd_dev);
 }
