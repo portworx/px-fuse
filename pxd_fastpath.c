@@ -420,7 +420,8 @@ static void pxd_io_failover(struct work_struct *ws)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
+	if (pxd_dev->fp.fastpath &&
+		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
 		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_COMPLETE;
 		cleanup = true;
 	}
@@ -448,7 +449,8 @@ static void pxd_io_failover(struct work_struct *ws)
 static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_tracker *head)
 {
 	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
+	if (pxd_dev->fp.fastpath &&
+		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
 		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
 		pxd_suspend_io(pxd_dev);
 	}
