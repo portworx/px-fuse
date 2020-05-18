@@ -633,11 +633,8 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 	struct pxd_io_tracker *repl;
 	int index;
 
-	read_lock(&pxd_dev->fp.file_lock);
-
 	head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
 	if (!head) {
-		read_unlock(&pxd_dev->fp.file_lock);
 		return NULL;
 	}
 	pxd_mem_printk("allocated tracker %px, clone bio %px dir %d\n", head, &head->clone, bio_data_dir(bio) == READ);
@@ -657,12 +654,10 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 		}
 	}
 
-	read_unlock(&pxd_dev->fp.file_lock);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	return head;
 
 repl_cleanup:
-	read_unlock(&pxd_dev->fp.file_lock);
 	__pxd_cleanup_block_io(head);
 	return NULL;
 }
@@ -1206,7 +1201,9 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	pxd_check_q_congested(pxd_dev);
+	read_lock(&pxd_dev->fp.file_lock);
 	if (!pxd_dev->fp.fastpath) {
+		read_unlock(&pxd_dev->fp.file_lock);
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}
@@ -1219,6 +1216,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			bio->bi_vcnt, bio->bi_flags);
 
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
+	read_unlock(&pxd_dev->fp.file_lock);
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
 
