@@ -48,7 +48,7 @@ struct pxd_device {
 	mode_t mode;
 	bool using_blkque; // this is persistent, how the block device registered with kernel
 
-#define PXD_ACTIVE(pxd)  (atomic_read(&pxd_dev->ncount))
+#define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
 	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	unsigned int qdepth;
