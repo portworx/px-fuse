@@ -49,19 +49,12 @@ struct pcpu_fpstate {
 
 struct pxd_fastpath_extension {
 	// Extended information
-	int bg_flush_enabled; // dynamically enable bg flush from driver
-	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
-
-	// Below information has to be set through new PXD_UPDATE_PATH ioctl
+	atomic_t suspend;
+	rwlock_t suspend_lock;
 	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
-	rwlock_t file_lock;
-	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
-
 	struct workqueue_struct *wq;
-	// if set, then newer IOs shall block, until reactivated.
-	struct pcpu_fpstate *state;
 
 	// failover work item
 	spinlock_t  fail_lock;
@@ -69,6 +62,10 @@ struct pxd_fastpath_extension {
 	// debug
 	bool force_fail;
 
+	int bg_flush_enabled; // dynamically enable bg flush from driver
+	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
+
+	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 	wait_queue_head_t   sync_event;
 	atomic_t nsync_active; // [global] currently active?
 	atomic_t nsync; // [global] number of forced syncs completed

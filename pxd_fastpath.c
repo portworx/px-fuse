@@ -429,7 +429,6 @@ static void pxd_io_failover(struct work_struct *ws)
 
 	if (cleanup) {
 		disableFastPath(pxd_dev, true);
-		pxd_resume_io(pxd_dev);
 	}
 
 	if (!pxd_dev->connected || pxd_dev->removing) {
@@ -452,7 +451,6 @@ static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_trac
 	if (pxd_dev->fp.fastpath &&
 		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
 		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
-		pxd_suspend_io(pxd_dev);
 	}
 	spin_unlock(&pxd_dev->fp.fail_lock);
 
@@ -880,45 +878,27 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 
 void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
-	int cpu, new = 0, old = 0;
-
-	BUG_ON(!pxd_dev->fp.state);
-
-	for_each_online_cpu(cpu) {
-		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-		do {
-			new = old = READ_ONCE(statep->suspend);
-			new = statep->suspend + 1;
-		} while (cmpxchg(&statep->suspend, old, new) != old);
-	}
-	BUG_ON(new <= 0);
-	if (!old) {
+	int curr = atomic_inc_return(&pxd_dev->fp.suspend);
+	if (curr == 1) {
+		write_lock(&pxd_dev->fp.suspend_lock);
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 	} else {
-		printk("For pxd device %llu IO already suspended\n", pxd_dev->dev_id);
+		printk("For pxd device %llu IO already suspended(%d)\n", pxd_dev->dev_id, curr);
 	}
 }
 
 void pxd_resume_io(struct pxd_device *pxd_dev)
 {
 	bool wakeup;
-	int cpu, new = 0, old = 0;
+	int curr = atomic_dec_return(&pxd_dev->fp.suspend);
 
-	BUG_ON(!pxd_dev->fp.state);
-	for_each_online_cpu(cpu) {
-		struct pcpu_fpstate *statep = per_cpu_ptr(pxd_dev->fp.state, cpu);
-		do {
-			new = old = READ_ONCE(statep->suspend);
-			new = statep->suspend - 1;
-		} while (cmpxchg(&statep->suspend, old, new) != old);
-	}
-	BUG_ON(new < 0);
-	wakeup = (new == 0);
+	wakeup = (curr == 0);
 	if (wakeup) {
-		printk("For pxd device %llu IO resumed(%d)\n", pxd_dev->dev_id, new);
+		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
+		write_unlock(&pxd_dev->fp.suspend_lock);
 		pxd_check_q_decongested(pxd_dev);
 	} else {
-		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, new);
+		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, curr);
 	}
 }
 
@@ -1017,7 +997,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	pxd_suspend_io(pxd_dev);
 
-	write_lock(&pxd_dev->fp.file_lock);
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
@@ -1037,7 +1016,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 	pxd_dev->fp.fastpath = false;
 	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
-	write_unlock(&pxd_dev->fp.file_lock);
 
 	pxd_resume_io(pxd_dev);
 }
@@ -1065,15 +1043,10 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	// device temporary IO suspend
-	rwlock_init(&fp->file_lock);
-	fp->state = alloc_percpu(struct pcpu_fpstate);
-	if (!fp->state) {
-		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
-		return -ENOMEM;
-	}
+	rwlock_init(&fp->suspend_lock);
+	atomic_set(&fp->suspend, 0);
 	fp->wq = alloc_workqueue("pxd%llu", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
 	if (!fp->wq) {
-		free_percpu(fp->state);
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
 		return -ENOMEM;
 	}
@@ -1109,11 +1082,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
 	disableFastPath(pxd_dev, false);
-
-	if (pxd_dev->fp.state) {
-		free_percpu(pxd_dev->fp.state);
-		pxd_dev->fp.state = NULL;
-	}
 
 	if (pxd_dev->fp.wq) {
 		destroy_workqueue(pxd_dev->fp.wq);
@@ -1201,9 +1169,9 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	pxd_check_q_congested(pxd_dev);
-	read_lock(&pxd_dev->fp.file_lock);
+	read_lock(&pxd_dev->fp.suspend_lock);
 	if (!pxd_dev->fp.fastpath) {
-		read_unlock(&pxd_dev->fp.file_lock);
+		read_unlock(&pxd_dev->fp.suspend_lock);
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		return pxd_make_request_slowpath(q, bio);
 	}
@@ -1216,7 +1184,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			bio->bi_vcnt, bio->bi_flags);
 
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
-	read_unlock(&pxd_dev->fp.file_lock);
+	read_unlock(&pxd_dev->fp.suspend_lock);
 	if (!head) {
 		BIO_ENDIO(bio, -ENOMEM);
 
@@ -1290,8 +1258,7 @@ out:
 /*** debug routines */
 int pxd_suspend_state(struct pxd_device *pxd_dev)
 {
-	struct pcpu_fpstate *statep = this_cpu_ptr(pxd_dev->fp.state);
-	return READ_ONCE(statep->suspend);
+	return atomic_read(&pxd_dev->fp.suspend);
 }
 
 int pxd_switch_fastpath(struct pxd_device* pxd_dev)
