@@ -1270,6 +1270,11 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 			}
 		}
 	}
+
+	// ensure few block properties are still as expected.
+	blk_queue_io_min(q, PXD_LBS);
+	blk_queue_logical_block_size(q, PXD_LBS);
+	blk_queue_physical_block_size(q, PXD_LBS);
 	return;
 
 out:
