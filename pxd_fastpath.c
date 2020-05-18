@@ -421,8 +421,8 @@ static void pxd_io_failover(struct work_struct *ws)
 
 	spin_lock(&pxd_dev->fp.fail_lock);
 	if (pxd_dev->fp.fastpath &&
-		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_ACTIVE) {
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_COMPLETE;
+		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
+		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
 		cleanup = true;
 	}
 	spin_unlock(&pxd_dev->fp.fail_lock);
@@ -447,13 +447,6 @@ static void pxd_io_failover(struct work_struct *ws)
 
 static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_tracker *head)
 {
-	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.fastpath &&
-		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
-	}
-	spin_unlock(&pxd_dev->fp.fail_lock);
-
 	INIT_WORK(&head->wi, pxd_io_failover);
 	queue_work(pxd_dev->fp.wq, &head->wi);
 }
@@ -993,7 +986,10 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int nfd = fp->nfd;
 	int i;
 
-	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) return;
+	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+		return;
+	}
 
 	pxd_suspend_io(pxd_dev);
 

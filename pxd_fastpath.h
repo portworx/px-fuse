@@ -19,7 +19,6 @@ struct pxd_context;
 typedef enum pxd_failover_state {
         PXD_FP_FAILOVER_NONE = 0,
         PXD_FP_FAILOVER_ACTIVE = 1,
-        PXD_FP_FAILOVER_COMPLETE = 2,
 } pxd_failover_state_t;
 
 // Added metadata for each bio
