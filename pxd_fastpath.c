@@ -633,8 +633,11 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 	struct pxd_io_tracker *repl;
 	int index;
 
+	read_lock(&pxd_dev->fp.file_lock);
+
 	head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
 	if (!head) {
+		read_unlock(&pxd_dev->fp.file_lock);
 		return NULL;
 	}
 	pxd_mem_printk("allocated tracker %px, clone bio %px dir %d\n", head, &head->clone, bio_data_dir(bio) == READ);
@@ -654,10 +657,12 @@ struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct 
 		}
 	}
 
+	read_unlock(&pxd_dev->fp.file_lock);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	return head;
 
 repl_cleanup:
+	read_unlock(&pxd_dev->fp.file_lock);
 	__pxd_cleanup_block_io(head);
 	return NULL;
 }
@@ -1017,6 +1022,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	pxd_suspend_io(pxd_dev);
 
+	write_lock(&pxd_dev->fp.file_lock);
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
@@ -1036,6 +1042,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 	pxd_dev->fp.fastpath = false;
 	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+	write_unlock(&pxd_dev->fp.file_lock);
 
 	pxd_resume_io(pxd_dev);
 }
@@ -1063,6 +1070,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	// device temporary IO suspend
+	rwlock_init(&fp->file_lock);
 	fp->state = alloc_percpu(struct pcpu_fpstate);
 	if (!fp->state) {
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
@@ -1272,9 +1280,9 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	}
 
 	// ensure few block properties are still as expected.
-	blk_queue_io_min(q, PXD_LBS);
-	blk_queue_logical_block_size(q, PXD_LBS);
-	blk_queue_physical_block_size(q, PXD_LBS);
+	blk_queue_io_min(topque, PXD_LBS);
+	blk_queue_logical_block_size(topque, PXD_LBS);
+	blk_queue_physical_block_size(topque, PXD_LBS);
 	return;
 
 out:

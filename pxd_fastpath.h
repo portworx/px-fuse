@@ -56,6 +56,7 @@ struct pxd_fastpath_extension {
 	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
+	rwlock_t file_lock;
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
 	struct workqueue_struct *wq;
