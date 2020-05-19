@@ -842,7 +842,6 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-
 	atomic_inc(&pxd_dev->ncount);
 	// initialize active io to configured replicas
 	if (dir != READ) {
@@ -1112,7 +1111,6 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	pxd_resume_io(pxd_dev);
 
 	if (!pxd_dev->fp.fastpath) goto out_file_failed;
-
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
 out_file_failed:
@@ -1242,7 +1240,6 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	}
 
 	// ensure few block properties are still as expected.
-	blk_queue_io_min(topque, PXD_LBS);
 	blk_queue_logical_block_size(topque, PXD_LBS);
 	blk_queue_physical_block_size(topque, PXD_LBS);
 	return;
