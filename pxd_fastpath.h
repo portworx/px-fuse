@@ -19,13 +19,6 @@
 struct pxd_device;
 struct pxd_context;
 
-// A one-time built, static lookup table to distribute requests to cpu within
-// same numa node
-struct node_cpu_map {
-	int cpu[NR_CPUS];
-	int ncpu;
-};
-
 // Added metadata for each bio
 struct pxd_io_tracker {
 #define PXD_IOT_MAGIC (0xbeefcafe)
@@ -41,23 +34,14 @@ struct pxd_io_tracker {
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
 
+	struct work_struct wi; // work item
+
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
 };
 
-struct pxd_device;
-struct thread_context {
-	spinlock_t  	    read_lock;
-	wait_queue_head_t   read_event;
-	struct list_head iot_readers;
-	struct task_struct *reader[PXD_MAX_THREAD_PER_CPU];
-
-	spinlock_t  	    write_lock;
-	wait_queue_head_t   write_event;
-	struct list_head iot_writers;
-	struct task_struct *writer[PXD_MAX_THREAD_PER_CPU];
-
-	atomic_t ncount;
+struct pcpu_fpstate {
+	int suspend;
 };
 
 struct pxd_fastpath_extension {
@@ -71,15 +55,16 @@ struct pxd_fastpath_extension {
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 
-	struct thread_context *tc;
 	unsigned int qdepth;
 	bool congested;
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
+	struct workqueue_struct *wq;
 	// if set, then newer IOs shall block, until reactivated.
-	int suspend;
-	wait_queue_head_t  suspend_wait;
+	struct pcpu_fpstate *state;
+	spinlock_t suspend_lock;
+	struct list_head  suspend_queue;
 
 	wait_queue_head_t   sync_event;
 	atomic_t nsync_active; // [global] currently active?

@@ -24,8 +24,5 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	return 0; // cannot fail
 }
 
-// return the io count processed by a thread
-int get_thread_count(int id) { return -1; }
-
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque) {}
 #endif
