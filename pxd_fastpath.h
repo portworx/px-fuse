@@ -120,4 +120,5 @@ int pxd_switch_fastpath(struct pxd_device*);
 int pxd_switch_nativepath(struct pxd_device*);
 void pxd_suspend_io(struct pxd_device*);
 void pxd_resume_io(struct pxd_device*);
+void pxd_reroute_fastpath(struct pxd_device *pxd_dev, struct bio *bio);
 #endif /* _PXD_FASTPATH_H_ */

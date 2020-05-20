@@ -93,6 +93,8 @@ blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 #endif
 
+void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
+
 
 static inline
 mode_t open_mode(mode_t mode) {
