@@ -285,15 +285,13 @@ static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	struct pxd_device *pxd_dev = req->pxd_dev;
 	trace_pxd_reply(req->in.unique, 0u);
 
-	read_lock(&pxd_dev->fp.suspend_lock);
-	if (pxd_dev->fp.fastpath && status != 0) {
+	if (status == PX_EROUTE) {
 		/* reroute traffic through fast path */
 		pxd_reroute_fastpath(pxd_dev, req->bio);
 	} else {
 		pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 		BIO_ENDIO(req->bio, status);
 	}
-	read_unlock(&pxd_dev->fp.suspend_lock);
 	pxd_request_complete(fc, req);
 }
 
@@ -306,15 +304,13 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 #else
 	trace_pxd_reply(req->in.unique, REQ_WRITE);
 #endif
-	read_lock(&pxd_dev->fp.suspend_lock);
-	if (pxd_dev->fp.fastpath && status != 0) {
+	if (status == PX_EROUTE) {
 		/* reroute traffic through fast path */
 		pxd_reroute_fastpath(pxd_dev, req->bio);
 	} else {
 		pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 		BIO_ENDIO(req->bio, status);
 	}
-	read_unlock(&pxd_dev->fp.suspend_lock);
 	pxd_request_complete(fc, req);
 }
 

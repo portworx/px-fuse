@@ -226,6 +226,7 @@ struct pxd_rdwr_in_v1 {
 
 /** completion of user operation */
 struct pxd_completion {
+#define PX_EROUTE (-251)
 	uint64_t user_data;	/**< user data passed in request */
 	int32_t res;		/**< result code */
 };
