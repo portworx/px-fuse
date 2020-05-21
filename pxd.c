@@ -643,10 +643,10 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
+			    pxd_dev->minor, req_op(rq), rq->cmd_flags, false)) {
 #else
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, rq->cmd_flags)) {
+			    pxd_dev->minor, rq->cmd_flags, false)) {
 #endif
 			fuse_request_free(req);
 			spin_lock_irq(&pxd_dev->qlock);
