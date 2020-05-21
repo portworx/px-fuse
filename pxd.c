@@ -552,6 +552,7 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 
 	req->bio = bio;
 	req->queue = q;
+	pxd_mark_failover(&req->pxd_rdwr_in);
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }

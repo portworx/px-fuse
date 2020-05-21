@@ -220,9 +220,15 @@ struct pxd_rdwr_in_v1 {
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
 	uint64_t chksum;	/**< buffer checksum */
-	uint32_t pad;
+	uint8_t pad[3];
+	uint8_t failover;
 	uint64_t offset;	/**< device offset in bytes */
 };
+
+static inline void pxd_mark_failover_v1(struct pxd_rdwr_in_v1 *rw)
+{
+	rw->failover = 1;
+}
 
 /** completion of user operation */
 struct pxd_completion {
