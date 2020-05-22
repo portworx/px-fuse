@@ -78,7 +78,8 @@ enum pxd_opcode {
 /** Device identification passed from kernel on initialization */
 struct pxd_dev_id {
 	uint32_t local_minor; 	/**< minor number assigned by kernel */
-	uint32_t pad;
+	uint8_t pad[3];
+	uint8_t fastpath:1, blkmq_device:1, unused:6;
 	uint64_t dev_id;	/**< global device id */
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
