@@ -203,37 +203,23 @@ struct pxd_rdwr_in {
 
 	pxd_rdwr_in() = default;
 #endif
-	uint8_t  pad[3];
-	uint8_t  failover;	/**< IO fails over from fast path */
 	uint16_t dev_minor;	/**< minor device number */
 	uint16_t flags;		/**< bio flags */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint64_t offset;	/**< device offset in bytes */
 };
 
-static inline void pxd_mark_failover(struct pxd_rdwr_in *rw)
-{
-	rw->failover = 1;
-}
-
 struct pxd_rdwr_in_v1 {
 	uint32_t dev_minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
+        uint32_t pad; 
 	uint64_t chksum;	/**< buffer checksum */
-	uint8_t pad[3];
-	uint8_t failover;
 	uint64_t offset;	/**< device offset in bytes */
 };
 
-static inline void pxd_mark_failover_v1(struct pxd_rdwr_in_v1 *rw)
-{
-	rw->failover = 1;
-}
-
 /** completion of user operation */
 struct pxd_completion {
-#define PX_EROUTE (-251)
 	uint64_t user_data;	/**< user data passed in request */
 	int32_t res;		/**< result code */
 };

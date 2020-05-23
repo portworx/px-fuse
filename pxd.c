@@ -282,35 +282,22 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
-	struct pxd_device *pxd_dev = req->pxd_dev;
 	trace_pxd_reply(req->in.unique, 0u);
-
-	if (status == PX_EROUTE) {
-		/* reroute traffic through fast path */
-		pxd_reroute_fastpath(pxd_dev, req->bio);
-	} else {
-		pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
-		BIO_ENDIO(req->bio, status);
-	}
+	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
 }
 
 static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
-	struct pxd_device *pxd_dev = req->pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	trace_pxd_reply(req->in.unique, REQ_OP_WRITE);
 #else
 	trace_pxd_reply(req->in.unique, REQ_WRITE);
 #endif
-	if (status == PX_EROUTE) {
-		/* reroute traffic through fast path */
-		pxd_reroute_fastpath(pxd_dev, req->bio);
-	} else {
-		pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
-		BIO_ENDIO(req->bio, status);
-	}
+	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
+	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
 }
 
@@ -366,13 +353,11 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 }
 
 static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool failover)
+			uint32_t minor, uint32_t flags)
 {
 	req->pxd_rdwr_in.dev_minor = minor;
 	req->pxd_rdwr_in.offset = off;
 	req->pxd_rdwr_in.size = size;
-	req->pxd_rdwr_in.failover = (uint8_t)failover;
-	memset(&req->pxd_rdwr_in.pad, 0, sizeof(req->pxd_rdwr_in.pad));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	req->pxd_rdwr_in.flags =
 		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
@@ -386,7 +371,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 
 static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool failover)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_READ;
 	if (!req->using_blkque) {
@@ -395,11 +380,11 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		req->end = pxd_process_read_reply_q;
 	}
 
-	pxd_req_misc(req, size, off, minor, flags, failover);
+	pxd_req_misc(req, size, off, minor, flags);
 }
 
 static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool failover)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_WRITE;
 	if (!req->using_blkque) {
@@ -408,14 +393,14 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		req->end = pxd_process_write_reply_q;
 	}
 
-	pxd_req_misc(req, size, off, minor, flags, failover);
+	pxd_req_misc(req, size, off, minor, flags);
 
 	if (pxd_detect_zero_writes && req->pxd_rdwr_in.size != 0)
 		fuse_convert_zero_writes(req);
 }
 
 static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool failover)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_DISCARD;
 	if (!req->using_blkque) {
@@ -424,11 +409,11 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 		req->end = pxd_process_write_reply_q;
 	}
 
-	pxd_req_misc(req, size, off, minor, flags, failover);
+	pxd_req_misc(req, size, off, minor, flags);
 }
 
 static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags, bool failover)
+			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_WRITE_SAME;
 	if (!req->using_blkque) {
@@ -437,35 +422,35 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 		req->end = pxd_process_write_reply_q;
 	}
 
-	pxd_req_misc(req, size, off, minor, flags, failover);
+	pxd_req_misc(req, size, off, minor, flags);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t op, uint32_t flags, bool failover)
+			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	atomic_inc(&req->pxd_dev->ncount);
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
-		pxd_write_same_request(req, size, off, minor, flags, failover);
+		pxd_write_same_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_WRITE:
-		pxd_write_request(req, size, off, minor, flags, failover);
+		pxd_write_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_READ:
-		pxd_read_request(req, size, off, minor, flags, failover);
+		pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags, failover);
+		pxd_discard_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_FLUSH:
-		pxd_write_request(req, 0, 0, minor, REQ_FUA, failover);
+		pxd_write_request(req, 0, 0, minor, REQ_FUA);
 		break;
 	default:
-		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x, failover=%d\n",
-			req->in.unique, op, size, off, minor, flags, failover);
+		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
+			req->in.unique, op, size, off, minor, flags);
 		return -1;
 	}
 
@@ -475,7 +460,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #else
 
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
-	uint32_t minor, uint32_t flags, bool failover)
+	uint32_t minor, uint32_t flags)
 {
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
@@ -485,21 +470,21 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		/* FALLTHROUGH */
 	case (REQ_WRITE | REQ_WRITE_SAME):
 		if (flags & REQ_WRITE_SAME)
-			pxd_write_same_request(req, size, off, minor, flags, failover);
+			pxd_write_same_request(req, size, off, minor, flags);
 		else
-			pxd_write_request(req, size, off, minor, flags, failover);
+			pxd_write_request(req, size, off, minor, flags);
 		break;
 	case 0:
-		pxd_read_request(req, size, off, minor, flags, failover);
+		pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
 	case REQ_WRITE | REQ_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags, failover);
+		pxd_discard_request(req, size, off, minor, flags);
 		break;
 	default:
-		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x, failover=%d\n",
-			req->in.unique, flags, size, off, minor, flags, failover);
+		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
+			req->in.unique, flags, size, off, minor, flags);
 		return -1;
 	}
 
@@ -540,10 +525,10 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 	req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf, true)) {
+		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
 #else
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw, true)) {
+		    pxd_dev->minor, bio->bi_rw)) {
 #endif
 		fuse_request_free(req);
 		bio_io_error(bio);
@@ -552,7 +537,6 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 
 	req->bio = bio;
 	req->queue = q;
-	pxd_mark_failover(&req->pxd_rdwr_in);
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }
@@ -589,10 +573,10 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf, false)) {
+		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
 #else
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw, false)) {
+		    pxd_dev->minor, bio->bi_rw)) {
 #endif
 		fuse_request_free(req);
 		bio_io_error(bio);
@@ -644,10 +628,10 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, req_op(rq), rq->cmd_flags, false)) {
+			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 #else
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-			    pxd_dev->minor, rq->cmd_flags, false)) {
+			    pxd_dev->minor, rq->cmd_flags)) {
 #endif
 			fuse_request_free(req);
 			spin_lock_irq(&pxd_dev->qlock);
@@ -687,7 +671,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	req->using_blkque = true;
 	req->pxd_dev = pxd_dev;
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-		pxd_dev->minor, req_op(rq), rq->cmd_flags, false)) {
+		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 		return BLK_STS_IOERR;
 	}
 
