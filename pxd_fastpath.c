@@ -1127,56 +1127,6 @@ out_file_failed:
 	return 0;
 }
 
-void pxd_reroute_fastpath(struct pxd_device *pxd_dev, struct bio *bio)
-{
-	int rw = bio_data_dir(bio);
-	struct pxd_io_tracker *head;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	if (!pxd_dev) {
-#else
-	if (rw == READA) rw = READ;
-	if (!pxd_dev || (rw != READ && rw != WRITE)) {
-#endif
-		printk_ratelimited(KERN_ERR"pxd basic sanity fail, pxd_device %px (%llu), rw %#x\n",
-				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
-		bio_io_error(bio);
-		return;
-	}
-
-	if (!pxd_dev->connected || pxd_dev->removing) {
-		printk_ratelimited(KERN_ERR"px is disconnected, failing IO.\n");
-		bio_io_error(bio);
-		return;
-	}
-
-	if (rw != READ && !write_allowed(pxd_dev->mode)) {
-		printk_ratelimited(KERN_ERR"px device %llu is read only, failing IO.\n", pxd_dev->dev_id);
-		bio_io_error(bio);
-		return;
-	}
-
-	// avoid checking for congestion again
-	read_lock(&pxd_dev->fp.suspend_lock);
-	if (!pxd_dev->fp.fastpath) {
-		read_unlock(&pxd_dev->fp.suspend_lock);
-		printk_ratelimited(KERN_ERR"px device %llu is in native path, cannot reroute to fastpath IO.\n", pxd_dev->dev_id);
-		bio_io_error(bio);
-		return;
-	}
-
-	head = __pxd_init_block_head(pxd_dev, bio, rw);
-	read_unlock(&pxd_dev->fp.suspend_lock);
-	if (!head) {
-		BIO_ENDIO(bio, -ENOMEM);
-
-		// trivial high memory pressure failing IO
-		return;
-	}
-
-	pxd_process_io(head);
-}
-
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
