@@ -374,7 +374,7 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_READ;
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_read_reply;
 	} else {
 		req->end = pxd_process_read_reply_q;
@@ -387,7 +387,7 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_WRITE;
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_write_reply;
 	} else {
 		req->end = pxd_process_write_reply_q;
@@ -403,7 +403,7 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_DISCARD;
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_write_reply;
 	} else {
 		req->end = pxd_process_write_reply_q;
@@ -416,7 +416,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 			uint32_t minor, uint32_t flags)
 {
 	req->in.opcode = PXD_WRITE_SAME;
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_write_reply;
 	} else {
 		req->end = pxd_process_write_reply_q;
@@ -507,6 +507,8 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
+// similar function to make_request_slowpath only optimized to ensure its a reroute
+// from fastpath on IO fail.
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -521,7 +523,6 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 		return;
 	}
 
-	req->using_blkque = false;
 	req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
@@ -569,7 +570,6 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-	req->using_blkque = false;
 	req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
@@ -624,7 +624,6 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		req->using_blkque = true;
 		req->pxd_dev = pxd_dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
@@ -668,7 +667,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	blk_mq_start_request(rq);
 
-	req->using_blkque = true;
 	req->pxd_dev = pxd_dev;
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {

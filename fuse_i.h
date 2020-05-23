@@ -45,8 +45,7 @@ struct fuse_conn;
  */
 struct pxd_device;
 struct fuse_req {
-	/** Block IO requests are processed through blk request queue */
-	unsigned using_blkque:1;
+	/** Need to fetch state of device and keep counters updated */
 	struct pxd_device *pxd_dev;
 
 	/** The request input header */
