@@ -724,7 +724,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		// add hooks to control congestion only while using fastpath
 		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
 		blk_queue_make_request(q, pxd_make_request_fastpath);
-		pxd_dev->using_blkque = false;
 	} else {
 #endif
 
@@ -1503,8 +1502,8 @@ static ssize_t pxd_debug_show(struct device *dev,
 
 	suspend=pxd_suspend_state(pxd_dev);
 	
-	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d\n",
-			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath);
+	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d\n",
+			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque);
 }
 
 static ssize_t pxd_debug_store(struct device *dev,
