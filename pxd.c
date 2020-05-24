@@ -1503,7 +1503,6 @@ static ssize_t pxd_debug_show(struct device *dev,
 	int suspend;
 
 	suspend=pxd_suspend_state(pxd_dev);
-	
 	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d\n",
 			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque);
 }

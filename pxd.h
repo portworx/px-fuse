@@ -213,7 +213,7 @@ struct pxd_rdwr_in_v1 {
 	uint32_t dev_minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
-        uint32_t pad; 
+	uint32_t pad; 
 	uint64_t chksum;	/**< buffer checksum */
 	uint64_t offset;	/**< device offset in bytes */
 };
