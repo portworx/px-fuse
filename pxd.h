@@ -38,10 +38,10 @@
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
-// use by fastpath for congestion control
-#define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
 // NOTE: nvme devices can go upto 1023 queue depth
 #define MAX_CONGESTION_THRESHOLD (1024)
+// use by fastpath for congestion control
+#define DEFAULT_CONGESTION_THRESHOLD MAX_CONGESTION_THRESHOLD
 
 #define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
 #define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
@@ -78,7 +78,8 @@ enum pxd_opcode {
 /** Device identification passed from kernel on initialization */
 struct pxd_dev_id {
 	uint32_t local_minor; 	/**< minor number assigned by kernel */
-	uint32_t pad;
+	uint8_t pad[3];
+	uint8_t fastpath:1, blkmq_device:1, unused:6;
 	uint64_t dev_id;	/**< global device id */
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
@@ -130,7 +131,7 @@ struct pxd_add_ext_out {
 	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
 	int     enable_fp; /**< enable fast path */
-	bool strict; /***< if strict, then fastpath attach fails if dependencies fail, if not, attach fallback to native path */
+	bool strict; /***< unused, always allow fallback */
 	struct pxd_update_path_out paths; /**< backing device paths */
 };
 
@@ -202,7 +203,7 @@ struct pxd_rdwr_in {
 
 	pxd_rdwr_in() = default;
 #endif
-	uint16_t dev_minor;		/**< minor device number */
+	uint16_t dev_minor;	/**< minor device number */
 	uint16_t flags;		/**< bio flags */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint64_t offset;	/**< device offset in bytes */
@@ -212,8 +213,8 @@ struct pxd_rdwr_in_v1 {
 	uint32_t dev_minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
+	uint32_t pad; 
 	uint64_t chksum;	/**< buffer checksum */
-	uint32_t pad;
 	uint64_t offset;	/**< device offset in bytes */
 };
 

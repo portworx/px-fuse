@@ -13,11 +13,13 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-// create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
-#define PXD_MAX_THREAD_PER_CPU (8)
-
 struct pxd_device;
 struct pxd_context;
+
+typedef enum pxd_failover_state {
+        PXD_FP_FAILOVER_NONE = 0,
+        PXD_FP_FAILOVER_ACTIVE = 1,
+} pxd_failover_state_t;
 
 // Added metadata for each bio
 struct pxd_io_tracker {
@@ -46,26 +48,23 @@ struct pcpu_fpstate {
 
 struct pxd_fastpath_extension {
 	// Extended information
-	int bg_flush_enabled; // dynamically enable bg flush from driver
-	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
-
-	// Below information has to be set through new PXD_UPDATE_PATH ioctl
+	atomic_t suspend;
+	rwlock_t suspend_lock;
 	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
-	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
-
-	unsigned int qdepth;
-	bool congested;
-	unsigned int nr_congestion_on;
-	unsigned int nr_congestion_off;
-
 	struct workqueue_struct *wq;
-	// if set, then newer IOs shall block, until reactivated.
-	struct pcpu_fpstate *state;
-	spinlock_t suspend_lock;
-	struct list_head  suspend_queue;
 
+	// failover work item
+	spinlock_t  fail_lock;
+	pxd_failover_state_t active_failover;
+	// debug
+	bool force_fail;
+
+	int bg_flush_enabled; // dynamically enable bg flush from driver
+	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
+
+	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 	wait_queue_head_t   sync_event;
 	atomic_t nsync_active; // [global] currently active?
 	atomic_t nsync; // [global] number of forced syncs completed
@@ -80,7 +79,6 @@ struct pxd_fastpath_extension {
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests
 	atomic_t nerror; // [global] total IO error
-	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
 	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
@@ -108,18 +106,18 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 #endif
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
-void disableFastPath(struct pxd_device *pxd_dev);
+void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
 
 // congestion
 int pxd_device_congested(void *, int);
-#ifdef __PX_FASTPATH__
-#define PXD_ACTIVE(pxd)  (atomic_read(&pxd_dev->fp.ncount))
-#else
-#define PXD_ACTIVE(pxd) (0)
-#endif
 
 // return the io count processed by a thread
 int get_thread_count(int id);
 
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque);
+int pxd_suspend_state(struct pxd_device *pxd_dev);
+int pxd_switch_fastpath(struct pxd_device*);
+int pxd_switch_nativepath(struct pxd_device*);
+void pxd_suspend_io(struct pxd_device*);
+void pxd_resume_io(struct pxd_device*);
 #endif /* _PXD_FASTPATH_H_ */
