@@ -97,10 +97,8 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 struct ____cacheline_aligned fuse_queue_writer {
 	uint32_t write;         /** cached write index */
 	uint32_t read;		/** cached read index */
-	spinlock_t lock;	/** writer lock */
-	uint32_t pad_0;
 	uint64_t sequence;        /** next request sequence number */
-	uint64_t pad[5];
+	spinlock_t lock;	/** writer lock */
 };
 
 /** reader control block */
@@ -108,8 +106,6 @@ struct ____cacheline_aligned fuse_queue_reader {
 	uint32_t read;          /** read index updated by reader */
 	uint32_t write;		/** write index updated by writer */
 	uint32_t need_wake_up;	/** if true reader needs wake up call */
-	uint32_t pad;
-	uint64_t pad_2[6];
 };
 
 #else
@@ -124,9 +120,7 @@ struct alignas(64) fuse_queue_writer {
 	uint32_t read;			/** cached read index */
 	pthread_spinlock_t lock;	/** writer lock */
 	bool in_runq;			/** a thread is processing the queue */
-	char pad_1[3];
 	uint64_t sequence;        	/** next request sequence number */
-	uint64_t pad[5];
 };
 
 /** reader control block */
@@ -134,7 +128,6 @@ struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
 	px::spinlock lock;
-	uint64_t pad_2[6];
 };
 
 #endif
