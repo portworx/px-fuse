@@ -1077,7 +1077,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	copied += sizeof(pxd_init);
 
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		struct pxd_dev_id id;
+		struct pxd_dev_id id = {0};
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
 		id.fastpath = 0;
