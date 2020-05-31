@@ -862,7 +862,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (pxd_dev) {
 		module_put(THIS_MODULE);
 
-		if (add->enable_fp) {
+		if (add->enable_fp && add->paths.count > 0) {
 			__pxd_update_path(pxd_dev, &add->paths);
 		} else {
 			disableFastPath(pxd_dev, false);
