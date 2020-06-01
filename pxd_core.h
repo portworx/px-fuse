@@ -47,11 +47,23 @@ struct pxd_device {
 	bool connected;
 	mode_t mode;
 	bool using_blkque; // this is persistent, how the block device registered with kernel
-	bool strict;
+
+#define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
+	// congestion handling
+	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
+	unsigned int qdepth;
+	bool congested;
+	unsigned int nr_congestion_on;
+	unsigned int nr_congestion_off;
+
+	wait_queue_head_t suspend_wq;
 #ifdef __PX_BLKMQ__
         struct blk_mq_tag_set tag_set;
 #endif
 };
+
+void pxd_check_q_congested(struct pxd_device *pxd_dev);
+void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 
 #define pxd_printk(args...)
 //#define pxd_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
@@ -80,6 +92,8 @@ blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 #else
 void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 #endif
+
+void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
 
 
 static inline
