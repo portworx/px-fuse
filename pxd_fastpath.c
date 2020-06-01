@@ -472,6 +472,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_io_tracker *head = iot->head;
 	bool dofree = true;
 
+	fput(iot->file);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
@@ -603,7 +604,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	iot->start = jiffies;
 	atomic_set(&iot->active, 0);
 	atomic_set(&iot->fails, 0);
-	iot->file = fileh;
+	iot->file = get_file(fileh);
 	INIT_WORK(&iot->wi, pxd_process_fileio);
 
 	clone_bio->bi_private = pxd_dev;
