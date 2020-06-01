@@ -146,6 +146,21 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	return pxd_read_init(&ctx->fc, &iter);
 }
 
+static long pxd_ioctl_resize(struct file *file, void __user *argp)
+{
+	struct pxd_update_size_out update_args;
+	long ret = 0;
+	if (copy_from_user(&update_args, argp, sizeof(update_args))) {
+		return -EFAULT;
+	}
+
+	printk(KERN_ALERT "%s: id: %llu size: %lu\n", __func__, update_args.dev_id,
+		update_args.size);
+	ret = pxd_ioc_update_size(&pxd_contexts[0].fc, &update_args);
+	printk(KERN_ALERT "%s: done: %lu\n", __func__, ret);
+	return ret;
+}
+
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -183,6 +198,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_init(file, (void __user *)arg);
 	case PXD_IOC_RUN_USER_QUEUE:
 		return pxd_ioctl_run_user_queue(file);
+	case PXD_IOC_RESIZE:
+		return pxd_ioctl_resize(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -894,6 +911,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->ctx = ctx;
 	pxd_dev->connected = true; // fuse slow path connection
 	pxd_dev->size = add->size;
+	printk(KERN_ALERT "%s: ... [%llu %lu %lu]\n", __func__,
+			pxd_dev->dev_id, pxd_dev->size, add->size);
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->using_blkque = !add->enable_fp;
 
@@ -1024,6 +1043,12 @@ out:
 
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
 {
+	printk(KERN_ALERT "%s: ... err: %d\n", __func__, -EOPNOTSUPP);
+	return -EOPNOTSUPP;
+}
+
+ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
+{
 	bool found = false;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	int err;
@@ -1044,6 +1069,13 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 		goto out;
 	}
 
+	printk(KERN_ALERT "%s: old: [%llu %lu] newsz: %lu\n", __func__,
+		pxd_dev->dev_id, pxd_dev->size, update_size->size);
+	if (update_size->size < pxd_dev->size) {
+		spin_unlock(&pxd_dev->lock);
+		err = -EINVAL;
+		goto out;
+	}
 	(void)get_device(&pxd_dev->dev);
 
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
