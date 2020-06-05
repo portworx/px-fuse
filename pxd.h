@@ -20,7 +20,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 10				/**< driver version */
+#define PXD_VERSION 11				/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -156,11 +156,12 @@ struct pxd_read_data_out {
 };
 
 /**
- * PXD_UPDATE_SIZE request from user space
+ * PXD_UPDATE_SIZE ioctl from user space
  */
 struct pxd_update_size_out {
 	uint64_t dev_id;
 	size_t size;
+	int context_id;
 };
 
 /**

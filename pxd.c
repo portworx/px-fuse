@@ -148,18 +148,28 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 
 static long pxd_ioctl_resize(struct file *file, void __user *argp)
 {
-	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
+	struct pxd_context *ctx = NULL;
 	struct pxd_update_size_out update_args;
-
-	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
-		return -EFAULT;
-	}
+	long ret = 0;
 
 	if (copy_from_user(&update_args, argp, sizeof(update_args))) {
 		return -EFAULT;
 	}
 
-	return pxd_ioc_update_size(&ctx->fc, &update_args);
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+		return -EFAULT;
+	}
+
+	ctx =  &pxd_contexts[update_args.context_id];
+	if (update_args.context_id >= pxd_num_contexts_exported) {
+		printk("%s : invalid context: %d\n", __func__, update_args.context_id);
+		return -EFAULT;
+	}
+
+	printk(KERN_ALERT "%s: id: %llu size: %lu ctx_id: %d\n", __func__,
+		update_args.dev_id, update_args.size, update_args.context_id);
+	ret = pxd_ioc_update_size(&ctx->fc, &update_args);
+	return ret;
 }
 
 static long pxd_ioctl_run_user_queue(struct file *file)
