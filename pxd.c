@@ -305,24 +305,24 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
+	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(status));
 #endif
-	pxd_request_complete(fc, req);
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
 static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
+	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(status));
 #endif
-	pxd_request_complete(fc, req);
 }
 
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
@@ -1012,8 +1012,8 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	spin_unlock(&pxd_dev->lock);
 
-	device_unregister(&pxd_dev->dev);
 	pxd_fastpath_cleanup(pxd_dev);
+	device_unregister(&pxd_dev->dev);
 
 	module_put(THIS_MODULE);
 
