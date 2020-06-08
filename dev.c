@@ -210,6 +210,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	u64 uid = req->in.unique;
+	bool using_blkque = req->pxd_dev->using_blkque;
 	if (req->end)
 		req->end(fc, req, status);
 	fuse_put_unique(fc, uid);
@@ -217,7 +218,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 #ifndef __PX_BLKMQ__
 	fuse_request_free(req);
 #else
-	if (!req->pxd_dev->using_blkque) fuse_request_free(req);
+	if (!using_blkque) fuse_request_free(req);
 #endif
 }
 
