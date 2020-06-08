@@ -156,13 +156,13 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 		return -EFAULT;
 	}
 
-	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+	if (update_args.context_id >= pxd_num_contexts_exported) {
+		printk("%s : invalid context: %d\n", __func__, update_args.context_id);
 		return -EFAULT;
 	}
 
 	ctx =  &pxd_contexts[update_args.context_id];
-	if (update_args.context_id >= pxd_num_contexts_exported) {
-		printk("%s : invalid context: %d\n", __func__, update_args.context_id);
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
 		return -EFAULT;
 	}
 
