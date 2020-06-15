@@ -146,6 +146,30 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	return pxd_read_init(&ctx->fc, &iter);
 }
 
+static long pxd_ioctl_resize(struct file *file, void __user *argp)
+{
+	struct pxd_context *ctx = NULL;
+	struct pxd_update_size update_args;
+	long ret = 0;
+
+	if (copy_from_user(&update_args, argp, sizeof(update_args))) {
+		return -EFAULT;
+	}
+
+	if (update_args.context_id >= pxd_num_contexts_exported) {
+		printk("%s : invalid context: %d\n", __func__, update_args.context_id);
+		return -EFAULT;
+	}
+
+	ctx =  &pxd_contexts[update_args.context_id];
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+		return -EFAULT;
+	}
+
+	ret = pxd_ioc_update_size(&ctx->fc, &update_args);
+	return ret;
+}
+
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -183,6 +207,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_init(file, (void __user *)arg);
 	case PXD_IOC_RUN_USER_QUEUE:
 		return pxd_ioctl_run_user_queue(file);
+	case PXD_IOC_RESIZE:
+		return pxd_ioctl_resize(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -1022,7 +1048,12 @@ out:
 	return err;
 }
 
-ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
+ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size)
+{
+	return -EOPNOTSUPP;
+}
+
+ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size)
 {
 	bool found = false;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
@@ -1044,6 +1075,11 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update
 		goto out;
 	}
 
+	if (update_size->size < pxd_dev->size) {
+		spin_unlock(&pxd_dev->lock);
+		err = -EINVAL;
+		goto out;
+	}
 	(void)get_device(&pxd_dev->dev);
 
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
