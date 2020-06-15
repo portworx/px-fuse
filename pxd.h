@@ -19,7 +19,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 9				/**< driver version */
+#define PXD_VERSION 10				/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -28,6 +28,7 @@
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
 #define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 #define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
+#define PXD_IOC_RESIZE			_IO(PXD_IOCTL_MAGIC, 4)		/* 0x505804 */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -146,11 +147,12 @@ struct pxd_read_data_out {
 };
 
 /**
- * PXD_UPDATE_SIZE request from user space
+ * PXD_UPDATE_SIZE ioctl from user space
  */
-struct pxd_update_size_out {
+struct pxd_update_size {
 	uint64_t dev_id;
 	size_t size;
+	int context_id;
 };
 
 /**
