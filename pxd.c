@@ -166,8 +166,6 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 		return -EFAULT;
 	}
 
-	printk(KERN_ALERT "%s: id: %llu size: %lu ctx_id: %d\n", __func__,
-		update_args.dev_id, update_args.size, update_args.context_id);
 	ret = pxd_ioc_update_size(&ctx->fc, &update_args);
 	return ret;
 }
