@@ -149,7 +149,7 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 static long pxd_ioctl_resize(struct file *file, void __user *argp)
 {
 	struct pxd_context *ctx = NULL;
-	struct pxd_update_size_out update_args;
+	struct pxd_update_size update_args;
 	long ret = 0;
 
 	if (copy_from_user(&update_args, argp, sizeof(update_args))) {
@@ -1050,12 +1050,12 @@ out:
 	return err;
 }
 
-ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
+ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size)
 {
 	return -EOPNOTSUPP;
 }
 
-ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
+ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size)
 {
 	bool found = false;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);

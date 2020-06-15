@@ -158,7 +158,7 @@ struct pxd_read_data_out {
 /**
  * PXD_UPDATE_SIZE ioctl from user space
  */
-struct pxd_update_size_out {
+struct pxd_update_size {
 	uint64_t dev_id;
 	size_t size;
 	int context_id;
