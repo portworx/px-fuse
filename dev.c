@@ -796,7 +796,7 @@ static int fuse_notify_remove(struct fuse_conn *conn, unsigned int size,
 static int fuse_notify_update_size(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
-	struct pxd_update_size_out update_size;
+	struct pxd_update_size update_size;
 	size_t len = sizeof(update_size);
 
 	if (copy_from_iter(&update_size, len, iter) != len) {
