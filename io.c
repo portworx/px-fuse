@@ -862,6 +862,7 @@ static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, str
 		*bvec = tmp;
 		bvec++;
 	}
+	bio = rq->bio;
 	offset = 0;
 	bvec = alloc_bvec;
 	*rw = bio_data_dir(bio);
@@ -891,7 +892,7 @@ static int io_import_bvec(struct io_ring_ctx *ctx, int *rw,
                 return -ENOENT;
         }
 
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
                 printk(KERN_ERR "%s: request %lld not support this io path\n", __func__, kidx);
 		return -EPERM;
 	}
