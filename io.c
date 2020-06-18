@@ -72,6 +72,7 @@
 #include <linux/nospec.h>
 #include <linux/sizes.h>
 #include <linux/hugetlb.h>
+#include <linux/blkdev.h>
 
 #include "pxd_io_uring.h"
 #include "io.h"
@@ -690,7 +691,7 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 		return -EINVAL;
 
 	ret = io_import_iovec(req->ctx, READ, s, &iovec, &iter);
-	if (ret)
+	if (ret < 0)
 		return ret;
 
 	iov_count = iov_iter_count(&iter);
@@ -738,7 +739,7 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	}
 
 	ret = io_import_iovec(req->ctx, WRITE, s, &iovec, &iter);
-	if (ret)
+	if (ret < 0)
 		return ret;
 
 	iov_count = iov_iter_count(&iter);
@@ -785,49 +786,130 @@ out_free:
 	return ret;
 }
 
-static int io_import_bvec(struct io_ring_ctx *ctx, int rw,
-			   const struct sqe_submit *s, struct iovec **iovec,
+// return nr_bytes in iovec if successful
+//   < 0 for failure
+#if 0
+static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
+{
+	struct request *rq = req->rq;
+	int nr_bvec;
+        struct bio_vec *bvec = NULL;
+	struct bio_vec *alloc_bvec = NULL;
+	struct bio *bio;
+        struct req_iterator rq_iter;
+	struct bio_vec tmp;
+	unsigned int offset;
+
+	nr_bvec = 0;
+	rq_for_each_bvec(tmp, rq, rq_iter) {
+		nr_bvec++;
+	}
+
+	if (rq->bio == rq->biotail) {
+		offset = bio->bi_iter.bi_bvec_done;
+		bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
+	} else {
+		if (nr_bvec > UIO_FASTIOV) {
+			alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
+				     GFP_NOIO);
+		} else {
+			alloc_bvec = bvec = *iovec;
+		}
+		if (!bvec)
+			return -EIO;
+
+		rq_for_each_bvec(tmp, rq, rq_iter) {
+			*bvec = tmp;
+			bvec++;
+		}
+		offset = 0;
+		bvec = alloc_bvec;
+	}
+
+	*rw = bio_data_dir(bio);
+
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, blk_rq_bytes(rq));
+	iter->iov_offset = offset;
+	return blk_rq_bytes(rq);
+}
+#else
+static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
+{
+	struct request *rq = req->rq;
+	int nr_bvec;
+        struct bio_vec *bvec = NULL;
+	struct bio_vec *alloc_bvec = NULL;
+	struct bio *bio;
+        struct req_iterator rq_iter;
+	struct bio_vec tmp;
+	unsigned int offset;
+
+	nr_bvec = 0;
+	rq_for_each_segment(tmp, rq, rq_iter) {
+		nr_bvec++;
+	}
+
+	if (nr_bvec > UIO_FASTIOV) {
+		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
+			     GFP_NOIO);
+	} else {
+		alloc_bvec = bvec = *iovec;
+	}
+	if (!bvec)
+		return -EIO;
+
+	rq_for_each_segment(tmp, rq, rq_iter) {
+		*bvec = tmp;
+		bvec++;
+	}
+	offset = 0;
+	bvec = alloc_bvec;
+	*rw = bio_data_dir(bio);
+
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, blk_rq_bytes(rq));
+	iter->iov_offset = offset;
+	return blk_rq_bytes(rq);
+}
+#endif
+
+static int io_import_bvec(struct io_ring_ctx *ctx, int *rw,
+			   const struct sqe_submit *s, struct bio_vec **iovec,
 			   struct iov_iter *iter)
 {
 	const struct io_uring_sqe *sqe = s->sqe;
-	uint32_t kidx = u64_to_user_ptr(READ_ONCE(sqe->addr));
-	size_t sqe_len = READ_ONCE(sqe->len);
-	u8 opcode;
-
-	/*
-	 * We're reading ->opcode for the second time, but the first read
-	 * doesn't care whether it's _FIXED or not, so it doesn't matter
-	 * whether ->opcode changes concurrently. The first read does care
-	 * about whether it is a READ or a WRITE, so we don't trust this read
-	 * for that purpose and instead let the caller pass in the read/write
-	 * flag.
-	 */
-	opcode = READ_ONCE(sqe->opcode);
-	if (opcode == IORING_OP_READ_FIXED ||
-	    opcode == IORING_OP_WRITE_FIXED) {
-		int ret = io_import_fixed(ctx, rw, sqe, iter);
-		*iovec = NULL;
-		return ret;
-	}
+	uint64_t kidx = READ_ONCE(sqe->addr);
+	struct fuse_req *req;
+	uint32_t conn_id = kidx >> 32;
+	uint32_t unique_id = kidx & (0xffffffff);
 
 	if (!s->has_user)
 		return -EFAULT;
 
-	return import_iovec(rw, buf, sqe_len, UIO_FASTIOV, iovec, iter);
-	return 0;
+        req = request_find_in_ctx(conn_id, unique_id);
+        if (!req) {
+                printk(KERN_ERR "%s: request %lld not found\n", __func__, kidx);
+                return -ENOENT;
+        }
+
+	if (!req->using_blkque) {
+                printk(KERN_ERR "%s: request %lld not support this io path\n", __func__, kidx);
+		return -EPERM;
+	}
+
+	return build_bvec(req, rw, iovec, iter);
 }
 
 static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		    bool force_nonblock)
 {
-	struct iovec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
+	struct bio_vec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
 	struct kiocb *kiocb = &req->rw;
 	struct iov_iter iter;
 	struct file *file;
 	size_t iov_count;
 	int ret;
 	ssize_t ret2;
-	const struct io_uring_sqe *sqe = s->sqe;	
+	int rw;
 
 	ret = io_prep_rw(req, s, force_nonblock);
 	if (ret) {
@@ -843,8 +925,8 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		return -EINVAL;
 	}
 
-	ret = io_import_bvec(req->ctx, WRITE, s, &iovec, &iter);
-	if (ret)
+	ret = io_import_bvec(req->ctx, &rw, s, &iovec, &iter);
+	if (ret < 0)
 		return ret;
 
 	iov_count = iov_iter_count(&iter);
@@ -858,6 +940,7 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		goto out_free;
 	}
 
+	if (rw == WRITE) {
 	/*
 	 * Open-code file_start_write here to grab freeze protection,
 	 * which will be released by another thread in
@@ -885,6 +968,22 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		if (!s->needs_lock)
 			io_async_list_note(WRITE, req, iov_count);
 		ret = -EAGAIN;
+	}
+	} else {
+	/* Catch -EAGAIN return for forced non-blocking submission */
+	ret2 = call_read_iter(file, kiocb, &iter);
+	if (!force_nonblock || ret2 != -EAGAIN) {
+		io_rw_done(kiocb, ret2);
+		ret = 0;
+	} else {
+		/*
+		 * If ->needs_lock is true, we're already in async
+		 * context.
+		 */
+		if (!s->needs_lock)
+			io_async_list_note(READ, req, iov_count);
+		ret = -EAGAIN;
+	}
 	}
 out_free:
 	kfree(iovec);
@@ -1283,7 +1382,7 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		ret = io_poll_remove(req, s->sqe);
 		break;
 	case IORING_OP_DATA_SWITCH:
-		ret = io_switch(req, s->sqe, force_nonblock);
+		ret = io_switch(req, s, force_nonblock);
 		break;
 	case IORING_OP_DISCARD_FIXED:
 		ret = io_discard(req, s, force_nonblock);

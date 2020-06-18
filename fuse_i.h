@@ -295,5 +295,6 @@ void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *u
 
 void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 
+struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique);
 #endif
 #endif /* _FS_FUSE_I_H */

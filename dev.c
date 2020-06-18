@@ -26,6 +26,7 @@
 #include <linux/sort.h>
 #include <linux/vmalloc.h>
 #include "pxd_compat.h"
+#include "pxd_core.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -496,6 +497,15 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 		return NULL;
 	}
 	return req;
+}
+
+struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
+{
+	struct pxd_context *pctx = find_context(ctx);
+
+	if (!pctx) return NULL;
+
+	return request_find(&pctx->fc, unique);
 }
 
 #define IOV_BUF_SIZE 64

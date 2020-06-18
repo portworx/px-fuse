@@ -28,6 +28,8 @@ struct pxd_context {
 	uint64_t open_seq;
 };
 
+struct pxd_context* find_context(unsigned ctx);
+
 struct pxd_device {
 #define PXD_DEV_MAGIC (0xcafec0de)
 	unsigned int magic;
