@@ -99,5 +99,4 @@
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
 
-
 #endif //GDFS_PXD_COMPAT_H

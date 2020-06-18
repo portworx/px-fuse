@@ -210,11 +210,17 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	u64 uid = req->in.unique;
+#ifdef __PX_BLKMQ__
+	bool using_blkque = req->pxd_dev->using_blkque;
+#endif
 	if (req->end)
 		req->end(fc, req, status);
 	fuse_put_unique(fc, uid);
+
 #ifndef __PX_BLKMQ__
 	fuse_request_free(req);
+#else
+	if (!using_blkque) fuse_request_free(req);
 #endif
 }
 
@@ -341,7 +347,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 
 void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		__fuse_convert_zero_writes_fastpath(req);
 	} else {
 		__fuse_convert_zero_writes_slowpath(req);
@@ -689,7 +695,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
@@ -713,7 +719,7 @@ static int fuse_notify_remove(struct fuse_conn *conn, unsigned int size,
 static int fuse_notify_update_size(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
-	struct pxd_update_size_out update_size;
+	struct pxd_update_size update_size;
 	size_t len = sizeof(update_size);
 
 	if (copy_from_iter(&update_size, len, iter) != len) {
@@ -889,7 +895,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return -ENOENT;
 	}
 
-	if (!req->using_blkque) {
+	if (!req->pxd_dev->using_blkque) {
 		err = __fuse_dev_do_write_fastpath(fc, req, iter);
 	} else {
 		err = __fuse_dev_do_write_slowpath(fc, req, iter);
@@ -979,7 +985,7 @@ void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *u
 		iov_iter_init(&iter, READ, data_iov, ureq->len,
 			iov_length(data_iov, ureq->len));
 
-		ret = !req->using_blkque ?
+		ret = !req->pxd_dev->using_blkque ?
 		      __fuse_dev_do_write_fastpath(fc, req, &iter) :
 		      __fuse_dev_do_write_slowpath(fc, req, &iter);
 

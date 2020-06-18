@@ -998,7 +998,7 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	const struct io_uring_sqe *sqe = s->sqe;
 	loff_t off = READ_ONCE(sqe->off);
 	loff_t bytes = READ_ONCE(sqe->len);
-	
+
 	/* discard always requires a blocking context */
 	if (force_nonblock)
 		return -EAGAIN;
@@ -1386,7 +1386,7 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		break;
 	case IORING_OP_DISCARD_FIXED:
 		ret = io_discard(req, s, force_nonblock);
-		break;	
+		break;
 	case IORING_OP_SYNCFS_FIXED:
 		ret = io_syncfs(req, s, force_nonblock);
 		break;

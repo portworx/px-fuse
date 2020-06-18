@@ -20,7 +20,7 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 10				/**< driver version */
+#define PXD_VERSION 11				/**< driver version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -30,18 +30,19 @@
 #define PXD_IOC_GET_VERSION	_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 #define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
 #define PXD_IOC_RUN_USER_QUEUE	_IO(PXD_IOCTL_MAGIC, 4)		/* 0x505804 */
-#define PXD_IOC_RUN_IO_QUEUE	_IO(PXD_IOCTL_MAGIC, 5)
-#define PXD_IOC_REGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 6)
-#define PXD_IOC_UNREGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 7)
+#define PXD_IOC_RUN_IO_QUEUE	_IO(PXD_IOCTL_MAGIC, 5)		/* 0x505805 */
+#define PXD_IOC_REGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 6)		/* 0x505806 */
+#define PXD_IOC_UNREGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 7)		/* 0x505807 */
+#define PXD_IOC_RESIZE			_IO(PXD_IOCTL_MAGIC, 8)		/* 0x505808 */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
-// use by fastpath for congestion control
-#define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
 // NOTE: nvme devices can go upto 1023 queue depth
 #define MAX_CONGESTION_THRESHOLD (1024)
+// use by fastpath for congestion control
+#define DEFAULT_CONGESTION_THRESHOLD MAX_CONGESTION_THRESHOLD
 
 #define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
 #define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
@@ -78,7 +79,8 @@ enum pxd_opcode {
 /** Device identification passed from kernel on initialization */
 struct pxd_dev_id {
 	uint32_t local_minor; 	/**< minor number assigned by kernel */
-	uint32_t pad;
+	uint8_t pad[3];
+	uint8_t fastpath:1, blkmq_device:1, unused:6;
 	uint64_t dev_id;	/**< global device id */
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
@@ -130,7 +132,7 @@ struct pxd_add_ext_out {
 	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
 	int     enable_fp; /**< enable fast path */
-	bool strict; /***< if strict, then fastpath attach fails if dependencies fail, if not, attach fallback to native path */
+	bool strict; /***< unused, always allow fallback */
 	struct pxd_update_path_out paths; /**< backing device paths */
 };
 
@@ -154,11 +156,12 @@ struct pxd_read_data_out {
 };
 
 /**
- * PXD_UPDATE_SIZE request from user space
+ * PXD_UPDATE_SIZE ioctl from user space
  */
-struct pxd_update_size_out {
+struct pxd_update_size {
 	uint64_t dev_id;
 	size_t size;
+	int context_id;
 };
 
 /**
@@ -202,7 +205,7 @@ struct pxd_rdwr_in {
 
 	pxd_rdwr_in() = default;
 #endif
-	uint16_t dev_minor;		/**< minor device number */
+	uint16_t dev_minor;	/**< minor device number */
 	uint16_t flags;		/**< bio flags */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint64_t offset;	/**< device offset in bytes */
@@ -212,8 +215,8 @@ struct pxd_rdwr_in_v1 {
 	uint32_t dev_minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
+	uint32_t pad; 
 	uint64_t chksum;	/**< buffer checksum */
-	uint32_t pad;
 	uint64_t offset;	/**< device offset in bytes */
 };
 

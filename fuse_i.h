@@ -43,9 +43,10 @@ struct fuse_conn;
 /**
  * A request to the client
  */
+struct pxd_device;
 struct fuse_req {
-	/** Block IO requests are processed through blk request queue */
-	unsigned using_blkque:1;
+	/** Need to fetch state of device and keep counters updated */
+	struct pxd_device *pxd_dev;
 
 	/** The request input header */
 	struct fuse_in_header in;
@@ -280,7 +281,8 @@ int fuse_restart_requests(struct fuse_conn *fc);
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
-ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size);
+ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
+ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 
 // fastpath extension
