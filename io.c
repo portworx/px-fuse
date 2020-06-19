@@ -878,22 +878,21 @@ static int io_import_bvec(struct io_ring_ctx *ctx, int *rw,
 			   struct iov_iter *iter)
 {
 	const struct io_uring_sqe *sqe = s->sqe;
-	uint64_t kidx = READ_ONCE(sqe->addr);
+	uint64_t unique_id = READ_ONCE(sqe->addr);
+	uint32_t conn_id = READ_ONCE(sqe->buf_index);
 	struct fuse_req *req;
-	uint32_t conn_id = kidx >> 32;
-	uint32_t unique_id = kidx & (0xffffffff);
 
 	if (!s->has_user)
 		return -EFAULT;
 
-        req = request_find_in_ctx(conn_id, unique_id);
-        if (!req) {
-                printk(KERN_ERR "%s: request %lld not found\n", __func__, kidx);
-                return -ENOENT;
-        }
+	req = request_find_in_ctx(conn_id, unique_id);
+	if (!req) {
+		printk(KERN_ERR "%s: request %u:%lld not found\n", __func__, conn_id, unique_id);
+		return -ENOENT;
+	}
 
 	if (!req->pxd_dev->using_blkque) {
-                printk(KERN_ERR "%s: request %lld not support this io path\n", __func__, kidx);
+		printk(KERN_ERR "%s: request %lld not support this io path\n", __func__, unique_id);
 		return -EPERM;
 	}
 
@@ -942,52 +941,52 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 	}
 
 	if (rw == WRITE) {
-	/*
-	 * Open-code file_start_write here to grab freeze protection,
-	 * which will be released by another thread in
-	 * io_complete_rw().  Fool lockdep by telling it the lock got
-	 * released so that it doesn't complain about the held lock when
-	 * we return to userspace.
-	 */
-	if (S_ISREG(file_inode(file)->i_mode)) {
-		__sb_start_write(file_inode(file)->i_sb,
-			SB_FREEZE_WRITE, true);
-		__sb_writers_release(file_inode(file)->i_sb,
-			SB_FREEZE_WRITE);
-	}
-	kiocb->ki_flags |= IOCB_WRITE;
+		/*
+		 * Open-code file_start_write here to grab freeze protection,
+		 * which will be released by another thread in
+		 * io_complete_rw().  Fool lockdep by telling it the lock got
+		 * released so that it doesn't complain about the held lock when
+		 * we return to userspace.
+		 */
+		if (S_ISREG(file_inode(file)->i_mode)) {
+			__sb_start_write(file_inode(file)->i_sb,
+				SB_FREEZE_WRITE, true);
+			__sb_writers_release(file_inode(file)->i_sb,
+				SB_FREEZE_WRITE);
+		}
+		kiocb->ki_flags |= IOCB_WRITE;
 
-	ret2 = call_write_iter(file, kiocb, &iter);
-	if (!force_nonblock || ret2 != -EAGAIN) {
-		io_rw_done(kiocb, ret2);
-		ret = 0;
+		ret2 = call_write_iter(file, kiocb, &iter);
+		if (!force_nonblock || ret2 != -EAGAIN) {
+			io_rw_done(kiocb, ret2);
+			ret = 0;
+		} else {
+			/*
+			 * If ->needs_lock is true, we're already in async
+			 * context.
+			 */
+			if (!s->needs_lock)
+				io_async_list_note(WRITE, req, iov_count);
+			ret = -EAGAIN;
+		}
 	} else {
-		/*
-		 * If ->needs_lock is true, we're already in async
-		 * context.
-		 */
-		if (!s->needs_lock)
-			io_async_list_note(WRITE, req, iov_count);
-		ret = -EAGAIN;
-	}
-	} else {
-	/* Catch -EAGAIN return for forced non-blocking submission */
-	ret2 = call_read_iter(file, kiocb, &iter);
-	if (!force_nonblock || ret2 != -EAGAIN) {
-		io_rw_done(kiocb, ret2);
-		ret = 0;
-	} else {
-		/*
-		 * If ->needs_lock is true, we're already in async
-		 * context.
-		 */
-		if (!s->needs_lock)
-			io_async_list_note(READ, req, iov_count);
-		ret = -EAGAIN;
-	}
+		/* Catch -EAGAIN return for forced non-blocking submission */
+		ret2 = call_read_iter(file, kiocb, &iter);
+		if (!force_nonblock || ret2 != -EAGAIN) {
+			io_rw_done(kiocb, ret2);
+			ret = 0;
+		} else {
+			/*
+			 * If ->needs_lock is true, we're already in async
+			 * context.
+			 */
+			if (!s->needs_lock)
+				io_async_list_note(READ, req, iov_count);
+			ret = -EAGAIN;
+		}
 	}
 out_free:
-	kfree(iovec);
+	if (iovec != inline_vecs) kfree(iovec);
 	return ret;
 }
 
