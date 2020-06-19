@@ -788,15 +788,15 @@ out_free:
 
 // return nr_bytes in iovec if successful
 //   < 0 for failure
-#if 0
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
 static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
 {
 	struct request *rq = req->rq;
 	int nr_bvec;
-        struct bio_vec *bvec = NULL;
+	struct bio_vec *bvec = NULL;
 	struct bio_vec *alloc_bvec = NULL;
 	struct bio *bio;
-        struct req_iterator rq_iter;
+	struct req_iterator rq_iter;
 	struct bio_vec tmp;
 	unsigned int offset;
 
@@ -837,10 +837,10 @@ static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, str
 {
 	struct request *rq = req->rq;
 	int nr_bvec;
-        struct bio_vec *bvec = NULL;
+	struct bio_vec *bvec = NULL;
 	struct bio_vec *alloc_bvec = NULL;
 	struct bio *bio;
-        struct req_iterator rq_iter;
+	struct req_iterator rq_iter;
 	struct bio_vec tmp;
 	unsigned int offset;
 
