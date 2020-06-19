@@ -78,6 +78,7 @@
 #include "io.h"
 #include "fuse_i.h"
 #include "pxd_core.h"
+#include "pxd_compat.h"
 
 #include <uapi/linux/eventpoll.h>
 
@@ -832,6 +833,7 @@ static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, str
 	iter->iov_offset = offset;
 	return blk_rq_bytes(rq);
 }
+
 #else
 static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
 {
@@ -873,6 +875,57 @@ static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, str
 }
 #endif
 
+static int build_bvec2(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
+{
+	struct bio *bio = req->bio;
+	int nr_bvec;
+	struct bio_vec *bvec = NULL;
+	struct bio_vec *alloc_bvec = NULL;
+	struct bvec_iter bv_iter;
+	struct bio_vec bv;
+	unsigned int offset;
+
+	nr_bvec = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)
+	bio_for_each_bvec(bv, bio, bv_iter) {
+		nr_bvec++;
+	}
+#else
+	bio_for_each_segment(bv, bio, bv_iter) {
+		nr_bvec++;
+	}
+#endif
+
+	if (nr_bvec > UIO_FASTIOV) {
+		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
+											GFP_NOIO);
+	} else {
+		alloc_bvec = bvec = *iovec;
+	}
+	if (!bvec)
+		return -EIO;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)
+	bio_for_each_bvec(bv, bio, bv_iter) {
+		*bvec = bv;
+		bvec++;
+	}
+#else
+	bio_for_each_segment(bv, bio, bv_iter) {
+		*bvec = bv;
+		bvec++;
+	}
+#endif
+	offset = 0;
+	bvec = alloc_bvec;
+
+	*rw = bio_data_dir(bio);
+
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, BIO_SIZE(bio));
+	iter->iov_offset = offset;
+	return BIO_SIZE(bio);
+}
+
 static int io_import_bvec(struct io_ring_ctx *ctx, int *rw,
 			   const struct sqe_submit *s, struct bio_vec **iovec,
 			   struct iov_iter *iter)
@@ -892,8 +945,7 @@ static int io_import_bvec(struct io_ring_ctx *ctx, int *rw,
 	}
 
 	if (!req->pxd_dev->using_blkque) {
-		printk(KERN_ERR "%s: request %lld not support this io path\n", __func__, unique_id);
-		return -EPERM;
+		return build_bvec2(req, rw, iovec, iter);
 	}
 
 	return build_bvec(req, rw, iovec, iter);
