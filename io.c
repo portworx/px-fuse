@@ -790,63 +790,92 @@ out_free:
 // return nr_bytes in iovec if successful
 //   < 0 for failure
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
-static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
+static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
+						struct bio_vec **iovec, struct iov_iter *iter)
 {
 	struct request *rq = req->rq;
-	int nr_bvec;
+	int nr_bvec = 0;
 	struct bio_vec *bvec = NULL;
 	struct bio_vec *alloc_bvec = NULL;
-	struct bio *bio;
+	struct bio *bio = rq->bio;
 	struct req_iterator rq_iter;
 	struct bio_vec tmp;
-	unsigned int offset;
+	size_t offset = 0;
+	size_t skip;
+	bool map_end = false;
+	size_t map_len = len;
 
-	nr_bvec = 0;
 	rq_for_each_bvec(tmp, rq, rq_iter) {
 		nr_bvec++;
 	}
 
-	if (rq->bio == rq->biotail) {
-		offset = bio->bi_iter.bi_bvec_done;
-		bvec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
+	if (nr_bvec > UIO_FASTIOV) {
+		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
+			     GFP_NOIO);
 	} else {
-		if (nr_bvec > UIO_FASTIOV) {
-			alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
-				     GFP_NOIO);
-		} else {
-			alloc_bvec = bvec = *iovec;
-		}
-		if (!bvec)
-			return -EIO;
+		alloc_bvec = bvec = *iovec;
+	}
+	if (!bvec)
+		return -EIO;
 
-		rq_for_each_bvec(tmp, rq, rq_iter) {
+	skip = off - (BIO_SECTOR(bio) << SECTOR_SHIFT);
+	nr_bvec = 0;
+	rq_for_each_bvec(tmp, rq, rq_iter) {
+		if (!tmp.bv_len) continue;
+		if (skip >= tmp.bv_len) {
+				skip -= tmp.bv_len;
+				continue;
+		} else if (!map_end) {
+			size_t bvlen = tmp.bv_len - skip;
+			map_end = true;
+			nr_bvec++;
+			offset = skip;
+			if (bvlen >= map_len) {
+				tmp.bv_len = map_len;
+				*bvec = tmp;
+				break;
+			}
 			*bvec = tmp;
 			bvec++;
+			map_len -= bvlen;
+			skip = 0;
+		} else {
+			nr_bvec++;
+			if (map_len <= tmp.bv_len) {
+				tmp.bv_len = map_len;
+				*bvec = tmp;
+				break;
+			}
+			*bvec = tmp;
+			bvec++;
+			map_len -= tmp.bv_len;
 		}
-		offset = 0;
-		bvec = alloc_bvec;
 	}
-
+	bvec = alloc_bvec;
 	*rw = bio_data_dir(bio);
 
-	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, blk_rq_bytes(rq));
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
 	iter->iov_offset = offset;
-	return blk_rq_bytes(rq);
+
+	return len;
 }
 
 #else
-static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
+static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
+				struct bio_vec **iovec, struct iov_iter *iter)
 {
 	struct request *rq = req->rq;
-	int nr_bvec;
+	int nr_bvec = 0;
 	struct bio_vec *bvec = NULL;
 	struct bio_vec *alloc_bvec = NULL;
-	struct bio *bio;
+	struct bio *bio = rq->bio;
 	struct req_iterator rq_iter;
 	struct bio_vec tmp;
-	unsigned int offset;
+	size_t offset = 0;
+	size_t skip;
+	bool map_end = false;
+	size_t map_len = len;
 
-	nr_bvec = 0;
 	rq_for_each_segment(tmp, rq, rq_iter) {
 		nr_bvec++;
 	}
@@ -860,41 +889,62 @@ static int build_bvec(struct fuse_req *req, int *rw, struct bio_vec **iovec, str
 	if (!bvec)
 		return -EIO;
 
+	skip = off - (BIO_SECTOR(bio) << SECTOR_SHIFT);
+	nr_bvec = 0;
 	rq_for_each_segment(tmp, rq, rq_iter) {
-		*bvec = tmp;
-		bvec++;
+		if (!tmp.bv_len) continue;
+		if (skip >= tmp.bv_len) {
+				skip -= tmp.bv_len;
+				continue;
+		} else if (!map_end) {
+			size_t bvlen = tmp.bv_len - skip;
+			map_end = true;
+			nr_bvec++;
+			offset = skip;
+			if (bvlen >= map_len) {
+				tmp.bv_len = map_len;
+				*bvec = tmp;
+				break;
+			}
+			*bvec = tmp;
+			bvec++;
+			map_len -= bvlen;
+			skip = 0;
+		} else {
+			nr_bvec++;
+			if (map_len <= tmp.bv_len) {
+				tmp.bv_len = map_len;
+				*bvec = tmp;
+				break;
+			}
+			*bvec = tmp;
+			bvec++;
+			map_len -= tmp.bv_len;
+		}
 	}
-	bio = rq->bio;
-	offset = 0;
 	bvec = alloc_bvec;
 	*rw = bio_data_dir(bio);
 
-	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, blk_rq_bytes(rq));
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
 	iter->iov_offset = offset;
-	return blk_rq_bytes(rq);
+
+	return len;
 }
 #endif
 
-static int build_bvec2(struct fuse_req *req, int *rw, struct bio_vec **iovec, struct iov_iter *iter)
+static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
+		struct bio_vec **iovec, struct iov_iter *iter)
 {
 	struct bio *bio = req->bio;
-	int nr_bvec;
+	int nr_bvec = bio->bi_vcnt;
 	struct bio_vec *bvec = NULL;
 	struct bio_vec *alloc_bvec = NULL;
 	struct bvec_iter bv_iter;
 	struct bio_vec bv;
-	unsigned int offset;
-
-	nr_bvec = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)
-	bio_for_each_bvec(bv, bio, bv_iter) {
-		nr_bvec++;
-	}
-#else
-	bio_for_each_segment(bv, bio, bv_iter) {
-		nr_bvec++;
-	}
-#endif
+	size_t offset = 0;
+	size_t skip;
+	bool map_end = false;
+	size_t map_len = len;
 
 	if (nr_bvec > UIO_FASTIOV) {
 		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
@@ -905,50 +955,77 @@ static int build_bvec2(struct fuse_req *req, int *rw, struct bio_vec **iovec, st
 	if (!bvec)
 		return -EIO;
 
+	nr_bvec = 0;
+	skip = off - (BIO_SECTOR(bio) << SECTOR_SHIFT);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)
 	bio_for_each_bvec(bv, bio, bv_iter) {
-		*bvec = bv;
-		bvec++;
-	}
 #else
 	bio_for_each_segment(bv, bio, bv_iter) {
-		*bvec = bv;
-		bvec++;
-	}
 #endif
-	offset = 0;
-	bvec = alloc_bvec;
+		if (!bv.bv_len) continue;
+		if (skip >= bv.bv_len) {
+				skip -= bv.bv_len;
+				continue;
+		} else if (!map_end) {
+			size_t bvlen = bv.bv_len - skip;
+			map_end = true;
+			nr_bvec++;
+			offset = skip;
+			if (bvlen >= map_len) {
+				bv.bv_len = map_len;
+				*bvec = bv;
+				break;
+			}
+			*bvec = bv;
+			bvec++;
+			map_len -= bvlen;
+			skip = 0;
+		} else {
+			nr_bvec++;
+			if (map_len <= bv.bv_len) {
+				bv.bv_len = map_len;
+				*bvec = bv;
+				break;
+			}
+			*bvec = bv;
+			bvec++;
+			map_len -= bv.bv_len;
+		}
+	}
 
+	bvec = alloc_bvec;
 	*rw = bio_data_dir(bio);
 
-	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, BIO_SIZE(bio));
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
 	iter->iov_offset = offset;
 	return BIO_SIZE(bio);
 }
 
-static int io_import_bvec(struct io_ring_ctx *ctx, int *rw,
+static int io_import_bvec(struct io_kiocb *req, int *rw,
 			   const struct sqe_submit *s, struct bio_vec **iovec,
 			   struct iov_iter *iter)
 {
 	const struct io_uring_sqe *sqe = s->sqe;
+	size_t sqe_off = req->rw.ki_pos;
+	size_t sqe_len = READ_ONCE(sqe->len);
 	uint64_t unique_id = READ_ONCE(sqe->addr);
 	uint32_t conn_id = READ_ONCE(sqe->buf_index);
-	struct fuse_req *req;
+	struct fuse_req *freq;
 
 	if (!s->has_user)
 		return -EFAULT;
 
-	req = request_find_in_ctx(conn_id, unique_id);
-	if (!req) {
+	freq = request_find_in_ctx(conn_id, unique_id);
+	if (!freq) {
 		printk(KERN_ERR "%s: request %u:%lld not found\n", __func__, conn_id, unique_id);
 		return -ENOENT;
 	}
 
-	if (!req->pxd_dev->using_blkque) {
-		return build_bvec2(req, rw, iovec, iter);
+	if (!freq->pxd_dev->using_blkque) {
+		return build_bvec2(freq, rw, sqe_off, sqe_len, iovec, iter);
 	}
 
-	return build_bvec(req, rw, iovec, iter);
+	return build_bvec(freq, rw, sqe_off, sqe_len, iovec, iter);
 }
 
 static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
@@ -977,7 +1054,7 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		return -EINVAL;
 	}
 
-	ret = io_import_bvec(req->ctx, &rw, s, &iovec, &iter);
+	ret = io_import_bvec(req, &rw, s, &iovec, &iter);
 	if (ret < 0)
 		return ret;
 
