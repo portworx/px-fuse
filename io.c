@@ -1096,7 +1096,7 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 	if (force_nonblock)
 		return -EAGAIN;
 
-	if (S_ISREG(inode->i_mode)) {
+	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode)) {
 		struct super_block *sb = file->f_path.dentry->d_sb;
 		down_read(&sb->s_umount);
 		ret = sync_filesystem(sb);
