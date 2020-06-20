@@ -883,7 +883,7 @@ static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
 
 	if (nr_bvec > UIO_FASTIOV) {
 		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
-											GFP_NOIO);
+			     GFP_NOIO);
 	} else {
 		alloc_bvec = bvec = *iovec;
 	}
@@ -899,8 +899,8 @@ static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
 #endif
 		if (!bv.bv_len) continue;
 		if (skip >= bv.bv_len) {
-				skip -= bv.bv_len;
-				continue;
+			skip -= bv.bv_len;
+			continue;
 		} else if (!map_end) {
 			size_t bvlen = bv.bv_len - skip;
 			map_end = true;
@@ -933,7 +933,7 @@ static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
 
 	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
 	iter->iov_offset = offset;
-	return BIO_SIZE(bio);
+	return len;
 }
 
 static int io_import_bvec(struct io_kiocb *req, int *rw,
