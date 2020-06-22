@@ -760,6 +760,32 @@ static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
 	return pxd_supported_features();
 }
 
+static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_suspend req;
+	size_t len = sizeof(req);
+
+	if (copy_from_iter(&req, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	return pxd_request_suspend(conn, &req);
+}
+
+static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_resume req;
+	size_t len = sizeof(req);
+
+	if (copy_from_iter(&req, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	return pxd_request_resume(conn, &req);
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -780,6 +806,10 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_set_fastpath(fc, size, iter);
 	case PXD_GET_FEATURES:
 		return fuse_notify_get_features(fc, size, iter);
+	case PXD_SUSPEND:
+		return fuse_notify_suspend(fc, size, iter);
+	case PXD_RESUME:
+		return fuse_notify_resume(fc, size, iter);
 	default:
 		return -EINVAL;
 	}

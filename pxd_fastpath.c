@@ -869,6 +869,35 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 	}
 }
 
+// external request to suspend IO on fastpath device
+int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req)
+{
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	struct pxd_device *pxd_dev = find_pxd_device(ctx, req->dev_id);
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	int nfd = fp->nfd;
+	int i;
+
+	if (!pxd_dev || pxd_dev->using_blkque || !nfd || !fp->fastpath) {
+		return -EINVAL;
+	}
+
+	pxd_suspend_io(pxd_dev);
+
+	if (req->skip_flush) return 0;
+
+	for (i = 0; i < nfd; i++) {
+		if (fp->file[i] > 0) {
+			int ret = vfs_fsync(fp->file[i], 0);
+			if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
+				printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
+			}
+		}
+	}
+
+	return 0;
+}
+
 void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
 	int curr = atomic_inc_return(&pxd_dev->fp.suspend);
@@ -879,6 +908,21 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 		printk("For pxd device %llu IO already suspended(%d)\n", pxd_dev->dev_id, curr);
 	}
 }
+
+// external request to resume IO on fastpath device
+int pxd_request_resume(struct fuse_conn *fc, struct pxd_resume *req)
+{
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	struct pxd_device *pxd_dev = find_pxd_device(ctx, req->dev_id);
+
+	if (!pxd_dev || pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+		return -EINVAL;
+	}
+
+	pxd_resume_io(pxd_dev);
+	return 0;
+}
+
 
 void pxd_resume_io(struct pxd_device *pxd_dev)
 {

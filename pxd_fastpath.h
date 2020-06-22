@@ -15,6 +15,7 @@
 
 struct pxd_device;
 struct pxd_context;
+struct fuse_conn;
 
 typedef enum pxd_failover_state {
         PXD_FP_FAILOVER_NONE = 0,
@@ -120,4 +121,8 @@ int pxd_switch_fastpath(struct pxd_device*);
 int pxd_switch_nativepath(struct pxd_device*);
 void pxd_suspend_io(struct pxd_device*);
 void pxd_resume_io(struct pxd_device*);
+
+// external request from userspace to control io path
+int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req);
+int pxd_request_resume(struct fuse_conn *fc, struct pxd_resume *req);
 #endif /* _PXD_FASTPATH_H_ */

@@ -31,4 +31,7 @@ void pxd_suspend_io(struct pxd_device*) { }
 void pxd_resume_io(struct pxd_device*) { }
 int pxd_switch_fastpath(struct pxd_device*) {return -1;}
 int pxd_switch_nativepath(struct pxd_device*) {return -1;}
+int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req) { return 0; }
+int pxd_request_resume(struct fuse_conn *fc, struct pxd_resume *req) { return 0; }
+
 #endif
