@@ -57,6 +57,15 @@ module_param(pxd_detect_zero_writes, uint, 0644);
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
+struct pxd_context* find_context(unsigned ctx)
+{
+	if (ctx >= pxd_num_contexts) {
+		return NULL;
+	}
+
+	return &pxd_contexts[ctx];
+}
+
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
@@ -994,8 +1003,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int found = false;
 	int err;
 	struct pxd_device *pxd_dev;
-
-	printk(KERN_INFO"pxd_remove for device %llu\n", remove->dev_id);
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {

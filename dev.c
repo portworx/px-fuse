@@ -505,6 +505,15 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 	return req;
 }
 
+struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
+{
+	struct pxd_context *pctx = find_context(ctx);
+
+	if (!pctx) return NULL;
+
+	return request_find(&pctx->fc, unique);
+}
+
 #define IOV_BUF_SIZE 64
 
 static int copy_in_read_data_iovec(struct iov_iter *iter,

@@ -72,11 +72,13 @@
 #include <linux/nospec.h>
 #include <linux/sizes.h>
 #include <linux/hugetlb.h>
+#include <linux/blkdev.h>
 
 #include "pxd_io_uring.h"
 #include "io.h"
 #include "fuse_i.h"
 #include "pxd_core.h"
+#include "pxd_compat.h"
 
 #include <uapi/linux/eventpoll.h>
 
@@ -785,6 +787,279 @@ out_free:
 	return ret;
 }
 
+// return nr_bytes in iovec if successful
+//   < 0 for failure
+static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
+						struct bio_vec **iovec, struct iov_iter *iter)
+{
+	struct request *rq = req->rq;
+	int nr_bvec = 0;
+	struct bio_vec *bvec = NULL;
+	struct bio_vec *alloc_bvec = NULL;
+	struct bio *bio = rq->bio;
+	struct req_iterator rq_iter;
+	struct bio_vec tmp;
+	size_t offset = 0;
+	size_t skip;
+	bool map_end = false;
+	size_t map_len = len;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	rq_for_each_bvec(tmp, rq, rq_iter) {
+#else
+	rq_for_each_segment(tmp, rq, rq_iter) {
+#endif
+		nr_bvec++;
+	}
+
+	if (nr_bvec > UIO_FASTIOV) {
+		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
+			     GFP_NOIO);
+	} else {
+		alloc_bvec = bvec = *iovec;
+	}
+	if (!bvec)
+		return -EIO;
+
+	skip = off - (BIO_SECTOR(bio) << SECTOR_SHIFT);
+	nr_bvec = 0;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	rq_for_each_bvec(tmp, rq, rq_iter) {
+#else
+	rq_for_each_segment(tmp, rq, rq_iter) {
+#endif
+		if (!tmp.bv_len) continue;
+		if (skip >= tmp.bv_len) {
+			skip -= tmp.bv_len;
+			continue;
+		} else if (!map_end) {
+			size_t bvlen = tmp.bv_len - skip;
+			map_end = true;
+			nr_bvec++;
+			offset = skip;
+			if (bvlen >= map_len) {
+				tmp.bv_len = map_len;
+				*bvec = tmp;
+				break;
+			}
+			*bvec = tmp;
+			bvec++;
+			map_len -= bvlen;
+			skip = 0;
+		} else {
+			nr_bvec++;
+			if (map_len <= tmp.bv_len) {
+				tmp.bv_len = map_len;
+				*bvec = tmp;
+				break;
+			}
+			*bvec = tmp;
+			bvec++;
+			map_len -= tmp.bv_len;
+		}
+	}
+	bvec = alloc_bvec;
+	*rw = bio_data_dir(bio);
+
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
+	iter->iov_offset = offset;
+
+	return len;
+}
+
+static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
+		struct bio_vec **iovec, struct iov_iter *iter)
+{
+	struct bio *bio = req->bio;
+	int nr_bvec = bio->bi_vcnt;
+	struct bio_vec *bvec = NULL;
+	struct bio_vec *alloc_bvec = NULL;
+	struct bvec_iter bv_iter;
+	struct bio_vec bv;
+	size_t offset = 0;
+	size_t skip;
+	bool map_end = false;
+	size_t map_len = len;
+
+	if (nr_bvec > UIO_FASTIOV) {
+		alloc_bvec = bvec = kmalloc_array(nr_bvec, sizeof(struct bio_vec),
+			     GFP_NOIO);
+	} else {
+		alloc_bvec = bvec = *iovec;
+	}
+	if (!bvec)
+		return -EIO;
+
+	nr_bvec = 0;
+	skip = off - (BIO_SECTOR(bio) << SECTOR_SHIFT);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)
+	bio_for_each_bvec(bv, bio, bv_iter) {
+#else
+	bio_for_each_segment(bv, bio, bv_iter) {
+#endif
+		if (!bv.bv_len) continue;
+		if (skip >= bv.bv_len) {
+			skip -= bv.bv_len;
+			continue;
+		} else if (!map_end) {
+			size_t bvlen = bv.bv_len - skip;
+			map_end = true;
+			nr_bvec++;
+			offset = skip;
+			if (bvlen >= map_len) {
+				bv.bv_len = map_len;
+				*bvec = bv;
+				break;
+			}
+			*bvec = bv;
+			bvec++;
+			map_len -= bvlen;
+			skip = 0;
+		} else {
+			nr_bvec++;
+			if (map_len <= bv.bv_len) {
+				bv.bv_len = map_len;
+				*bvec = bv;
+				break;
+			}
+			*bvec = bv;
+			bvec++;
+			map_len -= bv.bv_len;
+		}
+	}
+
+	bvec = alloc_bvec;
+	*rw = bio_data_dir(bio);
+
+	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
+	iter->iov_offset = offset;
+	return len;
+}
+
+static int io_import_bvec(struct io_kiocb *req, int *rw,
+			   const struct sqe_submit *s, struct bio_vec **iovec,
+			   struct iov_iter *iter)
+{
+	const struct io_uring_sqe *sqe = s->sqe;
+	size_t sqe_off = req->rw.ki_pos;
+	size_t sqe_len = READ_ONCE(sqe->len);
+	uint64_t unique_id = READ_ONCE(sqe->addr);
+	uint32_t conn_id = READ_ONCE(sqe->buf_index);
+	struct fuse_req *freq;
+
+	if (!s->has_user)
+		return -EFAULT;
+
+	freq = request_find_in_ctx(conn_id, unique_id);
+	if (!freq) {
+		printk(KERN_ERR "%s: request %u:%lld not found\n", __func__, conn_id, unique_id);
+		return -ENOENT;
+	}
+
+	if (!freq->pxd_dev->using_blkque) {
+		return build_bvec2(freq, rw, sqe_off, sqe_len, iovec, iter);
+	}
+
+	return build_bvec(freq, rw, sqe_off, sqe_len, iovec, iter);
+}
+
+static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
+		    int dir, bool force_nonblock)
+{
+	struct bio_vec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
+	struct kiocb *kiocb = &req->rw;
+	struct iov_iter iter;
+	struct file *file;
+	size_t iov_count;
+	int ret;
+	ssize_t ret2;
+	int rw;
+
+	ret = io_prep_rw(req, s, force_nonblock);
+	if (ret) {
+		pr_info("%s: io prep rw fail: %d", __func__, ret);
+		return ret;
+	}
+
+	file = kiocb->ki_filp;
+	if (unlikely(!(file->f_mode & FMODE_WRITE)))
+		return -EBADF;
+	if (unlikely(!file->f_op->write_iter)) {
+		pr_info("%s: write iter is NULL", __func__);
+		return -EINVAL;
+	}
+
+	ret = io_import_bvec(req, &rw, s, &iovec, &iter);
+	if (ret < 0)
+		goto out_free;
+
+	if (rw != dir) {
+		ret = -EINVAL;
+		pr_info("%s: invalid direction", __func__);
+		goto out_free;
+	}
+
+	iov_count = iov_iter_count(&iter);
+
+	ret = -EAGAIN;
+	if (force_nonblock &&
+	    ((s->sqe->flags & IOSQE_FORCE_ASYNC) || !(kiocb->ki_flags & IOCB_DIRECT))) {
+		/* If ->needs_lock is true, we're already in async context. */
+		if (!s->needs_lock)
+			io_async_list_note(WRITE, req, iov_count);
+		goto out_free;
+	}
+
+	if (rw == WRITE) {
+		/*
+		 * Open-code file_start_write here to grab freeze protection,
+		 * which will be released by another thread in
+		 * io_complete_rw().  Fool lockdep by telling it the lock got
+		 * released so that it doesn't complain about the held lock when
+		 * we return to userspace.
+		 */
+		if (S_ISREG(file_inode(file)->i_mode)) {
+			__sb_start_write(file_inode(file)->i_sb,
+				SB_FREEZE_WRITE, true);
+			__sb_writers_release(file_inode(file)->i_sb,
+				SB_FREEZE_WRITE);
+		}
+		kiocb->ki_flags |= IOCB_WRITE;
+
+		ret2 = call_write_iter(file, kiocb, &iter);
+		if (!force_nonblock || ret2 != -EAGAIN) {
+			io_rw_done(kiocb, ret2);
+			ret = 0;
+		} else {
+			/*
+			 * If ->needs_lock is true, we're already in async
+			 * context.
+			 */
+			if (!s->needs_lock)
+				io_async_list_note(WRITE, req, iov_count);
+			ret = -EAGAIN;
+		}
+	} else {
+		/* Catch -EAGAIN return for forced non-blocking submission */
+		ret2 = call_read_iter(file, kiocb, &iter);
+		if (!force_nonblock || ret2 != -EAGAIN) {
+			io_rw_done(kiocb, ret2);
+			ret = 0;
+		} else {
+			/*
+			 * If ->needs_lock is true, we're already in async
+			 * context.
+			 */
+			if (!s->needs_lock)
+				io_async_list_note(READ, req, iov_count);
+			ret = -EAGAIN;
+		}
+	}
+out_free:
+	if (iovec != inline_vecs) kfree(iovec);
+	return ret;
+}
+
 static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	bool force_nonblock)
 {
@@ -1175,6 +1450,12 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		break;
 	case IORING_OP_POLL_REMOVE:
 		ret = io_poll_remove(req, s->sqe);
+		break;
+	case IORING_OP_READ_BIO:
+		ret = io_switch(req, s, READ, force_nonblock);
+		break;
+	case IORING_OP_WRITE_BIO:
+		ret = io_switch(req, s, WRITE, force_nonblock);
 		break;
 	case IORING_OP_DISCARD_FIXED:
 		ret = io_discard(req, s, force_nonblock);

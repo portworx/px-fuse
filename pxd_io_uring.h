@@ -21,7 +21,7 @@ struct io_uring_sqe {
 	__u16	ioprio;		/* ioprio for the request */
 	__s32	fd;		/* file descriptor to do IO on */
 	__u64	off;		/* offset into file */
-	__u64	addr;		/* pointer to buffer or iovecs */
+	__u64	addr;		/* pointer to buffer or iovecs or kernel_id */
 	__u32	len;		/* buffer size or number of iovecs */
 	union {
 		int		rw_flags;
@@ -31,7 +31,7 @@ struct io_uring_sqe {
 	};
 	__u64	user_data;	/* data to be passed back at completion time */
 	union {
-		__u16	buf_index;	/* index into fixed buffers, if used */
+		__u16	buf_index;	/* index into fixed buffers, if used or context id */
 		__u64	__pad2[3];
 	};
 };
@@ -63,6 +63,8 @@ struct io_uring_sqe {
 #define IORING_OP_COPY_DATA	10
 #define IORING_OP_DISCARD_FIXED 11
 #define IORING_OP_SYNCFS_FIXED  12
+#define IORING_OP_READ_BIO  13
+#define IORING_OP_WRITE_BIO 14
 
 /*
  * sqe->fsync_flags
