@@ -63,7 +63,8 @@ struct io_uring_sqe {
 #define IORING_OP_COPY_DATA	10
 #define IORING_OP_DISCARD_FIXED 11
 #define IORING_OP_SYNCFS_FIXED  12
-#define IORING_OP_RWBIO  13
+#define IORING_OP_READ_BIO  13
+#define IORING_OP_WRITE_BIO 14
 
 /*
  * sqe->fsync_flags

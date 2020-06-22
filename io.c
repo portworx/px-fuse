@@ -964,7 +964,7 @@ static int io_import_bvec(struct io_kiocb *req, int *rw,
 }
 
 static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
-		    bool force_nonblock)
+		    int dir, bool force_nonblock)
 {
 	struct bio_vec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
 	struct kiocb *kiocb = &req->rw;
@@ -991,7 +991,13 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 
 	ret = io_import_bvec(req, &rw, s, &iovec, &iter);
 	if (ret < 0)
-		return ret;
+		goto out_free;
+
+	if (rw != dir) {
+		ret = -EINVAL;
+		pr_info("%s: invalid direction", __func__);
+		goto out_free;
+	}
 
 	iov_count = iov_iter_count(&iter);
 
@@ -1445,8 +1451,11 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	case IORING_OP_POLL_REMOVE:
 		ret = io_poll_remove(req, s->sqe);
 		break;
-	case IORING_OP_RWBIO:
-		ret = io_switch(req, s, force_nonblock);
+	case IORING_OP_READ_BIO:
+		ret = io_switch(req, s, READ, force_nonblock);
+		break;
+	case IORING_OP_WRITE_BIO:
+		ret = io_switch(req, s, WRITE, force_nonblock);
 		break;
 	case IORING_OP_DISCARD_FIXED:
 		ret = io_discard(req, s, force_nonblock);
