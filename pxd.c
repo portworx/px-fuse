@@ -1004,8 +1004,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int err;
 	struct pxd_device *pxd_dev;
 
-	printk(KERN_INFO"pxd_remove for device %llu\n", remove->dev_id);
-
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
 		if (pxd_dev->dev_id == remove->dev_id) {
