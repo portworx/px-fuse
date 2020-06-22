@@ -1445,7 +1445,7 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	case IORING_OP_POLL_REMOVE:
 		ret = io_poll_remove(req, s->sqe);
 		break;
-	case IORING_OP_DATA_SWITCH:
+	case IORING_OP_RWBIO:
 		ret = io_switch(req, s, force_nonblock);
 		break;
 	case IORING_OP_DISCARD_FIXED:
