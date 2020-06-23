@@ -1124,6 +1124,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
 		id.fastpath = 0;
+		id.count = (uint8_t) atomic_read(&pxd_dev->fp.suspend);
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
 		id.blkmq_device = 0;
 		if (pxd_dev->using_blkque) id.blkmq_device = 1;
