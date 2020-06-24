@@ -861,7 +861,11 @@ static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
 	bvec = alloc_bvec;
 	*rw = bio_data_dir(bio);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
+#else
+	iov_iter_bvec(iter, ITER_BVEC | bio_data_dir(bio), bvec, nr_bvec, len);
+#endif
 	iter->iov_offset = offset;
 
 	return len;
@@ -931,7 +935,11 @@ static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
 	bvec = alloc_bvec;
 	*rw = bio_data_dir(bio);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	iov_iter_bvec(iter, bio_data_dir(bio), bvec, nr_bvec, len);
+#else
+	iov_iter_bvec(iter, ITER_BVEC | bio_data_dir(bio), bvec, nr_bvec, len);
+#endif
 	iter->iov_offset = offset;
 	return len;
 }
