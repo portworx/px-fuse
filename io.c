@@ -2423,11 +2423,12 @@ struct file_operations io_ring_fops = {
 };
 
 static struct miscdevice miscdev;
+static io_uring_dev = "pxd-io";
 
 int io_ring_register_device()
 {
 	miscdev.minor = MISC_DYNAMIC_MINOR;
-	miscdev.name = "pxd/pxd-io";
+	sprintf(miscdev.name, "%s/%s", names[pxd_module_id], io_uring_dev);
 	miscdev.fops = &io_ring_fops;
 	return misc_register(&miscdev);
 }

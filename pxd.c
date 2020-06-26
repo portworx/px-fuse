@@ -50,10 +50,23 @@ uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
 uint32_t pxd_detect_zero_writes = 0;
+uint32_t pxd_module_id = 0;
+
+char *names[PXD_NUM_MODULE_IDS] = {
+	"pxd", "pxd1", "pxd2", "pxd3", "pxd4", "pxd5", "pxd6", "pxd7", "pxd8"
+};
+
+static char *cdev_names[PXD_NUM_CONTEXTS] = {
+	"pxd/pxd-control", "pxd1/pxd-control", "pxd2/pxd-control",
+	"pxd3/pxd-control", "pxd4/pxd-control", "pxd5/pxd-control",
+	"pxd6/pxd-control", "pxd7/pxd-control", "pxd8/pxd-control",
+	"pxd9/pxd-control", "pxd10/pxd-control"
+};
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+module_param(pxd_module_id, uint, 0644);
 
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
@@ -1176,18 +1189,26 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	return 0;
 }
 
-static struct bus_type pxd_bus_type = {
-	.name		= "pxd",
-};
+static struct bus_type pxd_bus_type;
+
+struct bus_type *get_pxd_bus_type(int idx)
+{
+	pxd_bus_type.name = names[idx];
+	return &pxd_bus_type;
+}
 
 static void pxd_root_dev_release(struct device *dev)
 {
 }
 
-static struct device pxd_root_dev = {
-	.init_name =    "pxd",
-	.release =      pxd_root_dev_release,
-};
+static struct device pxd_root_dev;
+
+struct device *get_pxd_root_dev(int idx)
+{
+	pxd_root_dev.init_name = names[idx];
+	pxd_root_dev.release = pxd_root_dev_release;
+	return &pxd_root_dev;
+}
 
 static struct pxd_device *dev_to_pxd_dev(struct device *dev)
 {
@@ -1581,11 +1602,15 @@ static void pxd_sysfs_dev_release(struct device *dev)
 {
 }
 
-static struct device_type pxd_device_type = {
-	.name		= "pxd",
-	.groups		= pxd_attr_groups,
-	.release	= pxd_sysfs_dev_release,
-};
+static struct device_type pxd_device_type;
+
+struct device_type *get_pxd_device_type(int idx)
+{
+	pxd_device_type.name = names[idx];
+	pxd_device_type.groups = pxd_attr_groups;
+	pxd_device_type.release = pxd_sysfs_dev_release;
+	return &pxd_device_type;
+}
 
 static void pxd_dev_device_release(struct device *dev)
 {
@@ -1604,9 +1629,9 @@ static int pxd_bus_add_dev(struct pxd_device *pxd_dev)
 	int ret;
 
 	dev = &pxd_dev->dev;
-	dev->bus = &pxd_bus_type;
-	dev->type = &pxd_device_type;
-	dev->parent = &pxd_root_dev;
+	dev->bus = get_pxd_bus_type(pxd_module_id);
+	dev->type = get_pxd_device_type(pxd_module_id);
+	dev->parent = get_pxd_root_dev(pxd_module_id);
 	dev->release = pxd_dev_device_release;
 	dev_set_name(dev, "%d", pxd_dev->minor);
 	ret = device_register(dev);
@@ -1618,21 +1643,21 @@ static int pxd_sysfs_init(void)
 {
 	int err;
 
-	err = device_register(&pxd_root_dev);
+	err = device_register(get_pxd_root_dev(pxd_module_id));
 	if (err < 0)
 		return err;
 
-	err = bus_register(&pxd_bus_type);
+	err = bus_register(get_pxd_bus_type(pxd_module_id));
 	if (err < 0)
-		device_unregister(&pxd_root_dev);
+		device_unregister(get_pxd_root_dev(pxd_module_id));
 
 	return err;
 }
 
 static void pxd_sysfs_exit(void)
 {
-	bus_unregister(&pxd_bus_type);
-	device_unregister(&pxd_root_dev);
+	bus_unregister(get_pxd_bus_type(pxd_module_id));
+	device_unregister(get_pxd_root_dev(pxd_module_id));
 }
 
 static int pxd_control_open(struct inode *inode, struct file *file)
@@ -1704,10 +1729,14 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static struct miscdevice pxd_miscdev = {
-	.minor		= MISC_DYNAMIC_MINOR,
-	.name		= "pxd/pxd-control",
-};
+static struct miscdevice pxd_miscdev;
+
+struct miscdevice *get_pxd_miscdev(int idx)
+{
+	pxd_miscdev.minor = MISC_DYNAMIC_MINOR;
+	pxd_miscdev.name = cdev_names[idx];
+	return &pxd_miscdev;
+}
 
 MODULE_ALIAS("devname:pxd-control");
 
@@ -1741,7 +1770,7 @@ static void pxd_vm_close(struct vm_area_struct *vma)
 {
 	struct file *file = vma->vm_file;
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
-	pr_info("pxd_vm_close %d", ctx->id);
+	pr_info("pxd[%d]_vm_close %d", pxd_module_id, ctx->id);
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0)
@@ -1777,8 +1806,8 @@ static void pxd_vm_open(struct vm_area_struct *vma)
 {
 	struct file *file = vma->vm_file;
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
-	pr_info("pxd_vm_open %d off %ld start %ld end %ld", ctx->id,
-		vma->vm_pgoff << PAGE_SHIFT, vma->vm_start, vma->vm_end);
+	pr_info("pxd[%d]_vm_open %d off %ld start %ld end %ld", pxd_module_id,
+		ctx->id, vma->vm_pgoff << PAGE_SHIFT, vma->vm_start, vma->vm_end);
 }
 
 static struct vm_operations_struct pxd_vm_ops = {
@@ -1819,7 +1848,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fc.release = pxd_fuse_conn_release;
 	ctx->fc.allow_disconnected = 1;
 	INIT_LIST_HEAD(&ctx->list);
-	sprintf(ctx->name, "pxd/pxd-control-%d", i);
+	sprintf(ctx->name, "%s/%s-%d", names[pxd_module_id], "pxd-control", i);
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
@@ -1841,24 +1870,32 @@ int pxd_init(void)
 {
 	int err, i, j;
 
+	if (pxd_module_id >= PXD_NUM_MODULE_IDS) {
+		printk(KERN_ERR "Module ID exceeds limit: %d\n", PXD_NUM_MODULE_IDS-1);
+		return -EINVAL;
+	}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	err = -ENOMEM;
 	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
 	if (req_cachep == NULL) {
-		printk(KERN_ERR "pxd: failed to initialize request cache");
+		printk(KERN_ERR "pxd[%d]: failed to initialize request cache",
+			pxd_module_id);
 		goto out;
 	}
 
 	err = io_ring_register_device();
 	if (err) {
-		printk(KERN_ERR "pxd: failed to register io dev: %d\n", err);
+		printk(KERN_ERR "pxd[%d]: failed to register io dev: %d\n",
+			pxd_module_id, err);
 		goto out;
 	}
 #endif
 
 	err = fuse_dev_init();
 	if (err) {
-		printk(KERN_ERR "pxd: failed to initialize fuse: %d\n", err);
+		printk(KERN_ERR "pxd[%d]: failed to initialize fuse: %d\n",
+			pxd_module_id, err);
 		goto out;
 	}
 
@@ -1866,7 +1903,7 @@ int pxd_init(void)
 		GFP_KERNEL);
 	err = -ENOMEM;
 	if (!pxd_contexts) {
-		printk(KERN_ERR "pxd: failed to allocate memory\n");
+		printk(KERN_ERR "pxd[%d]: failed to allocate memory\n", pxd_module_id);
 		goto out_fuse_dev;
 	}
 
@@ -1874,57 +1911,52 @@ int pxd_init(void)
 		struct pxd_context *ctx = &pxd_contexts[i];
 		err = pxd_context_init(ctx, i);
 		if (err) {
-			printk(KERN_ERR "pxd: failed to initialize connection\n");
+			printk(KERN_ERR "pxd[%d]: failed to initialize connection\n",
+				pxd_module_id);
 			goto out_fuse;
 		}
 
 		err = misc_register(&ctx->miscdev);
 		if (err) {
-			printk(KERN_ERR "pxd: failed to register dev %s %d: %d\n",
-				ctx->miscdev.name, i, err);
+			printk(KERN_ERR "pxd[%d]: failed to register dev %s %d: %d\n",
+				pxd_module_id, ctx->miscdev.name, i, err);
 			goto out_fuse;
 		}
 	}
 
-	pxd_miscdev.fops = &pxd_contexts[0].fops;
-	err = misc_register(&pxd_miscdev);
-	if (err) {
-		printk(KERN_ERR "pxd: failed to register dev %s: %d\n",
-			pxd_miscdev.name, err);
-		goto out_fuse;
-	}
-	pxd_major = register_blkdev(0, "pxd");
+	pxd_major = register_blkdev(0, names[pxd_module_id]);
 	if (pxd_major < 0) {
 		err = pxd_major;
-		printk(KERN_ERR "pxd: failed to register dev pxd: %d\n", err);
-		goto out_misc;
+		printk(KERN_ERR "pxd[%d]: failed to register dev pxd: %d\n",
+			pxd_module_id, err);
+		goto out_fuse;
 	}
 
 	err = pxd_sysfs_init();
 	if (err) {
-		printk(KERN_ERR "pxd: failed to initialize sysfs: %d\n", err);
+		printk(KERN_ERR "pxd[%d]: failed to initialize sysfs: %d\n",
+			pxd_module_id, err);
 		goto out_blkdev;
 	}
 
 	err = fastpath_init();
 	if (err) {
-		printk(KERN_ERR "pxd: fastpath initialization failed: %d\n", err);
+		printk(KERN_ERR "pxd[%d]: fastpath initialization failed: %d\n",
+			pxd_module_id, err);
 		goto out_blkdev;
 	}
 #ifdef __PX_BLKMQ__
-	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
-			gitversion, pxd_supported_features());
+	printk(KERN_INFO "pxd[%d]: blk-mq driver loaded version %s, features %#x\n",
+			pxd_module_id, gitversion, pxd_supported_features());
 #else
-	printk(KERN_INFO "pxd: driver loaded version %s, features %#x\n",
-			gitversion, pxd_supported_features());
+	printk(KERN_INFO "pxd[%d]: driver loaded version %s, features %#x\n",
+			pxd_module_id, gitversion, pxd_supported_features());
 #endif
 
 	return 0;
 
 out_blkdev:
-	unregister_blkdev(0, "pxd");
-out_misc:
-	misc_deregister(&pxd_miscdev);
+	unregister_blkdev(0, names[pxd_module_id]);
 out_fuse:
 	for (j = 0; j < i; ++j) {
 		pxd_context_destroy(&pxd_contexts[j]);
@@ -1946,8 +1978,7 @@ void pxd_exit(void)
 
 	fastpath_cleanup();
 	pxd_sysfs_exit();
-	unregister_blkdev(pxd_major, "pxd");
-	misc_deregister(&pxd_miscdev);
+	unregister_blkdev(pxd_major, names[pxd_module_id]);
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		/* force cleanup @@@ */
@@ -1963,7 +1994,7 @@ void pxd_exit(void)
 	kmem_cache_destroy(req_cachep);
 #endif
 
-	printk(KERN_INFO "pxd: driver unloaded\n");
+	printk(KERN_INFO "pxd[%d]: driver unloaded\n", pxd_module_id);
 }
 
 module_init(pxd_init);
