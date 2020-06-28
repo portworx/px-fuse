@@ -4,6 +4,7 @@
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
 #include <linux/ctype.h>
+#include <linux/part_stat.h>
 #include "fuse_i.h"
 #include "pxd.h"
 #include <linux/uio.h>
@@ -750,7 +751,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #else
 	if (!pxd_dev->using_blkque) {
 		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
-		q = blk_alloc_queue(GFP_KERNEL);
+		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
 		if (!q) {
 			err = -ENOMEM;
 			goto out_disk;
@@ -758,7 +759,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 		// add hooks to control congestion only while using fastpath
 		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
-		blk_queue_make_request(q, pxd_make_request_fastpath);
+		// blk_queue_make_request(q, pxd_make_request_fastpath);
 	} else {
 #endif
 
