@@ -5,7 +5,6 @@
 #include "pxd_core.h"
 #include "pxd_fastpath.h"
 
-int pxd_device_congested(void *data, int cond) { return 0; }
 int fastpath_init(void) { return 0; }
 void fastpath_cleanup(void) {}
 
