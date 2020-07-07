@@ -1678,11 +1678,14 @@ static void pxd_sysfs_exit(void)
 	device_unregister(&pxd_root_dev);
 }
 
+#include <linux/delay.h>
+
 static int pxd_control_open(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;
 	struct fuse_conn *fc;
 	int rc;
+	int waits = 0;
 
 	if (!((uintptr_t)pxd_contexts <= (uintptr_t)file->f_op &&
 		(uintptr_t)file->f_op < (uintptr_t)(pxd_contexts + pxd_num_contexts))) {
@@ -1696,10 +1699,14 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	fc = &ctx->fc;
-	if (fc->connected == 1) {
-		printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
-			ctx->id, ctx->open_seq);
-		return -EINVAL;
+	while (fc->connected) {
+		++waits;
+		if (waits == 100) {
+			printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
+				ctx->id, ctx->open_seq);
+			return -EINVAL;
+		}
+		msleep(10);
 	}
 
 	rc = fuse_restart_requests(fc);
