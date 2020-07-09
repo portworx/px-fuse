@@ -130,8 +130,23 @@ ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CP
 
 .PHONY: rpm
 
+ifdef KONAME
+$(KONAME)-objs = $(px-objs)
+obj-m = $(KONAME).o
+endif
+
 all: px_version.c
 	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
+
+ifndef KONUM
+KONUM=1
+endif
+
+nkos: px_version.c
+	@if [ -z "$(KONAME)" ]; then KONAME=px; fi; \
+	for knum in $(shell seq 1 $(KONUM)); do \
+		make -C $(KERNELPATH) obj-m=$${KONAME}$${knum}.o $${KONAME}$${knum}-objs="$(px-objs)" $(KERNELOTHEROPT) M=$(CURDIR) modules; \
+	done
 
 insert: all
 	insmod px.ko $(PXD_NUM_CONTEXT_EXPORTED)
