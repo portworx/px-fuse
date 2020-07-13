@@ -131,8 +131,8 @@ struct pxd_add_ext_out {
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
-	int     enable_fp; /**< enable fast path */
-	bool strict; /***< unused, always allow fallback */
+	bool    enable_fp; /**< enable fast path */
+	bool    can_failover; /***< always allow fallback to userspace on any error */
 	struct pxd_update_path_out paths; /**< backing device paths */
 };
 

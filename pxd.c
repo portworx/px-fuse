@@ -873,7 +873,8 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
-static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
+static int __pxd_update_path(struct pxd_device *pxd_dev, bool can_failover,
+		struct pxd_update_path_out *update_path);
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
@@ -898,7 +899,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		module_put(THIS_MODULE);
 
 		if (add->enable_fp && add->paths.count > 0) {
-			__pxd_update_path(pxd_dev, &add->paths);
+			__pxd_update_path(pxd_dev, add->can_failover, &add->paths);
 		} else {
 			disableFastPath(pxd_dev, false);
 		}
@@ -950,7 +951,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		goto out_id;
 
 	if (add->enable_fp) {
-		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
+		err = pxd_init_fastpath_target(pxd_dev, add->can_failover, &add->paths);
 		if (err) {
 			pxd_fastpath_cleanup(pxd_dev);
 			goto out_id;
@@ -1148,7 +1149,8 @@ copy_error:
 }
 
 
-static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
+static int __pxd_update_path(struct pxd_device *pxd_dev, bool can_failover,
+		struct pxd_update_path_out *update_path)
 {
 	if (pxd_dev->using_blkque) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
@@ -1157,7 +1159,7 @@ static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_
 		printk(KERN_ERR"%llu: device already in fast path - cannot update\n", pxd_dev->dev_id);
 		return -EINVAL;
 	}
-	return pxd_init_fastpath_target(pxd_dev, update_path);
+	return pxd_init_fastpath_target(pxd_dev, can_failover, update_path);
 }
 
 ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path)
@@ -1181,7 +1183,7 @@ ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update
 		return -ENOENT;
 	}
 
-	err = __pxd_update_path(pxd_dev, update_path);
+	err = __pxd_update_path(pxd_dev, pxd_dev->fp.can_failover, update_path);
 	spin_unlock(&pxd_dev->lock);
 	return err;
 }
@@ -1533,7 +1535,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	update_out.count = i;
 	update_out.dev_id = pxd_dev->dev_id;
 
-	__pxd_update_path(pxd_dev, &update_out);
+	__pxd_update_path(pxd_dev, false, &update_out);
 	kfree(tmp);
 
 	return count;
