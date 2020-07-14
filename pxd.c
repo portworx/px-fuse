@@ -36,7 +36,8 @@
 #endif
 
 #define PXD_TIMER_SECS_MIN 30
-#define PXD_TIMER_SECS_MAX 600
+#define PXD_TIMER_SECS_DEFAULT 600
+#define PXD_TIMER_SECS_MAX (U32_MAX)
 
 #define TOSTRING_(x) #x
 #define VERTOSTR(x) TOSTRING_(x)
@@ -48,7 +49,7 @@ static DEFINE_IDA(pxd_minor_ida);
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
-uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
@@ -1269,7 +1270,7 @@ static ssize_t pxd_minor_show(struct device *dev,
 static ssize_t pxd_timeout_show(struct device *dev,
 		     struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", pxd_timeout_secs);
+	return sprintf(buf, "%u\n", pxd_timeout_secs);
 }
 
 ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
@@ -1282,18 +1283,20 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	if (ctx == NULL)
 		return -ENXIO;
 
-	sscanf(buf, "%d", &new_timeout_secs);
+	sscanf(buf, "%u", &new_timeout_secs);
 	if (new_timeout_secs < PXD_TIMER_SECS_MIN ||
 			new_timeout_secs > PXD_TIMER_SECS_MAX) {
 		return -EINVAL;
 	}
 
-	if (!ctx->fc.connected)
+	if (!ctx->fc.connected) {
 		cancel_delayed_work_sync(&ctx->abort_work);
+	}
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = new_timeout_secs;
-	if (!ctx->fc.connected)
+	if (!ctx->fc.connected) {
 		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
+	}
 	spin_unlock(&ctx->lock);
 
 	return count;
@@ -1710,7 +1713,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	cancel_delayed_work_sync(&ctx->abort_work);
 	spin_lock(&ctx->lock);
-	pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 	fc->connected = 1;
 	spin_unlock(&ctx->lock);
 
@@ -1737,10 +1740,12 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	}
 
 	spin_lock(&ctx->lock);
-	if (ctx->fc.connected == 0)
+	if (ctx->fc.connected == 0) {
 		pxd_printk("%s: not opened\n", __func__);
-	else
+	} else {
 		ctx->fc.connected = 0;
+	}
+
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
@@ -1768,7 +1773,7 @@ static void pxd_abort_context(struct work_struct *work)
 
 	BUG_ON(fc->connected);
 
-	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
+	printk(KERN_ERR "PXD_TIMEOUT (%s:%u): Aborting all requests...",
 		ctx->name, ctx->id);
 
 	fc->allow_disconnected = 0;
