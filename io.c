@@ -2426,7 +2426,7 @@ static struct miscdevice miscdev;
 static char *io_uring_dev = "pxd-io";
 
 extern char **names;
-extern uint32_t pxd_module_id
+extern uint32_t pxd_module_id;
 int io_ring_register_device()
 {
 	miscdev.minor = MISC_DYNAMIC_MINOR;
