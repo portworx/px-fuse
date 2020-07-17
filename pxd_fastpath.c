@@ -878,10 +878,12 @@ int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req)
 	int nfd = fp->nfd;
 	int i;
 
-	if (!pxd_dev || pxd_dev->using_blkque || !nfd || !fp->fastpath) {
+	if (!pxd_dev || pxd_dev->using_blkque || !nfd || !fp->fastpath ||
+			fp->app_suspend) {
 		return -EINVAL;
 	}
 
+	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
 
 	if (req->skip_flush) return 0;
@@ -895,6 +897,7 @@ int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req)
 		}
 	}
 
+	printk(KERN_NOTICE"device %llu suspended IO from userspace", pxd_dev->dev_id);
 	return 0;
 }
 
@@ -915,11 +918,14 @@ int pxd_request_resume(struct fuse_conn *fc, struct pxd_resume *req)
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, req->dev_id);
 
-	if (!pxd_dev || pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+	if (!pxd_dev || pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath
+			|| !pxd_dev->fp.app_suspend) {
 		return -EINVAL;
 	}
 
 	pxd_resume_io(pxd_dev);
+	pxd_dev->fp.app_suspend = false;
+	printk(KERN_NOTICE"device %llu resumed IO from userspace", pxd_dev->dev_id);
 	return 0;
 }
 

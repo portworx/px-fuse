@@ -43,11 +43,8 @@ struct pxd_io_tracker {
 	struct bio clone;    // cloned bio [ALL]
 };
 
-struct pcpu_fpstate {
-	int suspend;
-};
-
 struct pxd_fastpath_extension {
+	bool app_suspend; // userspace suspended IO
 	// Extended information
 	atomic_t suspend;
 	rwlock_t suspend_lock;
