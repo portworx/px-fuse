@@ -870,23 +870,20 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 }
 
 // external request to suspend IO on fastpath device
-int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req)
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 {
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	struct pxd_device *pxd_dev = find_pxd_device(ctx, req->dev_id);
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int nfd = fp->nfd;
 	int i;
 
-	if (!pxd_dev || pxd_dev->using_blkque || !nfd || !fp->fastpath ||
-			fp->app_suspend) {
+	if (pxd_dev->using_blkque || !nfd || !fp->fastpath || fp->app_suspend) {
 		return -EINVAL;
 	}
 
 	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
 
-	if (req->skip_flush) return 0;
+	if (skip_flush) return 0;
 
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) {
@@ -913,13 +910,10 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 }
 
 // external request to resume IO on fastpath device
-int pxd_request_resume(struct fuse_conn *fc, struct pxd_resume *req)
+int pxd_request_resume(struct pxd_device *pxd_dev)
 {
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	struct pxd_device *pxd_dev = find_pxd_device(ctx, req->dev_id);
-
-	if (!pxd_dev || pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath
-			|| !pxd_dev->fp.app_suspend) {
+	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath ||
+			!pxd_dev->fp.app_suspend) {
 		return -EINVAL;
 	}
 

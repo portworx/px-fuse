@@ -120,6 +120,6 @@ void pxd_suspend_io(struct pxd_device*);
 void pxd_resume_io(struct pxd_device*);
 
 // external request from userspace to control io path
-int pxd_request_suspend(struct fuse_conn *fc, struct pxd_suspend *req);
-int pxd_request_resume(struct fuse_conn *fc, struct pxd_resume *req);
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush);
+int pxd_request_resume(struct pxd_device *pxd_dev);
 #endif /* _PXD_FASTPATH_H_ */

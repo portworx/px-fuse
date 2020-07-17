@@ -1579,6 +1579,14 @@ static ssize_t pxd_debug_store(struct device *dev,
 		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
 		pxd_switch_fastpath(pxd_dev);
 		break;
+	case 'S': /* app suspend */
+		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);
+		pxd_request_suspend(pxd_dev, false);
+		break;
+	case 'R': /* app resume */
+		printk("dev:%llu - requesting IO resume\n", pxd_dev->dev_id);
+		pxd_request_resume(pxd_dev);
+		break;
 	default:
 		/* no action */
 		printk("dev:%llu - no action for %c\n", pxd_dev->dev_id, buf[0]);

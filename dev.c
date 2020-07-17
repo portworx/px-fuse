@@ -762,28 +762,43 @@ static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
 
 static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter) {
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
 	struct pxd_suspend req;
 	size_t len = sizeof(req);
+	struct pxd_device *pxd_dev;
 
 	if (copy_from_iter(&req, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
 
-	return pxd_request_suspend(conn, &req);
+	pxd_dev = find_pxd_device(ctx, req.dev_id);
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found", req.dev_id);
+		return -EINVAL;
+	}
+	return pxd_request_suspend(pxd_dev, req.skip_flush);
 }
 
 static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter) {
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
 	struct pxd_resume req;
 	size_t len = sizeof(req);
+	struct pxd_device *pxd_dev;
 
 	if (copy_from_iter(&req, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
 
-	return pxd_request_resume(conn, &req);
+	pxd_dev = find_pxd_device(ctx, req.dev_id);
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found", req.dev_id);
+		return -EINVAL;
+	}
+
+	return pxd_request_resume(pxd_dev);
 }
 
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
