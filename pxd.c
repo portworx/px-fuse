@@ -874,8 +874,7 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
-static int __pxd_update_path(struct pxd_device *pxd_dev,
-		struct pxd_update_path_out *update_path);
+static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);

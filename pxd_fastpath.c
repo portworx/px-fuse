@@ -1085,8 +1085,7 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 	}
 }
 
-int pxd_init_fastpath_target(struct pxd_device *pxd_dev,
-		struct pxd_update_path_out *update_path)
+int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
 	char modestr[32];
 	mode_t mode = 0;
