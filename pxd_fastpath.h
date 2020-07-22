@@ -89,7 +89,7 @@ int fastpath_init(void);
 void fastpath_cleanup(void);
 
 struct pxd_update_path_out;
-int pxd_init_fastpath_target(struct pxd_device *pxd_dev, bool can_failover, struct pxd_update_path_out *update_path);
+int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev);

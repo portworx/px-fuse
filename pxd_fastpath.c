@@ -1085,7 +1085,7 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 	}
 }
 
-int pxd_init_fastpath_target(struct pxd_device *pxd_dev, bool can_failover,
+int pxd_init_fastpath_target(struct pxd_device *pxd_dev,
 		struct pxd_update_path_out *update_path)
 {
 	char modestr[32];
@@ -1109,7 +1109,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, bool can_failover,
 			pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
 	}
 	pxd_dev->fp.nfd = update_path->count;
-	pxd_dev->fp.can_failover = can_failover;
+	pxd_dev->fp.can_failover = update_path->can_failover;
 	enableFastPath(pxd_dev, true);
 	pxd_resume_io(pxd_dev);
 
