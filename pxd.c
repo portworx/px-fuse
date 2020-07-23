@@ -435,9 +435,12 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		fuse_convert_zero_writes(req);
 }
 
-static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	struct request_queue *q = req->pxd_dev->disk->queue;
+	unsigned int max_discard_size;
+
 	req->in.opcode = PXD_DISCARD;
 	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_write_reply;
@@ -446,6 +449,22 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 	}
 
 	pxd_req_misc(req, size, off, minor, flags);
+
+	/* when block device is registered in non blk mq mode, discard limits are not
+	 * honoured. Sanity check discard size is within limits.
+	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	max_discard_size = blk_queue_get_max_sectors(q, REQ_OP_DISCARD) << SECTOR_SHIFT;
+#else
+	max_discard_size = blk_queue_get_max_sectors(q, REQ_DISCARD) << SECTOR_SHIFT;
+#endif
+	if (size > max_discard_size) {
+		printk(KERN_ERR"device %llu discard size %u received over limit %u\n",
+				req->pxd_dev->dev_id, size, max_discard_size);
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
@@ -465,6 +484,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
+	int rc = 0;
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	atomic_inc(&req->pxd_dev->ncount);
@@ -479,7 +499,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags);
+		rc = pxd_discard_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_FLUSH:
 		pxd_write_request(req, 0, 0, minor, REQ_FUA);
@@ -490,7 +510,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		return -1;
 	}
 
-	return 0;
+	return rc;
 }
 
 #else
@@ -498,6 +518,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags)
 {
+	int rc = 0;
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	atomic_inc(&req->pxd_dev->ncount);
@@ -516,7 +537,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
 	case REQ_WRITE | REQ_DISCARD:
-		pxd_discard_request(req, size, off, minor, flags);
+		rc = pxd_discard_request(req, size, off, minor, flags);
 		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
@@ -524,7 +545,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		return -1;
 	}
 
-	return 0;
+	return rc;
 }
 #endif
 
