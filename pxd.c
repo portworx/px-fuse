@@ -1534,6 +1534,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 		token = __strtok_r(0, delim, &saveptr);
 	}
 	update_out.count = i;
+	update_out.can_failover = false;
 	update_out.dev_id = pxd_dev->dev_id;
 
 	__pxd_update_path(pxd_dev, &update_out);
