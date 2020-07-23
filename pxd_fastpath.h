@@ -58,6 +58,7 @@ struct pxd_fastpath_extension {
 	pxd_failover_state_t active_failover;
 	// debug
 	bool force_fail;
+	bool can_failover; // can device failover to userspace on any error
 
 	int bg_flush_enabled; // dynamically enable bg flush from driver
 	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush

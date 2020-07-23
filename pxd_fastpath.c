@@ -526,7 +526,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
+	if (pxd_dev->fp.can_failover && status) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -541,7 +541,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
+	if (pxd_dev->fp.can_failover && status) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -556,7 +556,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (atomic_read(&head->fails)) {
 		status = -EIO; // mark failure
 	}
-	if (status) {
+	if (pxd_dev->fp.can_failover && status) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -1036,7 +1036,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 
 	pxd_suspend_io(pxd_dev);
-
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
@@ -1055,6 +1054,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		}
 	}
 	pxd_dev->fp.fastpath = false;
+	pxd_dev->fp.can_failover = false;
 	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 
 	pxd_resume_io(pxd_dev);
@@ -1152,6 +1152,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 			pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
 	}
 	pxd_dev->fp.nfd = update_path->count;
+	pxd_dev->fp.can_failover = update_path->can_failover;
 	enableFastPath(pxd_dev, true);
 	pxd_resume_io(pxd_dev);
 
