@@ -774,7 +774,7 @@ static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
 
 	pxd_dev = find_pxd_device(ctx, req.dev_id);
 	if (!pxd_dev) {
-		printk(KERN_ERR "device %llu not found", req.dev_id);
+		printk(KERN_ERR "device %llu not found\n", req.dev_id);
 		return -EINVAL;
 	}
 	return pxd_request_suspend(pxd_dev, req.skip_flush);
@@ -794,7 +794,7 @@ static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
 
 	pxd_dev = find_pxd_device(ctx, req.dev_id);
 	if (!pxd_dev) {
-		printk(KERN_ERR "device %llu not found", req.dev_id);
+		printk(KERN_ERR "device %llu not found\n", req.dev_id);
 		return -EINVAL;
 	}
 

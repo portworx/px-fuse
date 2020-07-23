@@ -894,7 +894,7 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 		}
 	}
 
-	printk(KERN_NOTICE"device %llu suspended IO from userspace", pxd_dev->dev_id);
+	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
 }
 
@@ -919,7 +919,7 @@ int pxd_request_resume(struct pxd_device *pxd_dev)
 
 	pxd_resume_io(pxd_dev);
 	pxd_dev->fp.app_suspend = false;
-	printk(KERN_NOTICE"device %llu resumed IO from userspace", pxd_dev->dev_id);
+	printk(KERN_NOTICE"device %llu resumed IO from userspace\n", pxd_dev->dev_id);
 	return 0;
 }
 
