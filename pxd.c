@@ -617,6 +617,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	}
 #else
 	if (pxd_dev->fastpath) {
+		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);	  
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
