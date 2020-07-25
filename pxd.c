@@ -512,7 +512,6 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 	}
 
 	pxd_req_misc(req, size, off, minor, flags);
-
 	return 0;
 }
 
@@ -541,25 +540,25 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
-	int rc = 0;
+	int rc;
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	atomic_inc(&req->pxd_dev->ncount);
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
-		pxd_write_same_request(req, size, off, minor, flags);
+		rc = pxd_write_same_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_WRITE:
-		pxd_write_request(req, size, off, minor, flags);
+		rc = pxd_write_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_READ:
-		pxd_read_request(req, size, off, minor, flags);
+		rc = pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_DISCARD:
 		rc = pxd_discard_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_FLUSH:
-		pxd_write_request(req, 0, 0, minor, REQ_FUA);
+		rc = pxd_write_request(req, 0, 0, minor, REQ_FUA);
 		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
@@ -575,7 +574,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags)
 {
-	int rc = 0;
+	int rc;
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
 	atomic_inc(&req->pxd_dev->ncount);
@@ -584,12 +583,12 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		/* FALLTHROUGH */
 	case (REQ_WRITE | REQ_WRITE_SAME):
 		if (flags & REQ_WRITE_SAME)
-			pxd_write_same_request(req, size, off, minor, flags);
+			rc = pxd_write_same_request(req, size, off, minor, flags);
 		else
-			pxd_write_request(req, size, off, minor, flags);
+			rc = pxd_write_request(req, size, off, minor, flags);
 		break;
 	case 0:
-		pxd_read_request(req, size, off, minor, flags);
+		rc = pxd_read_request(req, size, off, minor, flags);
 		break;
 	case REQ_DISCARD:
 		/* FALLTHROUGH */
