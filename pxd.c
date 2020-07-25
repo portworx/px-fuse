@@ -7,6 +7,7 @@
 #include "fuse_i.h"
 #include "pxd.h"
 #include <linux/uio.h>
+#include <linux/bio.h>
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -406,9 +407,57 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 }
 
-static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
+/*
+ * when block device is registered in non blk mq mode, device limits are not
+ * honoured. Handle it appropriately.
+ */
+static
+int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
+		bool discard)
+{
+	struct request_queue *q = req->pxd_dev->disk->queue;
+	sector_t max_sectors, rq_sectors;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+	int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
+#else
+	int op = discard ? REQ_DISCARD : REQ_WRITE;
+#endif
+
+	if (req->pxd_dev->using_blkque) {
+		return 0;
+	}
+
+	rq_sectors = *size >> SECTOR_SHIFT;
+	BUG_ON(rq_sectors != bio_sectors(req->bio));
+
+	max_sectors = blk_queue_get_max_sectors(q, op);
+	while (rq_sectors > max_sectors) {
+		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, &fs_bio_set);
+		if (!b) {
+			return -ENOMEM;
+		}
+
+		bio_chain(b, req->bio);
+		generic_make_request(b);
+
+		rq_sectors -= max_sectors;
+		*off += (max_sectors << SECTOR_SHIFT);
+	}
+
+	*size = rq_sectors << SECTOR_SHIFT;
+	return 0;
+}
+
+static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	int rc;
+
+	rc = pxd_handle_device_limits(req, &size, &off, false);
+	if (rc) {
+		return rc;
+	}
+
 	req->in.opcode = PXD_READ;
 	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_read_reply;
@@ -417,11 +466,19 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 
 	pxd_req_misc(req, size, off, minor, flags);
+	return 0;
 }
 
-static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	int rc;
+
+	rc = pxd_handle_device_limits(req, &size, &off, false);
+	if (rc) {
+		return rc;
+	}
+
 	req->in.opcode = PXD_WRITE;
 	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_write_reply;
@@ -433,13 +490,19 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 
 	if (pxd_detect_zero_writes && req->pxd_rdwr_in.size != 0)
 		fuse_convert_zero_writes(req);
+
+	return 0;
 }
 
 static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
-	struct request_queue *q = req->pxd_dev->disk->queue;
-	unsigned int max_discard_size;
+	int rc;
+
+	rc = pxd_handle_device_limits(req, &size, &off, true);
+	if (rc) {
+		return rc;
+	}
 
 	req->in.opcode = PXD_DISCARD;
 	if (!req->pxd_dev->using_blkque) {
@@ -450,26 +513,19 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 
 	pxd_req_misc(req, size, off, minor, flags);
 
-	/* when block device is registered in non blk mq mode, discard limits are not
-	 * honoured. Sanity check discard size is within limits.
-	 */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	max_discard_size = blk_queue_get_max_sectors(q, REQ_OP_DISCARD) << SECTOR_SHIFT;
-#else
-	max_discard_size = blk_queue_get_max_sectors(q, REQ_DISCARD) << SECTOR_SHIFT;
-#endif
-	if (size > max_discard_size) {
-		printk(KERN_ERR"device %llu discard size %u received over limit %u\n",
-				req->pxd_dev->dev_id, size, max_discard_size);
-		return -EINVAL;
-	}
-
 	return 0;
 }
 
-static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
+static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
+	int rc;
+
+	rc = pxd_handle_device_limits(req, &size, &off, false);
+	if (rc) {
+		return rc;
+	}
+
 	req->in.opcode = PXD_WRITE_SAME;
 	if (!req->pxd_dev->using_blkque) {
 		req->end = pxd_process_write_reply;
@@ -478,6 +534,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 	}
 
 	pxd_req_misc(req, size, off, minor, flags);
+	return 0;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
