@@ -637,6 +637,8 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 	}
 
 	req->pxd_dev = pxd_dev;
+	req->bio = bio;
+	req->queue = q;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
@@ -648,9 +650,6 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 		bio_io_error(bio);
 		return;
 	}
-
-	req->bio = bio;
-	req->queue = q;
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }
@@ -684,6 +683,8 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	}
 
 	req->pxd_dev = pxd_dev;
+	req->bio = bio;
+	req->queue = q;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
@@ -695,9 +696,6 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
-
-	req->bio = bio;
-	req->queue = q;
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return BLK_QC_RETVAL;
@@ -738,6 +736,8 @@ static void pxd_rq_fn(struct request_queue *q)
 		}
 
 		req->pxd_dev = pxd_dev;
+		req->rq = rq;
+		req->queue = q;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
@@ -751,8 +751,6 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		req->rq = rq;
-		req->queue = q;
 		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
@@ -781,12 +779,12 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	blk_mq_start_request(rq);
 
 	req->pxd_dev = pxd_dev;
+	req->rq = rq;
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 		return BLK_STS_IOERR;
 	}
 
-	req->rq = rq;
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 
 	return BLK_STS_OK;
