@@ -432,7 +432,11 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 
 	max_sectors = blk_queue_get_max_sectors(q, op);
 	while (rq_sectors > max_sectors) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, &fs_bio_set);
+#else
+		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, fs_bio_set);
+#endif
 		if (!b) {
 			return -ENOMEM;
 		}
