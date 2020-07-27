@@ -96,6 +96,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 #endif
 
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
+int pxd_issue_flush_marker(struct pxd_device *pxd_dev);
 
 
 static inline

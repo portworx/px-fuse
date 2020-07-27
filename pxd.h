@@ -65,6 +65,8 @@ enum pxd_opcode {
 	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_SUSPEND,		/**< IO suspend */
 	PXD_RESUME,			/**< IO resume */
+	PXD_FLUSH_MARKER,   /**< Flush Marker requests help userspace identify
+						  last req from kernel on a suspended device */
 	PXD_LAST,
 };
 

@@ -620,6 +620,38 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
+static void pxd_process_flush_marker_complete(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
+{
+	struct pxd_device *pxd_dev = req->pxd_dev;
+	// Also reopen the suspended device
+	pxd_request_resume(pxd_dev);
+}
+
+int pxd_issue_flush_marker(struct pxd_device *pxd_dev)
+{
+	struct fuse_req *req;
+
+	if (pxd_dev->using_blkque) {
+		return -EINVAL;
+	}
+
+	req = pxd_fuse_req(pxd_dev);
+	if (IS_ERR_OR_NULL(req)) {
+		return -ENOMEM;
+	}
+
+	req->pxd_dev = pxd_dev;
+	req->bio = NULL;
+	req->queue = pxd_dev->disk->queue;
+
+	req->in.opcode = PXD_FLUSH_MARKER;
+	req->end = pxd_process_flush_marker_complete;
+
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	return 0;
+}
+
 // similar function to make_request_slowpath only optimized to ensure its a reroute
 // from fastpath on IO fail.
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)

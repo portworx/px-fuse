@@ -875,13 +875,25 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int nfd = fp->nfd;
 	int i;
+	int rc;
 
-	if (pxd_dev->using_blkque || !nfd || !fp->fastpath || fp->app_suspend) {
+	if (pxd_dev->using_blkque || fp->app_suspend) {
 		return -EINVAL;
 	}
 
 	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
+
+	if (!fp->fastpath) {
+		// IO path already routed to userspace.
+		if (skip_flush) return 0;
+		// enqueue a PXD_FLUSH request to userspace on this device.
+		rc = pxd_issue_flush_marker(pxd_dev);
+		if (rc) { // if failed, then revert suspend op
+			pxd_request_resume(pxd_dev);
+		}
+		return rc;
+	}
 
 	if (skip_flush) return 0;
 
@@ -912,8 +924,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 // external request to resume IO on fastpath device
 int pxd_request_resume(struct pxd_device *pxd_dev)
 {
-	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath ||
-			!pxd_dev->fp.app_suspend) {
+	if (pxd_dev->using_blkque || !pxd_dev->fp.app_suspend) {
 		return -EINVAL;
 	}
 
