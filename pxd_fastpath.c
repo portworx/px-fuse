@@ -875,8 +875,9 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int nfd = fp->nfd;
 	int i;
+	int rc;
 
-	if (pxd_dev->using_blkque || !nfd || !fp->fastpath || fp->app_suspend) {
+	if (pxd_dev->using_blkque || fp->app_suspend) {
 		return -EINVAL;
 	}
 
@@ -885,17 +886,23 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 
 	if (skip_flush) return 0;
 
+	rc = 0;
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) {
-			int ret = vfs_fsync(fp->file[i], 0);
-			if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
-				printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
+			rc = vfs_fsync(fp->file[i], 0);
+			if (unlikely(rc && rc != -EINVAL && rc != -EIO)) {
+				printk(KERN_ERR"device %llu fsync failed with %d\n", pxd_dev->dev_id, rc);
+				goto fail;
 			}
 		}
 	}
 
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
+fail:
+	pxd_resume_io(pxd_dev);
+	fp->app_suspend = false;
+	return rc;
 }
 
 void pxd_suspend_io(struct pxd_device *pxd_dev)
@@ -912,8 +919,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 // external request to resume IO on fastpath device
 int pxd_request_resume(struct pxd_device *pxd_dev)
 {
-	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath ||
-			!pxd_dev->fp.app_suspend) {
+	if (pxd_dev->using_blkque || !pxd_dev->fp.app_suspend) {
 		return -EINVAL;
 	}
 
