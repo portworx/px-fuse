@@ -1802,11 +1802,12 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 		return -EINVAL;
 	}
 
+	// abort work cannot be active while restarting requests
+	cancel_delayed_work_sync(&ctx->abort_work);
 	rc = fuse_restart_requests(fc);
 	if (rc != 0)
 		return rc;
 
-	cancel_delayed_work_sync(&ctx->abort_work);
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 	fc->connected = 1;
