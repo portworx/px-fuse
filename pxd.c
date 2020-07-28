@@ -434,8 +434,12 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 	while (rq_sectors > max_sectors) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, &fs_bio_set);
-#else
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, fs_bio_set);
+#else
+		// This issue has so far been seen only with 4.20 and 5.x kernels
+		// bio split signature way too different to be handled.
+		return -EIO;
 #endif
 		if (!b) {
 			return -ENOMEM;
