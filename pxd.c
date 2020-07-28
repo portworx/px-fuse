@@ -418,9 +418,9 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 	struct request_queue *q = req->pxd_dev->disk->queue;
 	sector_t max_sectors, rq_sectors;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
+	unsigned int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
 #else
-	int op = discard ? REQ_DISCARD : REQ_WRITE;
+	unsigned int op = discard ? REQ_DISCARD : REQ_WRITE;
 #endif
 
 	if (req->pxd_dev->using_blkque) {
@@ -432,7 +432,11 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 
 	max_sectors = blk_queue_get_max_sectors(q, op);
 	while (rq_sectors > max_sectors) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, &fs_bio_set);
+#else
+		struct bio *b = bio_split(req->bio, max_sectors, GFP_NOIO, fs_bio_set);
+#endif
 		if (!b) {
 			return -ENOMEM;
 		}

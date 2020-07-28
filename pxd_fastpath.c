@@ -884,13 +884,14 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
 
+	rc = 0;
 	if (!fp->fastpath) {
 		// IO path already routed to userspace.
 		if (skip_flush) return 0;
 		// enqueue a PXD_FLUSH request to userspace on this device.
 		rc = pxd_issue_flush_marker(pxd_dev);
 		if (rc) { // if failed, then revert suspend op
-			pxd_request_resume(pxd_dev);
+			goto fail;
 		}
 		return rc;
 	}
@@ -899,15 +900,20 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) {
-			int ret = vfs_fsync(fp->file[i], 0);
-			if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
-				printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
+			rc = vfs_fsync(fp->file[i], 0);
+			if (unlikely(rc && rc != -EINVAL && rc != -EIO)) {
+				printk(KERN_ERR"device %llu fsync failed with %d\n", pxd_dev->dev_id, rc);
+				goto fail;
 			}
 		}
 	}
 
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
+fail:
+	pxd_resume_io(pxd_dev);
+	fp->app_suspend = false;
+	return rc;
 }
 
 void pxd_suspend_io(struct pxd_device *pxd_dev)
