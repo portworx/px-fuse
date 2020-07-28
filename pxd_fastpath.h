@@ -15,6 +15,7 @@
 
 struct pxd_device;
 struct pxd_context;
+struct fuse_conn;
 
 typedef enum pxd_failover_state {
         PXD_FP_FAILOVER_NONE = 0,
@@ -42,11 +43,8 @@ struct pxd_io_tracker {
 	struct bio clone;    // cloned bio [ALL]
 };
 
-struct pcpu_fpstate {
-	int suspend;
-};
-
 struct pxd_fastpath_extension {
+	bool app_suspend; // userspace suspended IO
 	// Extended information
 	atomic_t suspend;
 	rwlock_t suspend_lock;
@@ -121,4 +119,8 @@ int pxd_switch_fastpath(struct pxd_device*);
 int pxd_switch_nativepath(struct pxd_device*);
 void pxd_suspend_io(struct pxd_device*);
 void pxd_resume_io(struct pxd_device*);
+
+// external request from userspace to control io path
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush);
+int pxd_request_resume(struct pxd_device *pxd_dev);
 #endif /* _PXD_FASTPATH_H_ */

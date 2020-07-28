@@ -63,6 +63,8 @@ enum pxd_opcode {
 	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
 	PXD_GET_FEATURES,   /**< get features */
 	PXD_COMPLETE,		/**< complete kernel operation */
+	PXD_SUSPEND,		/**< IO suspend */
+	PXD_RESUME,			/**< IO resume */
 	PXD_LAST,
 };
 
@@ -80,7 +82,7 @@ enum pxd_opcode {
 struct pxd_dev_id {
 	uint32_t local_minor; 	/**< minor number assigned by kernel */
 	uint8_t pad[3];
-	uint8_t fastpath:1, blkmq_device:1, unused:6;
+	uint8_t fastpath:1, blkmq_device:1, suspend:1, unused:5;
 	uint64_t dev_id;	/**< global device id */
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
@@ -172,6 +174,21 @@ struct pxd_fastpath_out {
 	int enable;
 	int cleanup; // only meaningful while disabling
 };
+
+/**
+ * PXD_SUSPEND/PXD_RESUME request from user space
+ */
+struct pxd_suspend {
+	uint64_t dev_id;
+	bool skip_flush;
+};
+
+struct pxd_resume {
+	uint64_t dev_id;
+};
+
+struct pxd_context;
+struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 
 /**
  * PXD_GET_FEATURES request from user space

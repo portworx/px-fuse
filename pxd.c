@@ -1131,9 +1131,11 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
 		id.fastpath = 0;
-		if (pxd_dev->fp.fastpath) id.fastpath = 1;
 		id.blkmq_device = 0;
+		id.suspend = 0;
+		if (pxd_dev->fp.fastpath) id.fastpath = 1;
 		if (pxd_dev->using_blkque) id.blkmq_device = 1;
+		if (pxd_dev->fp.app_suspend) id.suspend = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -1556,8 +1558,9 @@ static ssize_t pxd_debug_show(struct device *dev,
 	int suspend;
 
 	suspend=pxd_suspend_state(pxd_dev);
-	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d\n",
-			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque);
+	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d,app_suspend:%d\n",
+			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque,
+			pxd_dev->fp.app_suspend);
 }
 
 static ssize_t pxd_debug_store(struct device *dev,
@@ -1585,6 +1588,14 @@ static ssize_t pxd_debug_store(struct device *dev,
 	case 'x': /* switch fastpath*/
 		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
 		pxd_switch_fastpath(pxd_dev);
+		break;
+	case 'S': /* app suspend */
+		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);
+		pxd_request_suspend(pxd_dev, false);
+		break;
+	case 'R': /* app resume */
+		printk("dev:%llu - requesting IO resume\n", pxd_dev->dev_id);
+		pxd_request_resume(pxd_dev);
 		break;
 	default:
 		/* no action */
