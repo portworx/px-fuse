@@ -277,6 +277,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 			 __func__, status);
 	}
 
+	req->fastpath = pxd_dev->fastpath;
 	return req;
 }
 
@@ -458,12 +459,11 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 			bio->bi_vcnt, flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev);
-	if (IS_ERR_OR_NULL(req)) {
+	if (IS_ERR(req)) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
-	req->fastpath = pxd_dev->fastpath;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
 		pxd_dev->minor, bio_op(bio), bio->bi_opf, false, REQCTR(&pxd_dev->ctx->fc))) {
@@ -512,13 +512,12 @@ static void pxd_rq_fn(struct request_queue *q)
 			rq->nr_phys_segments, rq->cmd_flags);
 
 		req = pxd_fuse_req(pxd_dev);
-		if (IS_ERR_OR_NULL(req)) {
+		if (IS_ERR(req)) {
 			spin_lock_irq(&pxd_dev->qlock);
 			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
 			continue;
 		}
 
-		req->fastpath = pxd_dev->fastpath;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags, true,
@@ -765,11 +764,14 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, add->open_mode, add->enable_fp, add->paths.size);
 
-	// initializes fastpath context part of pxd_dev, enables it only
-	// if pxd_dev->fastpath is true, and backing dev paths are available.
-	err = pxd_fastpath_init(pxd_dev);
-	if (err)
-		goto out_id;
+	if (pxd_dev->fastpath) {
+		err = pxd_fastpath_init(pxd_dev);
+		if (err)
+			goto out_id;
+
+		printk(KERN_INFO"Device %llu enabling fastpath %d (paths: %lu)\n",
+				add->dev_id, add->enable_fp, add->paths.size);
+	}
 
 	err = pxd_init_disk(pxd_dev, add);
 	if (err) {
