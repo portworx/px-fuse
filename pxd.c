@@ -585,12 +585,18 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_out *add)
 
 	/* Bypass queue if queue_depth is zero. */
 	if (add->queue_depth == 0) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
+	        q = blk_alloc_queue(pxd_make_request, NUMA_NO_NODE);
+#else	  
 		q = blk_alloc_queue(GFP_KERNEL);
+#endif
 		if (!q) {
 			err = -ENOMEM;
 			goto out_disk;
 		}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0)
 		blk_queue_make_request(q, pxd_make_request);
+#endif
 	} else {
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
@@ -809,7 +815,7 @@ out:
 	return err;
 }
 
-ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size_out *update_size)
+ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size)
 {
 	bool found = false;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
