@@ -2,7 +2,6 @@
 #define PXD_H_
 
 #include <linux/version.h>
-#include <linux/kernel.h>
 #ifdef __PXKERNEL__
 #include <linux/types.h>
 #else
@@ -34,14 +33,6 @@
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
-// use by fastpath for congestion control
-#define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
-// NOTE: nvme devices can go upto 1023 queue depth
-#define MAX_CONGESTION_THRESHOLD (1024)
-
-#define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
-#define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
-
 /** fuse opcodes */
 enum pxd_opcode {
 	PXD_INIT = 8192,	/**< send on device open from kernel */
@@ -53,10 +44,6 @@ enum pxd_opcode {
 	PXD_READ_DATA,		/**< read data from kernel */
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
-	PXD_ADD_EXT,		/**< add device with extended info to kernel */
-	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
-	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
-	PXD_GET_FEATURES,   /**< get features */
 	PXD_LAST,
 };
 
@@ -96,15 +83,6 @@ struct pxd_init_out {
 };
 
 /**
- * PXD_UPDATE_PATH request from user space
- */
-struct pxd_update_path_out {
-	uint64_t dev_id;
-	size_t size; // count of paths below.
-	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
-};
-
-/**
  * PXD_ADD request from user space
  */
 struct pxd_add_out {
@@ -113,20 +91,6 @@ struct pxd_add_out {
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
 };
-
-/**
- * PXD_ADD_EXT request from user space
- */
-struct pxd_add_ext_out {
-	uint64_t dev_id;	/**< device global id */
-	size_t size;		/**< block device size in bytes */
-	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
-	int32_t discard_size;	/**< block device discard size in bytes */
-	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
-	int     enable_fp; /**< enable fast path */
-	struct pxd_update_path_out paths; /**< backing device paths */
-};
-
 
 /**
  * PXD_REMOVE request from user space
@@ -154,23 +118,6 @@ struct pxd_update_size {
 	size_t size;
 	int context_id;
 };
-
-/**
- * PXD_SET_FASTPATH request from user space
- */
-struct pxd_fastpath_out {
-	uint64_t dev_id;
-	int enable;
-	int cleanup; // only meaningful while disabling
-};
-
-/**
- * PXD_GET_FEATURES request from user space
- * response contains feature set
- */
-// No arguments necessary other than opcode
-#define PXD_FEATURE_FASTPATH (0x1)
-
 
 /**
  * PXD_READ/PXD_WRITE kernel request structure
