@@ -52,6 +52,9 @@ struct pxd_fastpath_extension {
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	struct workqueue_struct *wq;
+	struct work_struct syncwi;
+	struct completion sync_complete;
+	int sync_rc;
 
 	// failover work item
 	spinlock_t  fail_lock;
