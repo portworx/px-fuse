@@ -910,10 +910,11 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
 
+	if (skip_flush) return 0;
+
 	rc = 0;
 	if (!fp->fastpath) {
 		// IO path already routed to userspace.
-		if (skip_flush) return 0;
 		// enqueue a PXD_FLUSH request to userspace on this device.
 		rc = pxd_issue_flush_marker(pxd_dev);
 		if (rc) { // if failed, then revert suspend op
@@ -921,8 +922,6 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 		}
 		return rc;
 	}
-
-	if (skip_flush) return 0;
 
 	reinit_completion(&pxd_dev->fp.sync_complete);
 	queue_work(pxd_dev->fp.wq, &pxd_dev->fp.syncwi);
