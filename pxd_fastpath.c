@@ -869,16 +869,42 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 	}
 }
 
+// background pxd syncer work function
+static void __pxd_syncer(struct work_struct *wi)
+{
+	struct pxd_device *pxd_dev = container_of(wi, struct pxd_device, fp.syncwi);
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	int nfd = fp->nfd;
+	int i;
+
+	pxd_dev->fp.sync_rc = 0;
+	for (i = 0; i < nfd; i++) {
+		if (fp->file[i] > 0) {
+			int rc = vfs_fsync(fp->file[i], 0);
+			if (unlikely(rc && rc != -EINVAL && rc != -EIO)) {
+				printk(KERN_ERR"device %llu fsync failed with %d\n", pxd_dev->dev_id, rc);
+				pxd_dev->fp.sync_rc = rc;
+				break;
+			}
+		}
+	}
+
+	complete(&pxd_dev->fp.sync_complete);
+}
+
 // external request to suspend IO on fastpath device
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
-	int nfd = fp->nfd;
-	int i;
 	int rc;
 
 	if (pxd_dev->using_blkque || fp->app_suspend) {
 		return -EINVAL;
+	}
+
+	// check if previous sync instance is still active
+	if (!skip_flush && work_busy(&pxd_dev->fp.syncwi)) {
+		return -EBUSY;
 	}
 
 	fp->app_suspend = true;
@@ -898,15 +924,19 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 
 	if (skip_flush) return 0;
 
-	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) {
-			rc = vfs_fsync(fp->file[i], 0);
-			if (unlikely(rc && rc != -EINVAL && rc != -EIO)) {
-				printk(KERN_ERR"device %llu fsync failed with %d\n", pxd_dev->dev_id, rc);
-				goto fail;
-			}
-		}
+	reinit_completion(&pxd_dev->fp.sync_complete);
+	queue_work(pxd_dev->fp.wq, &pxd_dev->fp.syncwi);
+#define SYNC_TIMEOUT (60000)
+	if (!wait_for_completion_timeout(&pxd_dev->fp.sync_complete,
+						msecs_to_jiffies(SYNC_TIMEOUT))) {
+		// suspend aborted as sync timedout
+		rc = -EBUSY;
+		goto fail;
 	}
+
+	rc = pxd_dev->fp.sync_rc;
+	// sync operation failed
+	if (rc) goto fail;
 
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
@@ -1107,6 +1137,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
 		return -ENOMEM;
 	}
+	init_completion(&fp->sync_complete);
+	INIT_WORK(&fp->syncwi, __pxd_syncer);
 
 	// failover init
 	spin_lock_init(&fp->fail_lock);
