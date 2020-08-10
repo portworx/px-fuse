@@ -659,6 +659,11 @@ int pxd_issue_flush_marker(struct pxd_device *pxd_dev)
 	req->in.opcode = PXD_FLUSH_MARKER;
 	req->end = pxd_process_flush_marker_complete;
 
+	req->pxd_rdwr_in.dev_minor = pxd_dev->minor;
+	req->pxd_rdwr_in.offset = 0;
+	req->pxd_rdwr_in.size = 0;
+	req->pxd_rdwr_in.flags = 0;
+
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return 0;
 }
