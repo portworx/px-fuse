@@ -32,4 +32,5 @@ int pxd_switch_fastpath(struct pxd_device* pxd_dev) {return -1;}
 int pxd_switch_nativepath(struct pxd_device* pxd_dev) {return -1;}
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush) { return 0; }
 int pxd_request_resume(struct pxd_device *pxd_dev) { return 0; }
+int pxd_request_fallback(struct pxd_device *pxd_dev) { return -1; }
 #endif

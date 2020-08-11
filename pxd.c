@@ -639,7 +639,7 @@ static void pxd_process_flush_marker_complete(struct fuse_conn *fc, struct fuse_
 	pxd_request_resume(pxd_dev);
 }
 
-int pxd_issue_flush_marker(struct pxd_device *pxd_dev)
+int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 {
 	struct fuse_req *req;
 
@@ -656,7 +656,7 @@ int pxd_issue_flush_marker(struct pxd_device *pxd_dev)
 	req->bio = NULL;
 	req->queue = pxd_dev->disk->queue;
 
-	req->in.opcode = PXD_FLUSH_MARKER;
+	req->in.opcode = PXD_FALLBACK;
 	req->end = pxd_process_flush_marker_complete;
 
 	req->pxd_rdwr_in.dev_minor = pxd_dev->minor;

@@ -892,6 +892,38 @@ static void __pxd_syncer(struct work_struct *wi)
 	complete(&pxd_dev->fp.sync_complete);
 }
 
+// external request to initiate fallback on fastpath device
+int pxd_request_fallback(struct pxd_device *pxd_dev)
+{
+       int rc;
+       struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+
+       if (pxd_dev->using_blkque || fp->fastpath) {
+               printk("device %llu fallback request failed (blkque %d, fastpath %d)\n",
+                       pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
+               return -EINVAL;
+       }
+
+       rc = pxd_request_suspend(pxd_dev, true);
+       if (rc) {
+               goto fail;
+       }
+
+       // IO path already routed to userspace.
+       // enqueue a fallback marker request to userspace on this device.
+       rc = pxd_initiate_fallback(pxd_dev);
+       if (rc) {
+               goto fail;
+       }
+
+       printk("device %llu successfully initiated fallback",
+               pxd_dev->dev_id);
+       return 0;
+fail:
+       pxd_request_resume(pxd_dev);
+       return rc;
+}
+
 // external request to suspend IO on fastpath device
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 {
@@ -910,18 +942,7 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
 
-	if (skip_flush) return 0;
-
-	rc = 0;
-	if (!fp->fastpath) {
-		// IO path already routed to userspace.
-		// enqueue a PXD_FLUSH request to userspace on this device.
-		rc = pxd_issue_flush_marker(pxd_dev);
-		if (rc) { // if failed, then revert suspend op
-			goto fail;
-		}
-		return rc;
-	}
+	if (skip_flush || !fp->fastpath) return 0;
 
 	reinit_completion(&pxd_dev->fp.sync_complete);
 	queue_work(pxd_dev->fp.wq, &pxd_dev->fp.syncwi);

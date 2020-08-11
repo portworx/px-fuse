@@ -801,6 +801,27 @@ static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
 	return pxd_request_resume(pxd_dev);
 }
 
+static int fuse_notify_fallback(struct fuse_conn *conn, unsigned int size,
+               struct iov_iter *iter) {
+       struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+       struct pxd_fallback req;
+       size_t len = sizeof(req);
+       struct pxd_device *pxd_dev;
+
+       if (copy_from_iter(&req, len, iter) != len) {
+               printk(KERN_ERR "%s: can't copy arg\n", __func__);
+               return -EFAULT;
+       }
+
+       pxd_dev = find_pxd_device(ctx, req.dev_id);
+       if (!pxd_dev) {
+               printk(KERN_ERR "device %llu not found\n", req.dev_id);
+               return -EINVAL;
+       }
+
+       return pxd_request_fallback(pxd_dev);
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -825,6 +846,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_suspend(fc, size, iter);
 	case PXD_RESUME:
 		return fuse_notify_resume(fc, size, iter);
+    case PXD_FALLBACK:
+        return fuse_notify_fallback(fc, size, iter);
 	default:
 		return -EINVAL;
 	}
