@@ -59,9 +59,9 @@ struct pxd_fastpath_extension {
 	// failover work item
 	spinlock_t  fail_lock;
 	pxd_failover_state_t active_failover;
-	// debug
-	bool force_fail;
+	bool force_fail; // debug
 	bool can_failover; // can device failover to userspace on any error
+	struct list_head failQ; // protected by fail_lock
 
 	int bg_flush_enabled; // dynamically enable bg flush from driver
 	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
@@ -128,4 +128,10 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush);
 int pxd_request_resume(struct pxd_device *pxd_dev);
 int pxd_request_fallback(struct pxd_device *pxd_dev);
 int pxd_request_failover(struct pxd_device *pxd_dev);
+
+// handle IO reroutes and switch events
+int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status);
+void pxd_abortfailQ(struct pxd_device *pxd_dev);
+void __pxd_abortfailQ(struct pxd_device *pxd_dev);
+
 #endif /* _PXD_FASTPATH_H_ */

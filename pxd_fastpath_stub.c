@@ -34,4 +34,8 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush) { return 0;
 int pxd_request_resume(struct pxd_device *pxd_dev) { return 0; }
 int pxd_request_fallback(struct pxd_device *pxd_dev) { return -1; }
 int pxd_request_failover(struct pxd_device *pxd_dev) { return -1; }
+
+int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status) { return -1; }
+void pxd_abortfailQ(struct pxd_device *pxd_dev) { }
+void __pxd_abortfailQ(struct pxd_device *pxd_dev) { }
 #endif

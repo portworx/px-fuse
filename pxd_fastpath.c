@@ -12,6 +12,8 @@
 #define MIN_NICE (-20)
 #endif
 
+static void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
 
 #ifdef RHEL_RELEASE_CODE
@@ -415,33 +417,43 @@ static void pxd_io_failover(struct work_struct *ws)
 	struct pxd_io_tracker *head = container_of(ws, struct pxd_io_tracker, wi);
 	struct pxd_device *pxd_dev = head->pxd_dev;
 	bool cleanup = false;
+	bool reroute = false;
+	int rc;
 
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.fastpath &&
-		pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
-		cleanup = true;
+	if (pxd_dev->fp.fastpath) {
+		if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
+			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
+			cleanup = true;
+		}
+		__pxd_add2failQ(pxd_dev, head);
+	} else if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
+		reroute = true;
 	}
+
 	spin_unlock(&pxd_dev->fp.fail_lock);
 
 	if (cleanup) {
 		disableFastPath(pxd_dev, true);
-	}
-
-	if (!pxd_dev->connected || pxd_dev->removing) {
-		printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
-		BIO_ENDIO(head->orig, -ENXIO);
-	} else {
-		// switch to native path
+		rc = pxd_initiate_failover(pxd_dev);
+		// If userspace cannot be informed of a failover event, force abort all IO.
+		if (rc) {
+			printk_ratelimited(KERN_ERR"%s: pxd%llu: failover failed %d, aborting IO\n", __func__, pxd_dev->dev_id, rc);
+			spin_lock(&pxd_dev->fp.fail_lock);
+			__pxd_abortfailQ(pxd_dev);
+			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+			spin_unlock(&pxd_dev->fp.fail_lock);
+		}
+	} else if (reroute) {
 		printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
 		atomic_inc(&pxd_dev->fp.nslowPath);
 		pxd_reroute_slowpath(pxd_dev->disk->queue, head->orig);
+		__pxd_cleanup_block_io(head);
 	}
 
-	__pxd_cleanup_block_io(head);
 	pxd_check_q_decongested(pxd_dev);
 }
 
@@ -659,6 +671,7 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	if (!enable) {
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = false;
+		pxd_abortfailQ(pxd_dev);
 		disableFastPath(pxd_dev, false);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
@@ -895,7 +908,6 @@ static void __pxd_syncer(struct work_struct *wi)
 // external request to initiate failover on fastpath device
 int pxd_request_failover(struct pxd_device *pxd_dev)
 {
-       int rc;
        struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
        // incompat device or already in native path
@@ -905,30 +917,15 @@ int pxd_request_failover(struct pxd_device *pxd_dev)
                return -EINVAL;
        }
 
-       rc = pxd_request_suspend(pxd_dev, true);
-       if (rc) {
-               goto fail;
-       }
-
        // IO path blocked, a future path refresh will take it to native path
        // enqueue a failover request to userspace on this device.
-       rc = pxd_initiate_failover(pxd_dev);
-       if (rc) {
-               goto fail;
-       }
-
-       printk("device %llu successfully initiated failover",
-               pxd_dev->dev_id);
-       return 0;
-fail:
-       pxd_request_resume(pxd_dev);
-       return rc;
+       printk("device %llu initiated failover", pxd_dev->dev_id);
+       return pxd_initiate_failover(pxd_dev);
 }
 
 // external request to initiate fallback on fastpath device
 int pxd_request_fallback(struct pxd_device *pxd_dev)
 {
-       int rc;
        struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
        if (pxd_dev->using_blkque || fp->fastpath) {
@@ -937,24 +934,10 @@ int pxd_request_fallback(struct pxd_device *pxd_dev)
                return -EINVAL;
        }
 
-       rc = pxd_request_suspend(pxd_dev, true);
-       if (rc) {
-               goto fail;
-       }
-
        // IO path already routed to userspace.
        // enqueue a fallback marker request to userspace on this device.
-       rc = pxd_initiate_fallback(pxd_dev);
-       if (rc) {
-               goto fail;
-       }
-
-       printk("device %llu successfully initiated fallback",
-               pxd_dev->dev_id);
-       return 0;
-fail:
-       pxd_request_resume(pxd_dev);
-       return rc;
+       printk("device %llu initiated fallback", pxd_dev->dev_id);
+       return pxd_initiate_fallback(pxd_dev);
 }
 
 // external request to suspend IO on fastpath device
@@ -1155,7 +1138,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 	pxd_dev->fp.fastpath = false;
 	pxd_dev->fp.can_failover = false;
-	pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 
 	pxd_resume_io(pxd_dev);
 }
@@ -1197,6 +1179,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	spin_lock_init(&fp->fail_lock);
 	fp->active_failover = PXD_FP_FAILOVER_NONE;
 	fp->force_fail = false; // debug to force faspath failover
+	INIT_LIST_HEAD(&fp->failQ);
 
 	init_waitqueue_head(&fp->sync_event);
 
@@ -1419,4 +1402,54 @@ int pxd_switch_nativepath(struct pxd_device* pxd_dev)
 			pxd_dev->dev_id);
 	}
 	return 0;
+}
+
+/// handle io path switch events and io reroute on failures
+/// functions prefixed with ___xxx need to take fail_lock
+static
+void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
+{
+	list_add_tail(&iot->item, &pxd_dev->fp.failQ);
+}
+
+int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status)
+{
+	if (!status) {
+		while (!list_empty(&pxd_dev->fp.failQ)) {
+			struct pxd_io_tracker *head = list_first_entry(&pxd_dev->fp.failQ, struct pxd_io_tracker, item);
+			BUG_ON(head->magic != PXD_IOT_MAGIC);
+			list_del(&head->item);
+			if (!pxd_dev->connected || pxd_dev->removing) {
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
+				BIO_ENDIO(head->orig, -ENXIO);
+			} else {
+				// switch to native path
+				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
+				atomic_inc(&pxd_dev->fp.nslowPath);
+				pxd_reroute_slowpath(pxd_dev->disk->queue, head->orig);
+			}
+			__pxd_cleanup_block_io(head);
+		}
+	}
+
+	__pxd_abortfailQ(pxd_dev);
+	return 0;
+}
+
+void __pxd_abortfailQ(struct pxd_device *pxd_dev)
+{
+	while (!list_empty(&pxd_dev->fp.failQ)) {
+		struct pxd_io_tracker *head = list_first_entry(&pxd_dev->fp.failQ, struct pxd_io_tracker, item);
+		BUG_ON(head->magic != PXD_IOT_MAGIC);
+		list_del(&head->item);
+		BIO_ENDIO(head->orig, -EIO);
+		__pxd_cleanup_block_io(head);
+	}
+}
+
+void pxd_abortfailQ(struct pxd_device *pxd_dev)
+{
+	spin_lock(&pxd_dev->fp.fail_lock);
+	__pxd_abortfailQ(pxd_dev);
+	spin_unlock(&pxd_dev->fp.fail_lock);
 }
