@@ -631,15 +631,16 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-static void pxd_process_flush_marker_complete(struct fuse_conn *fc, struct fuse_req *req,
+static void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
-	// Also reopen the suspended device
+	// reopen the suspended device
 	pxd_request_resume(pxd_dev);
 }
 
-int pxd_initiate_fallback(struct pxd_device *pxd_dev)
+static
+int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 {
 	struct fuse_req *req;
 
@@ -656,8 +657,8 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 	req->bio = NULL;
 	req->queue = pxd_dev->disk->queue;
 
-	req->in.opcode = PXD_FALLBACK;
-	req->end = pxd_process_flush_marker_complete;
+	req->in.opcode = code;
+	req->end = pxd_process_ioswitch_complete;
 
 	req->pxd_rdwr_in.dev_minor = pxd_dev->minor;
 	req->pxd_rdwr_in.offset = 0;
@@ -666,6 +667,16 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return 0;
+}
+
+int pxd_initiate_failover(struct pxd_device *pxd_dev)
+{
+	return pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER);
+}
+
+int pxd_initiate_fallback(struct pxd_device *pxd_dev)
+{
+	return pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK);
 }
 
 // similar function to make_request_slowpath only optimized to ensure its a reroute

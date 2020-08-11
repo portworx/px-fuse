@@ -127,4 +127,5 @@ void pxd_resume_io(struct pxd_device*);
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush);
 int pxd_request_resume(struct pxd_device *pxd_dev);
 int pxd_request_fallback(struct pxd_device *pxd_dev);
+int pxd_request_failover(struct pxd_device *pxd_dev);
 #endif /* _PXD_FASTPATH_H_ */

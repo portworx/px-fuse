@@ -892,6 +892,39 @@ static void __pxd_syncer(struct work_struct *wi)
 	complete(&pxd_dev->fp.sync_complete);
 }
 
+// external request to initiate failover on fastpath device
+int pxd_request_failover(struct pxd_device *pxd_dev)
+{
+       int rc;
+       struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+
+       // incompat device or already in native path
+       if (pxd_dev->using_blkque || !fp->fastpath) {
+               printk("device %llu failover request failed (blkque %d, fastpath %d)\n",
+                       pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
+               return -EINVAL;
+       }
+
+       rc = pxd_request_suspend(pxd_dev, true);
+       if (rc) {
+               goto fail;
+       }
+
+       // IO path blocked, a future path refresh will take it to native path
+       // enqueue a failover request to userspace on this device.
+       rc = pxd_initiate_failover(pxd_dev);
+       if (rc) {
+               goto fail;
+       }
+
+       printk("device %llu successfully initiated failover",
+               pxd_dev->dev_id);
+       return 0;
+fail:
+       pxd_request_resume(pxd_dev);
+       return rc;
+}
+
 // external request to initiate fallback on fastpath device
 int pxd_request_fallback(struct pxd_device *pxd_dev)
 {

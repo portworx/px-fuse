@@ -801,10 +801,10 @@ static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
 	return pxd_request_resume(pxd_dev);
 }
 
-static int fuse_notify_fallback(struct fuse_conn *conn, unsigned int size,
-               struct iov_iter *iter) {
+static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
+               struct iov_iter *iter, bool failover) {
        struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
-       struct pxd_fallback req;
+       struct pxd_ioswitch req;
        size_t len = sizeof(req);
        struct pxd_device *pxd_dev;
 
@@ -818,6 +818,8 @@ static int fuse_notify_fallback(struct fuse_conn *conn, unsigned int size,
                printk(KERN_ERR "device %llu not found\n", req.dev_id);
                return -EINVAL;
        }
+
+       if (failover) return pxd_request_failover(pxd_dev);
 
        return pxd_request_fallback(pxd_dev);
 }
@@ -846,8 +848,10 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_suspend(fc, size, iter);
 	case PXD_RESUME:
 		return fuse_notify_resume(fc, size, iter);
+    case PXD_FAILOVER:
+        return fuse_notify_ioswitch_event(fc, size, iter, true);
     case PXD_FALLBACK:
-        return fuse_notify_fallback(fc, size, iter);
+        return fuse_notify_ioswitch_event(fc, size, iter, false);
 	default:
 		return -EINVAL;
 	}

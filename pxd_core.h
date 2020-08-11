@@ -97,6 +97,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
 
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
 int pxd_initiate_fallback(struct pxd_device *pxd_dev);
+int pxd_initiate_failover(struct pxd_device *pxd_dev);
 
 
 static inline
