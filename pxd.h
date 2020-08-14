@@ -44,7 +44,7 @@
 // use by fastpath for congestion control
 #define DEFAULT_CONGESTION_THRESHOLD MAX_CONGESTION_THRESHOLD
 
-#define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
+#define MAX_PXD_BACKING_DEVS (5)  /**< maximum number of replica targets for each user vol */
 #define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
 
 /** fuse opcodes */

@@ -43,6 +43,13 @@ struct pxd_io_tracker {
 	struct bio clone;    // cloned bio [ALL]
 };
 
+struct pxd_sync_ws {
+	struct work_struct ws;
+	struct pxd_device *pxd_dev;
+	int index; // file index
+	int rc; // result
+};
+
 struct pxd_fastpath_extension {
 	bool app_suspend; // userspace suspended IO
 	// Extended information
@@ -52,9 +59,9 @@ struct pxd_fastpath_extension {
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	struct workqueue_struct *wq;
-	struct work_struct syncwi;
+	struct pxd_sync_ws syncwi[MAX_PXD_BACKING_DEVS];
 	struct completion sync_complete;
-	int sync_rc;
+	atomic_t sync_done;
 
 	// failover work item
 	spinlock_t  fail_lock;

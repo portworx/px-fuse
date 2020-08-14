@@ -872,30 +872,51 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 // background pxd syncer work function
 static void __pxd_syncer(struct work_struct *wi)
 {
-	struct pxd_device *pxd_dev = container_of(wi, struct pxd_device, fp.syncwi);
-	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	struct pxd_sync_ws *ws = (struct pxd_sync_ws*) wi;
+	struct pxd_device *pxd_dev = ws->pxd_dev;
+	struct pxd_fastpath_extension *fp = &ws->pxd_dev->fp;
 	int nfd = fp->nfd;
-	int i;
+	int i = ws->index;
 
-	pxd_dev->fp.sync_rc = 0;
-	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) {
-			int rc = vfs_fsync(fp->file[i], 0);
-			if (unlikely(rc && rc != -EINVAL && rc != -EIO)) {
-				printk(KERN_ERR"device %llu fsync failed with %d\n", pxd_dev->dev_id, rc);
-				pxd_dev->fp.sync_rc = rc;
-				break;
-			}
-		}
+	ws->rc = 0; // early complete
+	if (i >= nfd || fp->file[i] == NULL) {
+		goto out;
 	}
 
-	complete(&pxd_dev->fp.sync_complete);
+	ws->rc = vfs_fsync(fp->file[i], 0);
+	if (unlikely(ws->rc)) {
+		printk(KERN_ERR"device %llu fsync[%d] failed with %d\n", pxd_dev->dev_id, i, ws->rc);
+	}
+
+out:
+	BUG_ON(!atomic_read(&fp->sync_done));
+	if (atomic_dec_and_test(&fp->sync_done)) {
+		complete(&fp->sync_complete);
+	}
+}
+
+static
+bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
+{
+	int i;
+	bool busy = false;
+
+	if (atomic_read(&pxd_dev->fp.sync_done) != 0) {
+		return true;
+	}
+
+	for (i=0; i<MAX_PXD_BACKING_DEVS; i++) {
+		busy |= work_busy(&pxd_dev->fp.syncwi[i].ws);
+	}
+
+	return busy;
 }
 
 // external request to suspend IO on fastpath device
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	int i;
 	int rc;
 
 	if (pxd_dev->using_blkque || fp->app_suspend) {
@@ -903,7 +924,7 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	}
 
 	// check if previous sync instance is still active
-	if (!skip_flush && work_busy(&pxd_dev->fp.syncwi)) {
+	if (!skip_flush && pxd_sync_work_pending(pxd_dev)) {
 		return -EBUSY;
 	}
 
@@ -912,17 +933,28 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 
 	if (skip_flush) return 0;
 
-	reinit_completion(&pxd_dev->fp.sync_complete);
-	queue_work(pxd_dev->fp.wq, &pxd_dev->fp.syncwi);
+	atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
+	reinit_completion(&fp->sync_complete);
+	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+		queue_work(fp->wq, &fp->syncwi[i].ws);
+	}
+
 #define SYNC_TIMEOUT (60000)
-	if (!wait_for_completion_timeout(&pxd_dev->fp.sync_complete,
+	rc = 0;
+	if (!wait_for_completion_timeout(&fp->sync_complete,
 						msecs_to_jiffies(SYNC_TIMEOUT))) {
 		// suspend aborted as sync timedout
 		rc = -EBUSY;
 		goto fail;
 	}
 
-	rc = pxd_dev->fp.sync_rc;
+	// consolidate responses
+	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+		if (rc) break;
+		// capture first failure
+		rc = fp->syncwi[i].rc;
+	}
+
 	// sync operation failed
 	if (rc) goto fail;
 
@@ -1126,7 +1158,13 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 		return -ENOMEM;
 	}
 	init_completion(&fp->sync_complete);
-	INIT_WORK(&fp->syncwi, __pxd_syncer);
+	atomic_set(&fp->sync_done, 0);
+	for (i=0; i<MAX_PXD_BACKING_DEVS; i++) {
+		INIT_WORK(&fp->syncwi[i].ws, __pxd_syncer);
+		fp->syncwi[i].index = i;
+		fp->syncwi[i].pxd_dev = pxd_dev;
+		fp->syncwi[i].rc = 0;
+	}
 
 	// failover init
 	spin_lock_init(&fp->fail_lock);
@@ -1177,6 +1215,12 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	decode_mode(mode, modestr);
 	printk("device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
 			pxd_dev->dev_id, mode, modestr, update_path->count);
+
+	if (update_path->count > MAX_PXD_BACKING_DEVS) {
+		printk("device %llu path count more than max supported(%ld)\n",
+				pxd_dev->dev_id, update_path->count);
+		goto out_file_failed;
+	}
 
 	pxd_suspend_io(pxd_dev);
 	// update only the path below
