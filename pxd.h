@@ -181,6 +181,7 @@ struct pxd_fastpath_out {
 struct pxd_suspend {
 	uint64_t dev_id;
 	bool skip_flush;
+	bool coe; // continue to be in suspend state, even on error
 };
 
 struct pxd_resume {

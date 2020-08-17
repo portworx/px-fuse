@@ -913,7 +913,7 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 }
 
 // external request to suspend IO on fastpath device
-int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int i;
@@ -961,6 +961,11 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
 fail:
+	if (coe) {
+		printk(KERN_NOTICE"device %llu sync failed %d, continuing with suspend\n",
+				pxd_dev->dev_id, rc);
+		return 0;
+	}
 	pxd_resume_io(pxd_dev);
 	fp->app_suspend = false;
 	return rc;
