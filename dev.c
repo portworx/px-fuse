@@ -777,7 +777,7 @@ static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
 		printk(KERN_ERR "device %llu not found\n", req.dev_id);
 		return -EINVAL;
 	}
-	return pxd_request_suspend(pxd_dev, req.skip_flush);
+	return pxd_request_suspend(pxd_dev, req.skip_flush, false);
 }
 
 static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,

@@ -688,7 +688,7 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	rc = pxd_request_suspend(pxd_dev, false);
+	rc = pxd_request_suspend(pxd_dev, false, true);
 	if (rc) {
 		return rc;
 	}
@@ -705,7 +705,7 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	rc = pxd_request_suspend(pxd_dev, true);
+	rc = pxd_request_suspend(pxd_dev, true, false);
 	if (rc) {
 		return rc;
 	}
@@ -1764,7 +1764,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 		break;
 	case 'S': /* app suspend */
 		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);
-		pxd_request_suspend(pxd_dev, false);
+		pxd_request_suspend(pxd_dev, false, true);
 		break;
 	case 'R': /* app resume */
 		printk("dev:%llu - requesting IO resume\n", pxd_dev->dev_id);

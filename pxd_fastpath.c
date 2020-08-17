@@ -961,7 +961,7 @@ int pxd_request_fallback(struct pxd_device *pxd_dev)
 }
 
 // external request to suspend IO on fastpath device
-int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int i;
@@ -1009,8 +1009,16 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush)
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
 fail:
-	pxd_resume_io(pxd_dev);
-	fp->app_suspend = false;
+	// It is possible replicas are down during failover
+	// ignore and continue
+	if (coe) {
+		printk(KERN_NOTICE"device %llu suspend IO failed to flush err %d, continuing...",
+				pxd_dev->dev_id, rc);
+		rc = 0;
+	} else {
+		pxd_resume_io(pxd_dev);
+		fp->app_suspend = false;
+	}
 	return rc;
 }
 
