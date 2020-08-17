@@ -1012,13 +1012,12 @@ fail:
 	// It is possible replicas are down during failover
 	// ignore and continue
 	if (coe) {
-		printk(KERN_NOTICE"device %llu suspend IO failed to flush err %d, continuing...",
+		printk(KERN_NOTICE"device %llu sync failed %d, continuing with suspend\n",
 				pxd_dev->dev_id, rc);
-		rc = 0;
-	} else {
-		pxd_resume_io(pxd_dev);
-		fp->app_suspend = false;
+		return 0;
 	}
+	pxd_resume_io(pxd_dev);
+	fp->app_suspend = false;
 	return rc;
 }
 
