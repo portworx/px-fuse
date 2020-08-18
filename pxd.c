@@ -440,7 +440,7 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 #else
 		// This issue has so far been seen only with 4.20 and 5.x kernels
 		// bio split signature way too different to be handled.
-		printk_ratelimited(KERN_ERR"device %llu IO queue limits (rq/max %lu/%lu sectors) exceeded",
+		printk_ratelimited(KERN_ERR"device %llu IO queue limits (rq/max %lu/%lu sectors) exceeded\n",
 			req->pxd_dev->dev_id, rq_sectors, max_sectors);
 		return -EIO;
 #endif
@@ -638,7 +638,7 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	struct pxd_device *pxd_dev = req->pxd_dev;
 
 	/// io path switch event completes with status.
-	printk("device %llu completed ioswitch %d with status %d",
+	printk("device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.opcode, status);
 
 	if (req->in.opcode == PXD_FAILOVER) {
@@ -918,7 +918,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	// only fastpath uses direct block io process bypassing request queuing
 #ifndef __PX_FASTPATH__
 	if (!pxd_dev->using_blkque) {
-		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it.");
+		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it\n");
 		pxd_dev->using_blkque = true;
 	}
 #else
@@ -1699,7 +1699,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 
 	char *tmp = kzalloc(count, GFP_KERNEL);
 	if (!tmp) {
-		printk("No memory to process %lu bytes", count);
+		printk("No memory to process %lu bytes\n", count);
 		return count;
 	}
 	memcpy(tmp, buf, count);

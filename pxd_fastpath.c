@@ -134,7 +134,7 @@ int fastpath_init(void)
 #endif
 
 	if (!ppxd_bio_set) {
-		printk(KERN_ERR "pxd: bioset init failed");
+		printk(KERN_ERR "pxd: bioset init failed\n");
 		return -ENOMEM;
 	}
 
@@ -939,7 +939,7 @@ int pxd_request_failover(struct pxd_device *pxd_dev)
 
        // IO path blocked, a future path refresh will take it to native path
        // enqueue a failover request to userspace on this device.
-       printk("device %llu initiated failover", pxd_dev->dev_id);
+       printk("device %llu initiated failover\n", pxd_dev->dev_id);
        return pxd_initiate_failover(pxd_dev);
 }
 
@@ -956,7 +956,7 @@ int pxd_request_fallback(struct pxd_device *pxd_dev)
 
        // IO path already routed to userspace.
        // enqueue a fallback marker request to userspace on this device.
-       printk("device %llu initiated fallback", pxd_dev->dev_id);
+       printk("device %llu initiated fallback\n", pxd_dev->dev_id);
        return pxd_initiate_fallback(pxd_dev);
 }
 
@@ -1305,7 +1305,7 @@ out_file_failed:
 	memset(pxd_dev->fp.device_path, 0, sizeof(pxd_dev->fp.device_path));
 
 	// Allow fallback to native path and not report failure outside.
-	printk("device %llu setup through nativepath (%d)", pxd_dev->dev_id, err);
+	printk("device %llu setup through nativepath (%d)\n", pxd_dev->dev_id, err);
 	return 0;
 }
 
