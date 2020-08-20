@@ -49,7 +49,7 @@
 #define SUBMIT_BIO(bio)  submit_bio(BIO_OP(bio), bio)
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 #define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
 #else
 #define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
