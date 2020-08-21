@@ -265,7 +265,7 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	file_start_write(file);
 	bw = vfs_iter_write(file, &i, pos, 0);
 	file_end_write(file);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 	iov_iter_bvec(&i, ITER_BVEC | WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
 	bw = vfs_iter_write(file, &i, pos, 0);
@@ -336,7 +336,7 @@ ssize_t _pxd_read(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff
 
 	iov_iter_bvec(&i, READ, bvec, 1, bvec->bv_len);
 	result = vfs_iter_read(file, &i, pos, 0);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 	struct iov_iter i;
 
 	iov_iter_bvec(&i, ITER_BVEC|READ, bvec, 1, bvec->bv_len);
@@ -504,8 +504,9 @@ static void pxd_complete_io(struct bio* bio, int error)
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, bio->bi_flags);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
+	bio_end_io_acct(bio, iot->start);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
@@ -1238,7 +1239,9 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
+	bio_start_io_acct(bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
