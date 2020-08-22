@@ -31,7 +31,7 @@ endif
 MINKVER=3.10
 FPATH_MINKVER=3.10
 BLKMQ_MINKVER=4.18
-KERNELVER=$(shell echo $(KVERSION) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
+KERNELVER=$(shell echo $(CHK_KVER) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
 
 majorfn=$(shell echo "$1" | /bin/sed 's/\(.*\)\.\(.*\)/\1/g')
 minorfn=$(shell echo "$1" | /bin/sed 's/\(.*\)\.\(.*\)/\2/g')
@@ -85,20 +85,20 @@ endif
 ifeq ($(call verlater,${kmajor},${fp_major}),0)
 PXDEFINES += -D__PX_FASTPATH__
 px-objs += pxd_fastpath.o
-$(info Kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path enabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
 else
 ifeq ($(call versame,${kmajor},${fp_major}),0)
 ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
 PXDEFINES += -D__PX_FASTPATH__
 px-objs += pxd_fastpath.o
-$(info Kernel fast path enabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(info Kernel fast path enabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
 else
 px-objs += pxd_fastpath_stub.o
-$(warning Kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(warning Kernel fast path disabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
 endif
 else
 px-objs += pxd_fastpath_stub.o
-$(warning Kernel fast path disabled, current kernel version $(KVERSION) need minimum $(FPATH_MINKVER))
+$(warning Kernel fast path disabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
 endif
 endif
 
