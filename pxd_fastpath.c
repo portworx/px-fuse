@@ -566,11 +566,15 @@ static void pxd_complete_io(struct bio* bio)
 		return;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%lx\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
+			bio->bi_vcnt, bio->bi_flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
 	bio_end_io_acct(bio, iot->start);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) &&  \
-     defined(bvec_iter_sectors))
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
 #else
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
@@ -1343,11 +1347,9 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	tc = &g_tc[thread];
 	BUG_ON(!tc);
 	pxd_add_io(tc, head, rw);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
-	head->start = bio_start_io_acct(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(bvec_iter_sectors))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
+	bio_start_io_acct(bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
