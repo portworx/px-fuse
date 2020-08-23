@@ -55,7 +55,7 @@
 #define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#if defined(bio_set_dev)
 #define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
 #else
 #define BIO_SET_DEV(bio, bdev)  \

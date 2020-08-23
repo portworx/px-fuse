@@ -109,7 +109,7 @@ void _generic_start_io_acct(struct request_queue *q, int rw,
 #endif
 
 // A private global bio mempool for punting requests bypassing vfs
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 static struct bio_set pxd_bio_set;
 #endif
 #define PXD_MIN_POOL_PAGES (128)
@@ -120,7 +120,7 @@ int fastpath_init(void)
 {
 	printk(KERN_INFO"CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 	if (bioset_init(&pxd_bio_set, PXD_MIN_POOL_PAGES,
 			offsetof(struct pxd_io_tracker, clone), 0)) {
 		printk(KERN_ERR "pxd: failed to initialize bioset_init: -ENOMEM\n");
@@ -479,7 +479,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
 		// but update head status if this is a failure
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 		if (bio->bi_status) {
 			atomic_inc(&head->fails);
 		}
@@ -506,7 +506,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 			bio->bi_vcnt, bio->bi_flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
 	bio_end_io_acct(bio, iot->start);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
@@ -521,7 +521,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	// debug force fail IO
 	if (pxd_dev->fp.force_fail) atomic_inc(&head->fails);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 {
 	blk_status_t status = bio->bi_status;
 	if (atomic_read(&head->fails)) {
@@ -737,7 +737,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 
 out:
 	if (ret < 0) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 		bio->bi_status = ret;
 #else
 		bio->bi_error = ret;
@@ -1241,7 +1241,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
 	bio_start_io_acct(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && !defined(bio_kmap_irq))
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
