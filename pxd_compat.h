@@ -55,7 +55,7 @@
 #define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
 #endif
 
-#if defined(bio_set_dev)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 #define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
 #else
 #define BIO_SET_DEV(bio, bdev)  \
@@ -102,14 +102,5 @@
 	__builtin_choose_expr(__type_is_ptr(bdev), \
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(QUEUE_FLAG_PREEMPT_ONLY))
-#define QUEUE_FLAG_SET(flag) blk_queue_flag_set(flag, q);
-#else
-#define QUEUE_FLAG_SET(flag) queue_flag_set_unlocked(flag, q);
-#endif
-
 
 #endif //GDFS_PXD_COMPAT_H
