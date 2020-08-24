@@ -55,7 +55,7 @@
 #define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#if defined(bio_set_dev)
 #define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
 #else
 #define BIO_SET_DEV(bio, bdev)  \
@@ -85,6 +85,14 @@
 #define BLK_RQ_IS_PASSTHROUGH(rq)	(blk_rq_is_passthrough(rq))
 #else
 #define BLK_RQ_IS_PASSTHROUGH(rq)	(rq->cmd_type != REQ_TYPE_FS)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0) || \
+  (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
+   defined(QUEUE_FLAG_PREEMPT_ONLY))
+#define QUEUE_FLAG_SET(flag,q) blk_queue_flag_set(flag, q);
+#else
+#define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);
 #endif
 
 #endif //GDFS_PXD_COMPAT_H
