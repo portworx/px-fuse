@@ -106,9 +106,9 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(QUEUE_FLAG_PREEMPT_ONLY))
-#define QUEUE_FLAG_SET(flag) blk_queue_flag_set(flag, q);
+#define QUEUE_FLAG_SET(flag,q) blk_queue_flag_set(flag, q);
 #else
-#define QUEUE_FLAG_SET(flag) queue_flag_set_unlocked(flag, q);
+#define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);
 #endif
 
 
