@@ -673,6 +673,7 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 		pxd_dev->connected = false;
 		pxd_abortfailQ(pxd_dev);
 		disableFastPath(pxd_dev, false);
+		atomic_set(&pxd_dev->switch_active, 0);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
 		enableFastPath(pxd_dev, true);

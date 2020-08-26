@@ -652,6 +652,7 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 
 	// reopen the suspended device
 	pxd_request_resume(pxd_dev);
+	atomic_set(&pxd_dev->switch_active, 0);
 }
 
 static
@@ -661,6 +662,16 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 
 	if (pxd_dev->using_blkque) {
 		return -EINVAL;
+	}
+
+	if (atomic_cmpxchg(&pxd_dev->switch_active, 0, 1) != 0) {
+		return -EBUSY;
+	}
+
+	// if already suspended, then out again.
+	if (pxd_dev->fp.app_suspend) {
+		atomic_set(&pxd_dev->switch_active, 0);
+		return -EBUSY;
 	}
 
 	req = pxd_fuse_req(pxd_dev);
@@ -1120,6 +1131,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->nr_congestion_on = 0;
 	pxd_dev->nr_congestion_off = 0;
 	atomic_set(&pxd_dev->ncount, 0);
+	atomic_set(&pxd_dev->switch_active, 0);
 
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
