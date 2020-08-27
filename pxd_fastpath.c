@@ -905,7 +905,7 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 		return true;
 	}
 
-	for (i=0; i<MAX_PXD_BACKING_DEVS; i++) {
+	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
 		busy |= work_busy(&pxd_dev->fp.syncwi[i].ws);
 	}
 
@@ -1164,7 +1164,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	}
 	init_completion(&fp->sync_complete);
 	atomic_set(&fp->sync_done, 0);
-	for (i=0; i<MAX_PXD_BACKING_DEVS; i++) {
+	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
 		INIT_WORK(&fp->syncwi[i].ws, __pxd_syncer);
 		fp->syncwi[i].index = i;
 		fp->syncwi[i].pxd_dev = pxd_dev;
