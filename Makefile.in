@@ -126,12 +126,16 @@ PXDEFINES += -D__PX_BLKMQ__
 endif
 endif
 
+ifdef FORCE_CONTAINER_CC
+FORCE_CC=CC=$(FORCE_CONTAINER_CC)
+endif
+
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
 .PHONY: rpm
 
 all: px_version.c
-	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
+	make $(FORCE_CC) -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
 
 insert: all
 	insmod px.ko $(PXD_NUM_CONTEXT_EXPORTED)
