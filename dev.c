@@ -827,9 +827,8 @@ static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
                return -EINVAL;
        }
 
-       if (failover) return pxd_request_failover(pxd_dev);
-
-       return pxd_request_fallback(pxd_dev);
+       return pxd_request_ioswitch(pxd_dev,
+                failover ? PXD_FAILOVER_TO_USERSPACE : PXD_FALLBACK_TO_KERNEL);
 }
 
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,

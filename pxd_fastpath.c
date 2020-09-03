@@ -925,39 +925,33 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 	return busy;
 }
 
-// external request to initiate failover on fastpath device
-int pxd_request_failover(struct pxd_device *pxd_dev)
+// external request to initiate failover/fallback on fastpath device
+int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 {
-       struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
-       // incompat device or already in native path
-       if (pxd_dev->using_blkque || !fp->fastpath) {
-               printk("device %llu failover request failed (blkque %d, fastpath %d)\n",
-                       pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
-               return -EINVAL;
-       }
+	// incompat device
+	if (pxd_dev->using_blkque) {
+		printk("device %llu ioswitch request failed (blkque %d, fastpath %d)\n",
+			   pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
+		return -EINVAL;
+	}
 
-       // IO path blocked, a future path refresh will take it to native path
-       // enqueue a failover request to userspace on this device.
-       printk("device %llu initiated failover\n", pxd_dev->dev_id);
-       return pxd_initiate_failover(pxd_dev);
-}
-
-// external request to initiate fallback on fastpath device
-int pxd_request_fallback(struct pxd_device *pxd_dev)
-{
-       struct pxd_fastpath_extension *fp = &pxd_dev->fp;
-
-       if (pxd_dev->using_blkque || fp->fastpath) {
-               printk("device %llu fallback request failed (blkque %d, fastpath %d)\n",
-                       pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
-               return -EINVAL;
-       }
-
-       // IO path already routed to userspace.
-       // enqueue a fallback marker request to userspace on this device.
-       printk("device %llu initiated fallback\n", pxd_dev->dev_id);
-       return pxd_initiate_fallback(pxd_dev);
+	switch (code) {
+	case PXD_FAILOVER_TO_USERSPACE:
+		printk("device %llu initiated failover\n", pxd_dev->dev_id);
+		// IO path blocked, a future path refresh will take it to native path
+		// enqueue a failover request to userspace on this device.
+		return pxd_initiate_failover(pxd_dev);
+	case PXD_FALLBACK_TO_KERNEL:
+		// IO path already routed to userspace.
+		// enqueue a fallback marker request to userspace on this device.
+		printk("device %llu initiated fallback\n", pxd_dev->dev_id);
+		return pxd_initiate_fallback(pxd_dev);
+	default:
+		// unsupported opcode
+		return -EINVAL;
+	}
 }
 
 // shall be called internally during iopath switching.

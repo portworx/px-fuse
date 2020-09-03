@@ -691,6 +691,11 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
 
+	if (!pxd_dev->fp.fastpath) {
+		// already in native path
+		return -EINVAL;
+	}
+
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
 	}
@@ -713,6 +718,11 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 {
 	int rc;
+
+	if (pxd_dev->fp.fastpath) {
+		// already in fast path
+		return -EINVAL;
+	}
 
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
