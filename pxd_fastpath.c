@@ -673,7 +673,6 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 		pxd_dev->connected = false;
 		pxd_abortfailQ(pxd_dev);
 		disableFastPath(pxd_dev, false);
-		atomic_set(&pxd_dev->switch_active, 0);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
 		enableFastPath(pxd_dev, true);
@@ -961,14 +960,15 @@ int pxd_request_fallback(struct pxd_device *pxd_dev)
        return pxd_initiate_fallback(pxd_dev);
 }
 
-// external request to suspend IO on fastpath device
-int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
+// shall be called internally during iopath switching.
+int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
+		bool skip_flush, bool coe)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int i;
 	int rc;
 
-	if (pxd_dev->using_blkque || fp->app_suspend) {
+	if (pxd_dev->using_blkque) {
 		return -EINVAL;
 	}
 
@@ -977,7 +977,6 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 		return -EBUSY;
 	}
 
-	fp->app_suspend = true;
 	pxd_suspend_io(pxd_dev);
 
 	if (skip_flush || !fp->fastpath) return 0;
@@ -999,13 +998,10 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 
 	// consolidate responses
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-		if (rc) break;
 		// capture first failure
 		rc = fp->syncwi[i].rc;
+		if (rc) goto fail;
 	}
-
-	// sync operation failed
-	if (rc) goto fail;
 
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
@@ -1018,7 +1014,22 @@ fail:
 		return 0;
 	}
 	pxd_resume_io(pxd_dev);
-	fp->app_suspend = false;
+	return rc;
+}
+
+// external request to suspend IO on fastpath device
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
+{
+	int rc = 0;
+
+	if (atomic_cmpxchg(&pxd_dev->fp.app_suspend, 0, 1) != 0) {
+		return -EBUSY;
+	}
+	rc = pxd_request_suspend_internal(pxd_dev, skip_flush, coe);
+	if (rc) {
+		atomic_set(&pxd_dev->fp.app_suspend, 0);
+	}
+
 	return rc;
 }
 
@@ -1033,17 +1044,30 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 	}
 }
 
-// external request to resume IO on fastpath device
-int pxd_request_resume(struct pxd_device *pxd_dev)
+int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 {
-	if (pxd_dev->using_blkque || !pxd_dev->fp.app_suspend) {
+	if (pxd_dev->using_blkque) {
 		return -EINVAL;
 	}
 
 	pxd_resume_io(pxd_dev);
-	pxd_dev->fp.app_suspend = false;
 	printk(KERN_NOTICE"device %llu resumed IO from userspace\n", pxd_dev->dev_id);
 	return 0;
+}
+
+// external request to resume IO on fastpath device
+int pxd_request_resume(struct pxd_device *pxd_dev)
+{
+	int rc;
+	if (atomic_read(&pxd_dev->fp.app_suspend) == 0) {
+		return -EINVAL;
+	}
+
+	rc = pxd_request_resume_internal(pxd_dev);
+	if (!rc) {
+		atomic_set(&pxd_dev->fp.app_suspend, 0);
+	}
+	return rc;
 }
 
 
@@ -1207,6 +1231,9 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	// device temporary IO suspend
 	rwlock_init(&fp->suspend_lock);
 	atomic_set(&fp->suspend, 0);
+	atomic_set(&fp->app_suspend, 0);
+	atomic_set(&fp->failover_active, 0);
+	atomic_set(&fp->fallback_active, 0);
 	fp->wq = alloc_workqueue("pxd%llu", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
 	if (!fp->wq) {
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
@@ -1457,7 +1484,7 @@ int pxd_switch_nativepath(struct pxd_device* pxd_dev)
 }
 
 /// handle io path switch events and io reroute on failures
-/// functions prefixed with ___xxx need to take fail_lock
+/// functions prefixed with ___xxx need to called with fail_lock
 static
 void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 {
@@ -1471,19 +1498,15 @@ int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status)
 			struct pxd_io_tracker *head = list_first_entry(&pxd_dev->fp.failQ, struct pxd_io_tracker, item);
 			BUG_ON(head->magic != PXD_IOT_MAGIC);
 			list_del(&head->item);
-			if (!pxd_dev->connected || pxd_dev->removing) {
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: px is disconnected, failing IO.\n", __func__, pxd_dev->dev_id);
-				BIO_ENDIO(head->orig, -ENXIO);
-			} else {
-				// switch to native path
-				printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
-				atomic_inc(&pxd_dev->fp.nslowPath);
-				pxd_reroute_slowpath(pxd_dev->disk->queue, head->orig);
-			}
+			// switch to native path, if px is down, then abort IO timer will cleanup
+			printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
+			atomic_inc(&pxd_dev->fp.nslowPath);
+			pxd_reroute_slowpath(pxd_dev->disk->queue, head->orig);
 			__pxd_cleanup_block_io(head);
 		}
 	}
 
+	// If failover request failed, then route IO fail to user application as is.
 	__pxd_abortfailQ(pxd_dev);
 	return 0;
 }

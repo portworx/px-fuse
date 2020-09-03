@@ -641,7 +641,7 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	printk("device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.opcode, status);
 
-	if (req->in.opcode == PXD_FAILOVER) {
+	if (req->in.opcode == PXD_FAILOVER_TO_USERSPACE) {
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
 		spin_lock(&pxd_dev->fp.fail_lock);
@@ -651,8 +651,15 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	}
 
 	// reopen the suspended device
-	pxd_request_resume(pxd_dev);
-	atomic_set(&pxd_dev->switch_active, 0);
+	pxd_request_resume_internal(pxd_dev);
+
+	if (req->in.opcode == PXD_FAILOVER_TO_USERSPACE) {
+		BUG_ON(atomic_read(&pxd_dev->fp.failover_active) != 0);
+		atomic_set(&pxd_dev->fp.failover_active, 0);
+	} else {
+		BUG_ON(atomic_read(&pxd_dev->fp.fallback_active) != 0);
+		atomic_set(&pxd_dev->fp.fallback_active, 0);
+	}
 }
 
 static
@@ -662,16 +669,6 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 
 	if (pxd_dev->using_blkque) {
 		return -EINVAL;
-	}
-
-	if (atomic_cmpxchg(&pxd_dev->switch_active, 0, 1) != 0) {
-		return -EBUSY;
-	}
-
-	// if already suspended, then out again.
-	if (pxd_dev->fp.app_suspend) {
-		atomic_set(&pxd_dev->switch_active, 0);
-		return -EBUSY;
 	}
 
 	req = pxd_fuse_req(pxd_dev);
@@ -691,7 +688,7 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 	req->pxd_rdwr_in.size = 0;
 	req->pxd_rdwr_in.flags = PXD_FLAGS_SYNC;
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, true);
 	return 0;
 }
 
@@ -699,14 +696,20 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	rc = pxd_request_suspend(pxd_dev, false, true);
+	if (atomic_cmpxchg(&pxd_dev->fp.failover_active, 0, 1) != 0) {
+		return -EBUSY;
+	}
+
+	rc = pxd_request_suspend_internal(pxd_dev, false, true);
 	if (rc) {
+		atomic_set(&pxd_dev->fp.failover_active, 0);
 		return rc;
 	}
 
-	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER);
+	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
 	if (rc) {
 		pxd_request_resume(pxd_dev);
+		atomic_set(&pxd_dev->fp.failover_active, 0);
 	}
 
 	return rc;
@@ -716,14 +719,20 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	rc = pxd_request_suspend(pxd_dev, true, false);
+	if (atomic_cmpxchg(&pxd_dev->fp.fallback_active, 0, 1) != 0) {
+		return -EBUSY;
+	}
+
+	rc = pxd_request_suspend_internal(pxd_dev, true, false);
 	if (rc) {
+		atomic_set(&pxd_dev->fp.fallback_active, 0);
 		return rc;
 	}
 
-	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK);
+	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK_TO_KERNEL);
 	if (rc) {
-		pxd_request_resume(pxd_dev);
+		pxd_request_resume_internal(pxd_dev);
+		atomic_set(&pxd_dev->fp.fallback_active, 0);
 	}
 
 	return rc;
@@ -760,7 +769,7 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 		return;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, true);
 }
 
 // fastpath uses this path to punt requests to slowpath
@@ -806,7 +815,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 	return BLK_QC_RETVAL;
 }
 
@@ -860,7 +869,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -894,7 +903,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 
 	return BLK_STS_OK;
 }
@@ -1131,7 +1140,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->nr_congestion_on = 0;
 	pxd_dev->nr_congestion_off = 0;
 	atomic_set(&pxd_dev->ncount, 0);
-	atomic_set(&pxd_dev->switch_active, 0);
 
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
@@ -1320,7 +1328,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.suspend = 0;
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
 		if (pxd_dev->using_blkque) id.blkmq_device = 1;
-		if (pxd_dev->fp.app_suspend) id.suspend = 1;
+		if (atomic_read(&pxd_dev->fp.app_suspend)) id.suspend = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -1745,7 +1753,7 @@ static ssize_t pxd_debug_show(struct device *dev,
 	suspend=pxd_suspend_state(pxd_dev);
 	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d,app_suspend:%d\n",
 			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque,
-			pxd_dev->fp.app_suspend);
+			atomic_read(&pxd_dev->fp.app_suspend));
 }
 
 static ssize_t pxd_debug_store(struct device *dev,

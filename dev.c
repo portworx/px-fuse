@@ -224,7 +224,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 #endif
 }
 
-void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool force)
 {
 	req->in.unique = fuse_get_unique(fc);
 	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
@@ -235,7 +235,15 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	 */
 	rcu_read_lock();
 
-	if (fc->connected || fc->allow_disconnected) {
+	if (force) {
+		queue_request(fc, req);
+		rcu_read_unlock();
+
+		if (fc->connected || fc->allow_disconnected) {
+			fuse_conn_wakeup(fc);
+		}
+
+	} else if (fc->connected || fc->allow_disconnected) {
 		queue_request(fc, req);
 		rcu_read_unlock();
 
@@ -848,9 +856,9 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_suspend(fc, size, iter);
 	case PXD_RESUME:
 		return fuse_notify_resume(fc, size, iter);
-    case PXD_FAILOVER:
+    case PXD_FAILOVER_TO_USERSPACE:
         return fuse_notify_ioswitch_event(fc, size, iter, true);
-    case PXD_FALLBACK:
+    case PXD_FALLBACK_TO_KERNEL:
         return fuse_notify_ioswitch_event(fc, size, iter, false);
 	default:
 		return -EINVAL;

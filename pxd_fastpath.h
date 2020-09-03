@@ -51,9 +51,11 @@ struct pxd_sync_ws {
 };
 
 struct pxd_fastpath_extension {
-	bool app_suspend; // userspace suspended IO
 	// Extended information
+	atomic_t failover_active; // failover to userspace is currently active
+	atomic_t fallback_active; // fallback to kernel is currently active
 	atomic_t suspend;
+	atomic_t app_suspend; // userspace suspended IO
 	rwlock_t suspend_lock;
 	bool fastpath;
 	int nfd;
@@ -132,7 +134,9 @@ void pxd_resume_io(struct pxd_device*);
 
 // external request from userspace to control io path
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
+int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
 int pxd_request_resume(struct pxd_device *pxd_dev);
+int pxd_request_resume_internal(struct pxd_device *pxd_dev);
 int pxd_request_fallback(struct pxd_device *pxd_dev);
 int pxd_request_failover(struct pxd_device *pxd_dev);
 

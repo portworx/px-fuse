@@ -65,9 +65,9 @@ enum pxd_opcode {
 	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_SUSPEND,		/**< IO suspend */
 	PXD_RESUME,			/**< IO resume */
-	PXD_FAILOVER,   /**< Failover requests suspend IO and send in a marker req
+	PXD_FAILOVER_TO_USERSPACE,   /**< Failover requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
-	PXD_FALLBACK,   /**< Fallback requests suspend IO and send in a marker req
+	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
 	PXD_LAST,
 };
