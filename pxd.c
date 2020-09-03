@@ -653,13 +653,8 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	// reopen the suspended device
 	pxd_request_resume_internal(pxd_dev);
 
-	if (req->in.opcode == PXD_FAILOVER_TO_USERSPACE) {
-		BUG_ON(atomic_read(&pxd_dev->fp.failover_active) != 0);
-		atomic_set(&pxd_dev->fp.failover_active, 0);
-	} else {
-		BUG_ON(atomic_read(&pxd_dev->fp.fallback_active) != 0);
-		atomic_set(&pxd_dev->fp.fallback_active, 0);
-	}
+	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
+	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 }
 
 static
@@ -696,20 +691,20 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	if (atomic_cmpxchg(&pxd_dev->fp.failover_active, 0, 1) != 0) {
+	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
 	}
 
 	rc = pxd_request_suspend_internal(pxd_dev, false, true);
 	if (rc) {
-		atomic_set(&pxd_dev->fp.failover_active, 0);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 		return rc;
 	}
 
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
 	if (rc) {
 		pxd_request_resume(pxd_dev);
-		atomic_set(&pxd_dev->fp.failover_active, 0);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
 
 	return rc;
@@ -719,20 +714,20 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	if (atomic_cmpxchg(&pxd_dev->fp.fallback_active, 0, 1) != 0) {
+	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
 	}
 
 	rc = pxd_request_suspend_internal(pxd_dev, true, false);
 	if (rc) {
-		atomic_set(&pxd_dev->fp.fallback_active, 0);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 		return rc;
 	}
 
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK_TO_KERNEL);
 	if (rc) {
 		pxd_request_resume_internal(pxd_dev);
-		atomic_set(&pxd_dev->fp.fallback_active, 0);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
 
 	return rc;

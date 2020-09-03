@@ -1232,8 +1232,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	rwlock_init(&fp->suspend_lock);
 	atomic_set(&fp->suspend, 0);
 	atomic_set(&fp->app_suspend, 0);
-	atomic_set(&fp->failover_active, 0);
-	atomic_set(&fp->fallback_active, 0);
+	atomic_set(&fp->ioswitch_active, 0);
 	fp->wq = alloc_workqueue("pxd%llu", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
 	if (!fp->wq) {
 		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);

@@ -52,8 +52,7 @@ struct pxd_sync_ws {
 
 struct pxd_fastpath_extension {
 	// Extended information
-	atomic_t failover_active; // failover to userspace is currently active
-	atomic_t fallback_active; // fallback to kernel is currently active
+	atomic_t ioswitch_active; // failover or fallback active
 	atomic_t suspend;
 	atomic_t app_suspend; // userspace suspended IO
 	rwlock_t suspend_lock;
