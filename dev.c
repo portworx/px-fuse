@@ -237,12 +237,10 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool f
 
 	if (force) {
 		queue_request(fc, req);
-		rcu_read_unlock();
-
 		if (fc->connected || fc->allow_disconnected) {
 			fuse_conn_wakeup(fc);
 		}
-
+		rcu_read_unlock();
 	} else if (fc->connected || fc->allow_disconnected) {
 		queue_request(fc, req);
 		rcu_read_unlock();

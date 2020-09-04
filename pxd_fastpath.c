@@ -931,7 +931,7 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 		return true;
 	}
 
-	for (i=0; i<MAX_PXD_BACKING_DEVS; i++) {
+	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
 		busy |= work_busy(&pxd_dev->fp.syncwi[i].ws);
 	}
 
