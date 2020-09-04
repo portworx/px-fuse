@@ -417,10 +417,10 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 {
 	struct request_queue *q = req->pxd_dev->disk->queue;
 	sector_t max_sectors, rq_sectors;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	unsigned int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
-#else
+#if defined(REQ_DISCARD) && defined(REQ_WRITE)
 	unsigned int op = discard ? REQ_DISCARD : REQ_WRITE;
+#else
+	unsigned int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
 #endif
 
 	if (req->pxd_dev->using_blkque) {
@@ -433,7 +433,9 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 	max_sectors = blk_queue_get_max_sectors(q, op);
 	while (rq_sectors > max_sectors) {
 		struct bio *b;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) || \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
+     defined(bvec_iter_sectors))
 		b = bio_split(req->bio, max_sectors, GFP_NOIO, &fs_bio_set);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 		b = bio_split(req->bio, max_sectors, GFP_NOIO, fs_bio_set);
@@ -1009,12 +1011,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
-	queue_flag_set_unlocked(QUEUE_FLAG_DISCARD, q);
-#else
-	blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
-#endif
-	q->limits.discard_granularity = PXD_LBS;
+	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
+
+    q->limits.discard_granularity = PXD_LBS;
 	q->limits.discard_alignment = PXD_LBS;
 	if (add->discard_size < SECTOR_SIZE)
 		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
@@ -1240,12 +1239,10 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
 		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,17,0)
-		queue_flag_set_unlocked(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
-#else
-		blk_queue_flag_set(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
-#endif
-		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+
+		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+
+        mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 	}
 
 	spin_unlock(&pxd_dev->lock);

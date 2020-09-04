@@ -1117,7 +1117,11 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 		up_read(&sb->s_umount);
 	} else if (S_ISBLK(inode->i_mode)) {
 		struct block_device *bdev = I_BDEV(inode);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
+#else	
+		ret = blkdev_issue_flush(bdev, GFP_KERNEL);	
+#endif
 	}
 
 	io_cqring_add_event(req->ctx, req->user_data, ret);
@@ -1527,7 +1531,11 @@ restart:
 				ret = -EFAULT;
 			} else {
 				cur_mm = ctx->sqo_mm;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 				use_mm(cur_mm);
+#else
+				kthread_use_mm(cur_mm);
+#endif
 				old_fs = get_fs();
 				set_fs(USER_DS);
 			}
@@ -1610,7 +1618,11 @@ restart:
 
 	if (cur_mm) {
 		set_fs(old_fs);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		unuse_mm(cur_mm);
+#else
+		kthread_unuse_mm(cur_mm);
+#endif
 		mmput(cur_mm);
 	}
 }
@@ -1901,7 +1913,11 @@ static int io_sq_thread(void *data)
 			 * may sleep.
 			 */
 			if (cur_mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 				unuse_mm(cur_mm);
+#else
+				kthread_unuse_mm(cur_mm);				
+#endif
 				mmput(cur_mm);
 				cur_mm = NULL;
 			}
@@ -1950,7 +1966,11 @@ static int io_sq_thread(void *data)
 		if (!all_fixed && !cur_mm) {
 			mm_fault = !mmget_not_zero(ctx->sqo_mm);
 			if (!mm_fault) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 				use_mm(ctx->sqo_mm);
+#else
+				kthread_use_mm(ctx->sqo_mm);
+#endif
 				cur_mm = ctx->sqo_mm;
 			}
 		}
@@ -1964,7 +1984,11 @@ static int io_sq_thread(void *data)
 
 	set_fs(old_fs);
 	if (cur_mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		unuse_mm(cur_mm);
+#else
+		kthread_unuse_mm(cur_mm);
+#endif
 		mmput(cur_mm);
 	}
 
@@ -2302,7 +2326,11 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, void __user *arg,
 		}
 
 		ret = 0;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		down_read(&current->mm->mmap_sem);
+#else
+		down_read(&current->mm->mmap_lock);
+#endif
 		pret = get_user_pages(ubuf, nr_pages,
 					FOLL_WRITE,
 				      pages, vmas);
@@ -2319,7 +2347,11 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, void __user *arg,
 		} else {
 			ret = pret < 0 ? pret : -EFAULT;
 		}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		up_read(&current->mm->mmap_sem);
+#else
+		up_read(&current->mm->mmap_lock);
+#endif
 		if (ret) {
 			/*
 			 * if we did partial map, or found file backed vmas,
