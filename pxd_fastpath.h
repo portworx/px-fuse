@@ -71,13 +71,7 @@ struct pxd_fastpath_extension {
 	bool can_failover; // can device failover to userspace on any error
 	struct list_head failQ; // protected by fail_lock
 
-	int bg_flush_enabled; // dynamically enable bg flush from driver
-	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
-
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
-	wait_queue_head_t   sync_event;
-	atomic_t nsync_active; // [global] currently active?
-	atomic_t nsync; // [global] number of forced syncs completed
 	atomic_t nio_discard;
 	atomic_t nio_preflush;
 	atomic_t nio_flush;
@@ -89,8 +83,6 @@ struct pxd_fastpath_extension {
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests
 	atomic_t nerror; // [global] total IO error
-	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
-	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
 };
 
 // global initialization during module init for fastpath
