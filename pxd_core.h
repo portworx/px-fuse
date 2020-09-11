@@ -49,6 +49,7 @@ struct pxd_device {
 	bool connected;
 	mode_t mode;
 	bool using_blkque; // this is persistent, how the block device registered with kernel
+	atomic_t switch_active; // whether fallback or failover is active
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
