@@ -263,8 +263,7 @@ static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 	}
 
 	if (pxd_dev->congested) {
-		// If there is window, allow IO. avoiding hysteresis around congestion increases IO latency
-		if (ncount < pxd_dev->qdepth) {
+		if (ncount < (3*pxd_dev->qdepth)/4) {
 			spin_lock(&pxd_dev->lock);
 			if (pxd_dev->congested) {
 				pxd_dev->congested = false;
@@ -1534,6 +1533,33 @@ static ssize_t pxd_active_show(struct device *dev,
 	return ncount;
 }
 
+static ssize_t pxd_sync_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "sync: %u/%u %s\n",
+			atomic_read(&pxd_dev->fp.nsync_active),
+			atomic_read(&pxd_dev->fp.nsync),
+			(pxd_dev->fp.bg_flush_enabled ? "(enabled)" : "(disabled)"));
+}
+
+static ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int enable = 0;
+
+	sscanf(buf, "%d", &enable);
+
+	if (enable) {
+		pxd_dev->fp.bg_flush_enabled = 1;
+	} else {
+		pxd_dev->fp.bg_flush_enabled = 0;
+	}
+
+	return count;
+}
+
 static ssize_t pxd_mode_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
@@ -1542,6 +1568,30 @@ static ssize_t pxd_mode_show(struct device *dev,
 
 	decode_mode(pxd_dev->mode, modestr);
 	return sprintf(buf, "mode: %#x/%s\n", pxd_dev->mode, modestr);
+}
+
+static ssize_t pxd_wrsegment_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return sprintf(buf, "write segment size(bytes): %d\n", pxd_dev->fp.n_flush_wrsegs * PXD_LBS);
+}
+
+static ssize_t pxd_wrsegment_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	int nbytes, nsegs;
+
+	sscanf(buf, "%d", &nbytes);
+
+	nsegs = nbytes/PXD_LBS; // num of write segments
+	if (nsegs < MAX_WRITESEGS_FOR_FLUSH) {
+		nsegs = MAX_WRITESEGS_FOR_FLUSH;
+	}
+
+	pxd_dev->fp.n_flush_wrsegs = nsegs;
+	return count;
 }
 
 static ssize_t pxd_congestion_show(struct device *dev,
@@ -1755,7 +1805,9 @@ static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
+static DEVICE_ATTR(sync, S_IRUGO|S_IWUSR, pxd_sync_show, pxd_sync_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
+static DEVICE_ATTR(writesegment, S_IRUGO|S_IWUSR, pxd_wrsegment_show, pxd_wrsegment_store);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);;
@@ -1766,7 +1818,9 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
 	&dev_attr_active.attr,
+	&dev_attr_sync.attr,
 	&dev_attr_congested.attr,
+	&dev_attr_writesegment.attr,
 	&dev_attr_fastpath.attr,
 	&dev_attr_mode.attr,
 	&dev_attr_debug.attr,

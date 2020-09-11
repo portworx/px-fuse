@@ -174,7 +174,58 @@ static int _pxd_flush(struct pxd_device *pxd_dev, struct file *file)
 		ret = -EIO;
 	}
 	atomic_inc(&pxd_dev->fp.nio_flush);
+	atomic_set(&pxd_dev->fp.nwrite_counter, 0);
 	return ret;
+}
+
+static int pxd_should_flush(struct pxd_device *pxd_dev, int *active)
+{
+	*active = atomic_read(&pxd_dev->fp.nsync_active);
+	if (pxd_dev->fp.bg_flush_enabled &&
+		(atomic_read(&pxd_dev->fp.nwrite_counter) > pxd_dev->fp.n_flush_wrsegs) &&
+		!*active) {
+		atomic_set(&pxd_dev->fp.nsync_active, 1);
+		return 1;
+	}
+	return 0;
+}
+
+static void pxd_issue_sync(struct pxd_device *pxd_dev, struct file *file)
+{
+	struct block_device *bdev = bdget_disk(pxd_dev->disk, 0);
+	int ret;
+
+	if (!bdev) return;
+
+	ret = vfs_fsync(file, 0);
+	if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
+		printk(KERN_WARNING"device %llu fsync failed with %d\n",
+				pxd_dev->dev_id, ret);
+	}
+
+	spin_lock(&pxd_dev->fp.sync_event.lock);
+	atomic_set(&pxd_dev->fp.nwrite_counter, 0);
+	atomic_set(&pxd_dev->fp.nsync_active, 0);
+	atomic_inc(&pxd_dev->fp.nsync);
+	spin_unlock(&pxd_dev->fp.sync_event.lock);
+
+	wake_up(&pxd_dev->fp.sync_event);
+}
+
+static void pxd_check_write_cache_flush(struct pxd_device *pxd_dev, struct file *file)
+{
+	int sync_wait, sync_now;
+
+	spin_lock(&pxd_dev->fp.sync_event.lock);
+	sync_now = pxd_should_flush(pxd_dev, &sync_wait);
+
+	if (sync_wait) {
+		wait_event_interruptible_locked(pxd_dev->fp.sync_event,
+				!atomic_read(&pxd_dev->fp.nsync_active));
+	}
+	spin_unlock(&pxd_dev->fp.sync_event.lock);
+
+	if (sync_now) pxd_issue_sync(pxd_dev, file);
 }
 
 static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struct bio *bio, loff_t pos)
@@ -275,6 +326,7 @@ static int pxd_send(struct pxd_device *pxd_dev, struct file *file, struct bio *b
 		}
 	}
 #endif
+	atomic_add(nsegs, &pxd_dev->fp.nwrite_counter);
 	atomic_inc(&pxd_dev->fp.nio_write);
 	return 0;
 }
@@ -677,6 +729,9 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 			if (ret < 0) goto out;
 		}
 
+		/* Before any newer writes happen, make sure previous write/sync complete */
+		pxd_check_write_cache_flush(pxd_dev, iot->file);
+
 		ret = pxd_send(pxd_dev, iot->file, bio, pos);
 		if (ret < 0) goto out;
 
@@ -752,6 +807,7 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 			goto out;
 		}
 		/* Before any newer writes happen, make sure previous write/sync complete */
+		pxd_check_write_cache_flush(pxd_dev, iot->file);
 		ret = pxd_send(pxd_dev, iot->file, bio, pos);
 
 		if (!ret) {
@@ -1163,8 +1219,22 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	int i;
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
-	// will take slow path, if additional info not provided.
 	memset(fp, 0, sizeof(struct pxd_fastpath_extension));
+	// will take slow path, if additional info not provided.
+#if 0
+	// configure bg flush based on passed mode of operation
+	if (pxd_dev->mode & O_DIRECT) {
+		fp->bg_flush_enabled = false; // avoids high latency
+		printk("For pxd device %llu background flush disabled\n", pxd_dev->dev_id);
+	} else {
+		fp->bg_flush_enabled = true; // introduces high latency
+		printk("For pxd device %llu background flush enabled\n", pxd_dev->dev_id);
+	}
+#else
+	fp->bg_flush_enabled = false; // avoids high latency
+#endif
+
+	fp->n_flush_wrsegs = MAX_WRITESEGS_FOR_FLUSH;
 
 	// device temporary IO suspend
 	rwlock_init(&fp->suspend_lock);
@@ -1191,6 +1261,10 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	fp->force_fail = false; // debug to force faspath failover
 	INIT_LIST_HEAD(&fp->failQ);
 
+	init_waitqueue_head(&fp->sync_event);
+
+	atomic_set(&fp->nsync_active, 0);
+	atomic_set(&fp->nsync, 0);
 	atomic_set(&fp->nio_discard, 0);
 	atomic_set(&fp->nio_flush, 0);
 	atomic_set(&fp->nio_flush_nop, 0);
@@ -1199,8 +1273,13 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->nio_write, 0);
 	atomic_set(&fp->nswitch,0);
 	atomic_set(&fp->nslowPath,0);
+	atomic_set(&fp->nwrite_counter,0);
 	atomic_set(&pxd_dev->fp.ncomplete, 0);
 	atomic_set(&pxd_dev->fp.nerror, 0);
+
+	for (i = 0; i < MAX_NUMNODES; i++) {
+		atomic_set(&fp->index[i], 0);
+	}
 
 	return 0;
 }
