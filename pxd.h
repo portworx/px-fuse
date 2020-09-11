@@ -65,6 +65,10 @@ enum pxd_opcode {
 	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_SUSPEND,		/**< IO suspend */
 	PXD_RESUME,			/**< IO resume */
+	PXD_FAILOVER_TO_USERSPACE,   /**< Failover requests suspend IO and send in a marker req
+						  from kernel on a suspended device */
+	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
+						  from kernel on a suspended device */
 	PXD_LAST,
 };
 
@@ -185,6 +189,13 @@ struct pxd_suspend {
 };
 
 struct pxd_resume {
+	uint64_t dev_id;
+};
+
+/**
+ * PXD_FALLBACK|FAILOVER request from user space
+ */
+struct pxd_ioswitch {
 	uint64_t dev_id;
 };
 

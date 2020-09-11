@@ -442,7 +442,7 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 #else
 		// This issue has so far been seen only with 4.20 and 5.x kernels
 		// bio split signature way too different to be handled.
-		printk_ratelimited(KERN_ERR"device %llu IO queue limits (rq/max %lu/%lu sectors) exceeded",
+		printk_ratelimited(KERN_ERR"device %llu IO queue limits (rq/max %lu/%lu sectors) exceeded\n",
 			req->pxd_dev->dev_id, rq_sectors, max_sectors);
 		return -EIO;
 #endif
@@ -633,6 +633,118 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
+static
+void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
+	int status)
+{
+	struct pxd_device *pxd_dev = req->pxd_dev;
+
+	/// io path switch event completes with status.
+	printk("device %llu completed ioswitch %d with status %d\n",
+		pxd_dev->dev_id, req->in.opcode, status);
+
+	if (req->in.opcode == PXD_FAILOVER_TO_USERSPACE) {
+		// if the status is successful, then reissue IO to userspace
+		// else fail IO to complete.
+		spin_lock(&pxd_dev->fp.fail_lock);
+		__pxd_reissuefailQ(pxd_dev, status);
+		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+		spin_unlock(&pxd_dev->fp.fail_lock);
+	}
+
+	// reopen the suspended device
+	pxd_request_resume_internal(pxd_dev);
+
+	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
+	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+}
+
+static
+int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
+{
+	struct fuse_req *req;
+
+	if (pxd_dev->using_blkque) {
+		return -EINVAL;
+	}
+
+	req = pxd_fuse_req(pxd_dev);
+	if (IS_ERR_OR_NULL(req)) {
+		return -ENOMEM;
+	}
+
+	req->pxd_dev = pxd_dev;
+	req->bio = NULL;
+	req->queue = pxd_dev->disk->queue;
+
+	req->in.opcode = code;
+	req->end = pxd_process_ioswitch_complete;
+
+	req->pxd_rdwr_in.dev_minor = pxd_dev->minor;
+	req->pxd_rdwr_in.offset = 0;
+	req->pxd_rdwr_in.size = 0;
+	req->pxd_rdwr_in.flags = PXD_FLAGS_SYNC;
+
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, true);
+	return 0;
+}
+
+int pxd_initiate_failover(struct pxd_device *pxd_dev)
+{
+	int rc;
+
+	if (!pxd_dev->fp.fastpath) {
+		// already in native path
+		return -EINVAL;
+	}
+
+	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
+		return -EBUSY;
+	}
+
+	rc = pxd_request_suspend_internal(pxd_dev, false, true);
+	if (rc) {
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+		return rc;
+	}
+
+	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
+	if (rc) {
+		pxd_request_resume(pxd_dev);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+	}
+
+	return rc;
+}
+
+int pxd_initiate_fallback(struct pxd_device *pxd_dev)
+{
+	int rc;
+
+	if (pxd_dev->fp.fastpath) {
+		// already in fast path
+		return -EINVAL;
+	}
+
+	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
+		return -EBUSY;
+	}
+
+	rc = pxd_request_suspend_internal(pxd_dev, true, false);
+	if (rc) {
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+		return rc;
+	}
+
+	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK_TO_KERNEL);
+	if (rc) {
+		pxd_request_resume_internal(pxd_dev);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+	}
+
+	return rc;
+}
+
 // similar function to make_request_slowpath only optimized to ensure its a reroute
 // from fastpath on IO fail.
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
@@ -664,7 +776,7 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 		return;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, true);
 }
 
 // fastpath uses this path to punt requests to slowpath
@@ -710,7 +822,7 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 	return BLK_QC_RETVAL;
 }
 
@@ -764,7 +876,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -798,7 +910,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 
 	return BLK_STS_OK;
 }
@@ -833,7 +945,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	// only fastpath uses direct block io process bypassing request queuing
 #ifndef __PX_FASTPATH__
 	if (!pxd_dev->using_blkque) {
-		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it.");
+		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it\n");
 		pxd_dev->using_blkque = true;
 	}
 #else
@@ -1218,7 +1330,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.suspend = 0;
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
 		if (pxd_dev->using_blkque) id.blkmq_device = 1;
-		if (pxd_dev->fp.app_suspend) id.suspend = 1;
+		if (atomic_read(&pxd_dev->fp.app_suspend)) id.suspend = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -1609,7 +1721,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 
 	char *tmp = kzalloc(count, GFP_KERNEL);
 	if (!tmp) {
-		printk("No memory to process %lu bytes", count);
+		printk("No memory to process %lu bytes\n", count);
 		return count;
 	}
 	memcpy(tmp, buf, count);
@@ -1643,7 +1755,7 @@ static ssize_t pxd_debug_show(struct device *dev,
 	suspend=pxd_suspend_state(pxd_dev);
 	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d,app_suspend:%d\n",
 			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque,
-			pxd_dev->fp.app_suspend);
+			atomic_read(&pxd_dev->fp.app_suspend));
 }
 
 static ssize_t pxd_debug_store(struct device *dev,

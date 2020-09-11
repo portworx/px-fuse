@@ -224,7 +224,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 #endif
 }
 
-void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
+void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool force)
 {
 	req->in.unique = fuse_get_unique(fc);
 	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
@@ -235,7 +235,13 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	 */
 	rcu_read_lock();
 
-	if (fc->connected || fc->allow_disconnected) {
+	if (force) {
+		queue_request(fc, req);
+		if (fc->connected || fc->allow_disconnected) {
+			fuse_conn_wakeup(fc);
+		}
+		rcu_read_unlock();
+	} else if (fc->connected || fc->allow_disconnected) {
 		queue_request(fc, req);
 		rcu_read_unlock();
 
@@ -801,6 +807,28 @@ static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
 	return pxd_request_resume(pxd_dev);
 }
 
+static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
+               struct iov_iter *iter, bool failover) {
+       struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+       struct pxd_ioswitch req;
+       size_t len = sizeof(req);
+       struct pxd_device *pxd_dev;
+
+       if (copy_from_iter(&req, len, iter) != len) {
+               printk(KERN_ERR "%s: can't copy arg\n", __func__);
+               return -EFAULT;
+       }
+
+       pxd_dev = find_pxd_device(ctx, req.dev_id);
+       if (!pxd_dev) {
+               printk(KERN_ERR "device %llu not found\n", req.dev_id);
+               return -EINVAL;
+       }
+
+       return pxd_request_ioswitch(pxd_dev,
+                failover ? PXD_FAILOVER_TO_USERSPACE : PXD_FALLBACK_TO_KERNEL);
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -825,6 +853,10 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_suspend(fc, size, iter);
 	case PXD_RESUME:
 		return fuse_notify_resume(fc, size, iter);
+    case PXD_FAILOVER_TO_USERSPACE:
+        return fuse_notify_ioswitch_event(fc, size, iter, true);
+    case PXD_FALLBACK_TO_KERNEL:
+        return fuse_notify_ioswitch_event(fc, size, iter, false);
 	default:
 		return -EINVAL;
 	}
