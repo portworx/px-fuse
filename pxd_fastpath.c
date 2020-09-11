@@ -1029,12 +1029,13 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 {
 	int rc = 0;
 
-	if (atomic_cmpxchg(&pxd_dev->fp.app_suspend, 0, 1) != 0) {
+	if (atomic_read(&pxd_dev->fp.app_suspend) == 1) {
 		return -EBUSY;
 	}
+
 	rc = pxd_request_suspend_internal(pxd_dev, skip_flush, coe);
-	if (rc) {
-		atomic_set(&pxd_dev->fp.app_suspend, 0);
+	if (!rc) {
+		atomic_set(&pxd_dev->fp.app_suspend, 1);
 	}
 
 	return rc;
