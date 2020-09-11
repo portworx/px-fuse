@@ -49,7 +49,6 @@ struct pxd_device {
 	bool connected;
 	mode_t mode;
 	bool using_blkque; // this is persistent, how the block device registered with kernel
-	atomic_t switch_active; // whether fallback or failover is active
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
@@ -85,7 +84,6 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 #endif
 
 #define SEGMENT_SIZE (1024 * 1024)
-#define MAX_WRITESEGS_FOR_FLUSH ((4*SEGMENT_SIZE)/PXD_LBS)
 
 // slow path make request io entry point
 struct request_queue;
