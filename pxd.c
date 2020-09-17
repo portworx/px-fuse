@@ -1750,6 +1750,14 @@ static ssize_t pxd_debug_store(struct device *dev,
 	return count;
 }
 
+static ssize_t pxd_inprogress_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	return sprintf(buf, "%d", pxd_dev->ncount);
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
@@ -1758,7 +1766,8 @@ static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
-static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);;
+static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);
+static DEVICE_ATTR(inprogress, S_IRUGO, pxd_inprogress_show, NULL);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -1770,6 +1779,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_fastpath.attr,
 	&dev_attr_mode.attr,
 	&dev_attr_debug.attr,
+	&dev_attr_inprogress_attr,
 	NULL
 };
 
