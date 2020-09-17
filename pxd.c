@@ -1755,7 +1755,7 @@ static ssize_t pxd_inprogress_show(struct device *dev,
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
-	return sprintf(buf, "%d", pxd_dev->ncount);
+	return sprintf(buf, "%d", atomic_read(&pxd_dev->ncount));
 }
 
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
@@ -1779,7 +1779,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_fastpath.attr,
 	&dev_attr_mode.attr,
 	&dev_attr_debug.attr,
-	&dev_attr_inprogress_attr,
+	&dev_attr_inprogress.attr,
 	NULL
 };
 
