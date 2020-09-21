@@ -1119,8 +1119,8 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 		struct block_device *bdev = I_BDEV(inode);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
-#else	
-		ret = blkdev_issue_flush(bdev, GFP_KERNEL);	
+#else
+		ret = blkdev_issue_flush(bdev, GFP_KERNEL);
 #endif
 	}
 
@@ -1916,7 +1916,7 @@ static int io_sq_thread(void *data)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 				unuse_mm(cur_mm);
 #else
-				kthread_unuse_mm(cur_mm);				
+				kthread_unuse_mm(cur_mm);
 #endif
 				mmput(cur_mm);
 				cur_mm = NULL;
@@ -2685,7 +2685,7 @@ static void io_uring_vm_close(struct vm_area_struct *vma)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0)
 static int io_uring_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0) && !defined(__EL8__)
 static int io_uring_vm_fault(struct vm_fault *vmf)
 #else
 static vm_fault_t io_uring_vm_fault(struct vm_fault *vmf)
