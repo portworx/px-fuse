@@ -389,7 +389,6 @@ static void pxd_io_failover(struct work_struct *ws)
 	spin_unlock(&pxd_dev->fp.fail_lock);
 
 	if (cleanup) {
-		disableFastPath(pxd_dev, true);
 		rc = pxd_initiate_failover(pxd_dev);
 		// If userspace cannot be informed of a failover event, force abort all IO.
 		if (rc) {
@@ -399,6 +398,7 @@ static void pxd_io_failover(struct work_struct *ws)
 			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 			spin_unlock(&pxd_dev->fp.fail_lock);
 		}
+		disableFastPath(pxd_dev, true);
 	} else if (reroute) {
 		printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
 		atomic_inc(&pxd_dev->fp.nslowPath);
