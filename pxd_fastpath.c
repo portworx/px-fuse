@@ -1393,13 +1393,9 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 					blk_queue_max_discard_sectors(topque, bdlimit);
 				}
 
-				// write zero
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
-				curlimit = blk_queue_get_max_sectors(topque, REQ_OP_WRITE_ZEROES);
-				bdlimit = blk_queue_get_max_sectors(bque, REQ_OP_WRITE_ZEROES);
-				if ((curlimit == 0) || (bdlimit < curlimit)) {
-					blk_queue_max_write_zeroes_sectors(topque, bdlimit);
-				}
+				// write zero
+				// do not support write zero!!
 
 				// write same
 				curlimit = blk_queue_get_max_sectors(topque, REQ_OP_WRITE_SAME);
@@ -1413,6 +1409,7 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	}
 
 	// ensure few block properties are still as expected.
+	blk_queue_max_write_zeroes_sectors(topque, 0);
 	blk_queue_logical_block_size(topque, PXD_LBS);
 	blk_queue_physical_block_size(topque, PXD_LBS);
 	return;
