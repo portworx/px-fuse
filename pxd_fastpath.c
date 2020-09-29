@@ -376,14 +376,17 @@ static void pxd_io_failover(struct work_struct *ws)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.fastpath) {
-		if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
+	switch (pxd_dev->fp.active_failover) {
+	case PXD_FP_FAILOVER_NONE:
+		if (pxd_dev->fp.fastpath) {
 			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
 			cleanup = true;
+		} else {
+			reroute = true;
 		}
+		// fallthrough
+	case PXD_FP_FAILOVER_ACTIVE:
 		__pxd_add2failQ(pxd_dev, head);
-	} else if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
-		reroute = true;
 	}
 
 	spin_unlock(&pxd_dev->fp.fail_lock);
@@ -398,7 +401,6 @@ static void pxd_io_failover(struct work_struct *ws)
 			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 			spin_unlock(&pxd_dev->fp.fail_lock);
 		}
-		disableFastPath(pxd_dev, true);
 	} else if (reroute) {
 		printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
 		atomic_inc(&pxd_dev->fp.nslowPath);
