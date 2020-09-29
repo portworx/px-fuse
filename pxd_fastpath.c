@@ -1351,6 +1351,7 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	struct gendisk *disk;
 	struct request_queue *bque;
 	char name[BDEVNAME_SIZE];
+	unsigned int curlimit, bdlimit;
 
 	printk(KERN_INFO"pxd device %llu: adjusting queue limits nfd %d\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 
@@ -1377,6 +1378,34 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 				printk(KERN_INFO"pxd device %llu queue limits adjusted with block dev %p(%s)\n",
 					pxd_dev->dev_id, bdev, bdevname(bdev, name));
 				blk_queue_stack_limits(topque, bque);
+
+				// discard
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+				curlimit = blk_queue_get_max_sectors(topque, REQ_OP_DISCARD);
+				bdlimit = blk_queue_get_max_sectors(bque, REQ_OP_DISCARD);
+#else
+				curlimit = blk_queue_get_max_sectors(topque, REQ_DISCARD);
+				bdlimit = blk_queue_get_max_sectors(bque, REQ_DISCARD);
+#endif
+				if (bdlimit < curlimit) {
+					blk_queue_max_discard_sectors(topque, bdlimit);
+				}
+
+				// write zero
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+				curlimit = blk_queue_get_max_sectors(topque, REQ_OP_WRITE_ZEROES);
+				bdlimit = blk_queue_get_max_sectors(bque, REQ_OP_WRITE_ZEROES);
+				if (bdlimit < curlimit) {
+					blk_queue_max_write_zeroes_sectors(topque, bdlimit);
+				}
+
+				// write same
+				curlimit = blk_queue_get_max_sectors(topque, REQ_OP_WRITE_SAME);
+				bdlimit = blk_queue_get_max_sectors(bque, REQ_OP_WRITE_SAME);
+				if (bdlimit < curlimit) {
+					blk_queue_max_write_same_sectors(topque, bdlimit);
+				}
+#endif
 			}
 		}
 	}
