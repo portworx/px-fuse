@@ -1977,7 +1977,7 @@ static void pxd_vm_close(struct vm_area_struct *vma)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,11,0)
 static int pxd_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0) && !defined(__EL8__)
 static int pxd_vm_fault(struct vm_fault *vmf)
 #else
 static vm_fault_t pxd_vm_fault(struct vm_fault *vmf)
