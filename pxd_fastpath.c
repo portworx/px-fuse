@@ -380,11 +380,12 @@ static void pxd_io_failover(struct work_struct *ws)
 	case PXD_FP_FAILOVER_NONE:
 		if (pxd_dev->fp.fastpath) {
 			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
+			__pxd_add2failQ(pxd_dev, head);
 			cleanup = true;
 		} else {
 			reroute = true;
 		}
-		// fallthrough
+		break;
 	case PXD_FP_FAILOVER_ACTIVE:
 		__pxd_add2failQ(pxd_dev, head);
 	}
@@ -1446,7 +1447,6 @@ void __pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int s
 		__pxd_cleanup_block_io(head);
 	}
 }
-
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev)
 {
