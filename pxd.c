@@ -414,15 +414,10 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
  */
 static
 int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
-		bool discard)
+		unsigned int op)
 {
 	struct request_queue *q = req->pxd_dev->disk->queue;
 	sector_t max_sectors, rq_sectors;
-#if defined(REQ_DISCARD) && defined(REQ_WRITE)
-	unsigned int op = discard ? REQ_DISCARD : REQ_WRITE;
-#else
-	unsigned int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
-#endif
 
 	if (req->pxd_dev->using_blkque) {
 		return 0;
@@ -433,7 +428,7 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 
 	max_sectors = blk_queue_get_max_sectors(q, op);
 	if (!max_sectors) {
-		return -EIO;
+		return -EOPNOTSUPP;
 	}
 
 	while (rq_sectors > max_sectors) {
@@ -471,7 +466,7 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, false);
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_READ);
 	if (rc) {
 		return rc;
 	}
@@ -492,7 +487,7 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, false);
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE);
 	if (rc) {
 		return rc;
 	}
@@ -517,7 +512,11 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, true);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_DISCARD);
+#else
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_DISCARD);
+#endif
 	if (rc) {
 		return rc;
 	}
@@ -538,7 +537,11 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, false);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_SAME);
+#else
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_WRITE_SAME);
+#endif
 	if (rc) {
 		return rc;
 	}
