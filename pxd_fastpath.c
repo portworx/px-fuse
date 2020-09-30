@@ -376,17 +376,15 @@ static void pxd_io_failover(struct work_struct *ws)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	switch (pxd_dev->fp.active_failover) {
-	case PXD_FP_FAILOVER_NONE:
+	if (!pxd_dev->fp.active_failover) {
 		if (pxd_dev->fp.fastpath) {
-			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
+			pxd_dev->fp.active_failover = true;
 			__pxd_add2failQ(pxd_dev, head);
 			cleanup = true;
 		} else {
 			reroute = true;
 		}
-		break;
-	case PXD_FP_FAILOVER_ACTIVE:
+	} else {
 		__pxd_add2failQ(pxd_dev, head);
 	}
 
@@ -399,7 +397,7 @@ static void pxd_io_failover(struct work_struct *ws)
 			printk_ratelimited(KERN_ERR"%s: pxd%llu: failover failed %d, aborting IO\n", __func__, pxd_dev->dev_id, rc);
 			spin_lock(&pxd_dev->fp.fail_lock);
 			__pxd_abortfailQ(pxd_dev);
-			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+			pxd_dev->fp.active_failover = false;
 			spin_unlock(&pxd_dev->fp.fail_lock);
 		}
 	} else if (reroute) {
@@ -1133,7 +1131,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int i;
 
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+		pxd_dev->fp.active_failover = false;
 		return;
 	}
 
@@ -1190,7 +1188,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 	// failover init
 	spin_lock_init(&fp->fail_lock);
-	fp->active_failover = PXD_FP_FAILOVER_NONE;
+	fp->active_failover = false;
 	fp->force_fail = false; // debug to force faspath failover
 	INIT_LIST_HEAD(&fp->failQ);
 

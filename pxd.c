@@ -253,19 +253,14 @@ static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 
 	// does not care about async or sync request.
 	if (ncount > pxd_dev->qdepth) {
-		// spin_lock(&pxd_dev->lock);
 		if (atomic_cmpxchg(&pxd_dev->congested, 0, 1) == 0) {
 			pxd_dev->nr_congestion_on++;
 		}
-		// spin_unlock(&pxd_dev->lock);
 		return 1;
 	}
-	// If there is window, allow IO. avoiding hysteresis around congestion increases IO latency
-	//spin_lock(&pxd_dev->lock);
 	if (atomic_cmpxchg(&pxd_dev->congested, 1, 0) == 1) {
 		pxd_dev->nr_congestion_off++;
 	}
-	// spin_unlock(&pxd_dev->lock);
 	return 0;
 }
 
@@ -649,7 +644,7 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		spin_lock(&pxd_dev->fp.fail_lock);
 		list_splice(&pxd_dev->fp.failQ, &ios);
 		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+		pxd_dev->fp.active_failover = false;
 		spin_unlock(&pxd_dev->fp.fail_lock);
 	}
 
@@ -659,7 +654,7 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 
-	// reissue the pending IOs
+	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
 }
 
