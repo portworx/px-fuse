@@ -253,29 +253,19 @@ static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 
 	// does not care about async or sync request.
 	if (ncount > pxd_dev->qdepth) {
-		spin_lock(&pxd_dev->lock);
-		if (!pxd_dev->congested) {
-			pxd_dev->congested = true;
+		// spin_lock(&pxd_dev->lock);
+		if (atomic_cmpxchg(&pxd_dev->congested, 0, 1) == 0) {
 			pxd_dev->nr_congestion_on++;
 		}
-		spin_unlock(&pxd_dev->lock);
+		// spin_unlock(&pxd_dev->lock);
 		return 1;
 	}
-
-	if (pxd_dev->congested) {
-		// If there is window, allow IO. avoiding hysteresis around congestion increases IO latency
-		if (ncount < pxd_dev->qdepth) {
-			spin_lock(&pxd_dev->lock);
-			if (pxd_dev->congested) {
-				pxd_dev->congested = false;
-				pxd_dev->nr_congestion_off++;
-			}
-			spin_unlock(&pxd_dev->lock);
-			return 0;
-		}
-		return 1;
+	// If there is window, allow IO. avoiding hysteresis around congestion increases IO latency
+	//spin_lock(&pxd_dev->lock);
+	if (atomic_cmpxchg(&pxd_dev->congested, 1, 0) == 1) {
+		pxd_dev->nr_congestion_off++;
 	}
-
+	// spin_unlock(&pxd_dev->lock);
 	return 0;
 }
 
@@ -1153,7 +1143,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
 	// hard coded congestion limits within driver
-	pxd_dev->congested = false;
+	atomic_set(&pxd_dev->congested, 0);
 	pxd_dev->qdepth = DEFAULT_CONGESTION_THRESHOLD;
 	pxd_dev->nr_congestion_on = 0;
 	pxd_dev->nr_congestion_off = 0;
@@ -1563,7 +1553,7 @@ static ssize_t pxd_congestion_show(struct device *dev,
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	return sprintf(buf, "congested: %s (%d/%d)\n",
-			pxd_dev->congested ? "yes" : "no",
+			atomic_read(&pxd_dev->congested) ? "yes" : "no",
 			pxd_dev->nr_congestion_on,
 			pxd_dev->nr_congestion_off);
 }
