@@ -28,6 +28,7 @@
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
 #define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 #define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
+#define PXD_IOC_ABORT_IOS		_IO(PXD_IOCTL_MAGIC, 4)		/* 0x505804 */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -143,6 +144,13 @@ struct pxd_read_data_out {
 	uint64_t unique;	/**< request id */
 	int32_t iovcnt;		/**< number of iovec entries */
 	uint32_t offset;	/**< offset into data */
+};
+
+/**
+ * PXD_ABORT_IOS ioctl from user space
+ */
+struct pxd_abort_ios {
+	int context_id;
 };
 
 /**
