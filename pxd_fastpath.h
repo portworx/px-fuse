@@ -131,8 +131,8 @@ int pxd_request_resume_internal(struct pxd_device *pxd_dev);
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
 
 // handle IO reroutes and switch events
+void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 void pxd_abortfailQ(struct pxd_device *pxd_dev);
 void __pxd_abortfailQ(struct pxd_device *pxd_dev);
-void __pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 
 #endif /* _PXD_FASTPATH_H_ */

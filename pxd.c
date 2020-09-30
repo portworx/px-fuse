@@ -670,7 +670,7 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 
 	// reissue the pending IOs
-	__pxd_reissuefailQ(pxd_dev, &ios, status);
+	pxd_reissuefailQ(pxd_dev, &ios, status);
 }
 
 static

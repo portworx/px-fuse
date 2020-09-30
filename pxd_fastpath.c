@@ -1429,7 +1429,8 @@ void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 	list_add_tail(&iot->item, &pxd_dev->fp.failQ);
 }
 
-void __pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status)
+// no locking needed, @ios is a local list of IO to be reissued.
+void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status)
 {
 	while (!list_empty(ios)) {
 		struct pxd_io_tracker *head = list_first_entry(ios, struct pxd_io_tracker, item);
