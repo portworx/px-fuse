@@ -646,7 +646,9 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
+	struct list_head ios;
 
+	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
 	printk("device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.opcode, status);
@@ -655,7 +657,8 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
 		spin_lock(&pxd_dev->fp.fail_lock);
-		__pxd_reissuefailQ(pxd_dev, status);
+		list_splice(&pxd_dev->fp.failQ, &ios);
+		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
 		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
 		spin_unlock(&pxd_dev->fp.fail_lock);
 	}
@@ -665,6 +668,9 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 
 	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+
+	// reissue the pending IOs
+	__pxd_reissuefailQ(pxd_dev, &ios, status);
 }
 
 static

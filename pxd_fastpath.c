@@ -1428,25 +1428,25 @@ void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 	list_add_tail(&iot->item, &pxd_dev->fp.failQ);
 }
 
-int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status)
+void __pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status)
 {
-	if (!status) {
-		while (!list_empty(&pxd_dev->fp.failQ)) {
-			struct pxd_io_tracker *head = list_first_entry(&pxd_dev->fp.failQ, struct pxd_io_tracker, item);
-			BUG_ON(head->magic != PXD_IOT_MAGIC);
-			list_del(&head->item);
+	while (!list_empty(ios)) {
+		struct pxd_io_tracker *head = list_first_entry(ios, struct pxd_io_tracker, item);
+		BUG_ON(head->magic != PXD_IOT_MAGIC);
+		list_del(&head->item);
+		if (!status) {
 			// switch to native path, if px is down, then abort IO timer will cleanup
 			printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
 			atomic_inc(&pxd_dev->fp.nslowPath);
 			pxd_reroute_slowpath(pxd_dev->disk->queue, head->orig);
-			__pxd_cleanup_block_io(head);
+		} else {
+			// If failover request failed, then route IO fail to user application as is.
+			BIO_ENDIO(head->orig, -EIO);
 		}
+		__pxd_cleanup_block_io(head);
 	}
-
-	// If failover request failed, then route IO fail to user application as is.
-	__pxd_abortfailQ(pxd_dev);
-	return 0;
 }
+
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev)
 {
