@@ -1409,7 +1409,9 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	}
 
 	// ensure few block properties are still as expected.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
 	blk_queue_max_write_zeroes_sectors(topque, 0);
+#endif
 	blk_queue_logical_block_size(topque, PXD_LBS);
 	blk_queue_physical_block_size(topque, PXD_LBS);
 	return;
