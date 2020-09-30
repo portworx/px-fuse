@@ -1093,7 +1093,7 @@ void fuse_abort_all_ios(struct fuse_conn *fc)
 	printk(KERN_INFO "PXD_IOCTL : Aborting all requests...");
 	spin_lock(&fc->lock);
 	fc->allow_disconnected = 0;
-	end_queued_requests(fc);
+	fuse_end_queued_requests(fc);
 	spin_unlock(&fc->lock);
 }
 
