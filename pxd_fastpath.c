@@ -376,27 +376,28 @@ static void pxd_io_failover(struct work_struct *ws)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
 	spin_lock(&pxd_dev->fp.fail_lock);
-	if (pxd_dev->fp.fastpath) {
-		if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
-			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_ACTIVE;
+	if (!pxd_dev->fp.active_failover) {
+		if (pxd_dev->fp.fastpath) {
+			pxd_dev->fp.active_failover = true;
+			__pxd_add2failQ(pxd_dev, head);
 			cleanup = true;
+		} else {
+			reroute = true;
 		}
+	} else {
 		__pxd_add2failQ(pxd_dev, head);
-	} else if (pxd_dev->fp.active_failover == PXD_FP_FAILOVER_NONE) {
-		reroute = true;
 	}
 
 	spin_unlock(&pxd_dev->fp.fail_lock);
 
 	if (cleanup) {
-		disableFastPath(pxd_dev, true);
 		rc = pxd_initiate_failover(pxd_dev);
 		// If userspace cannot be informed of a failover event, force abort all IO.
 		if (rc) {
 			printk_ratelimited(KERN_ERR"%s: pxd%llu: failover failed %d, aborting IO\n", __func__, pxd_dev->dev_id, rc);
 			spin_lock(&pxd_dev->fp.fail_lock);
 			__pxd_abortfailQ(pxd_dev);
-			pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+			pxd_dev->fp.active_failover = false;
 			spin_unlock(&pxd_dev->fp.fail_lock);
 		}
 	} else if (reroute) {
@@ -1130,7 +1131,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int i;
 
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+		pxd_dev->fp.active_failover = false;
 		return;
 	}
 
@@ -1187,7 +1188,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 	// failover init
 	spin_lock_init(&fp->fail_lock);
-	fp->active_failover = PXD_FP_FAILOVER_NONE;
+	fp->active_failover = false;
 	fp->force_fail = false; // debug to force faspath failover
 	INIT_LIST_HEAD(&fp->failQ);
 
@@ -1382,6 +1383,9 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	}
 
 	// ensure few block properties are still as expected.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+	blk_queue_max_write_zeroes_sectors(topque, 0);
+#endif
 	blk_queue_logical_block_size(topque, PXD_LBS);
 	blk_queue_physical_block_size(topque, PXD_LBS);
 	return;
@@ -1423,24 +1427,24 @@ void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 	list_add_tail(&iot->item, &pxd_dev->fp.failQ);
 }
 
-int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status)
+// no locking needed, @ios is a local list of IO to be reissued.
+void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status)
 {
-	if (!status) {
-		while (!list_empty(&pxd_dev->fp.failQ)) {
-			struct pxd_io_tracker *head = list_first_entry(&pxd_dev->fp.failQ, struct pxd_io_tracker, item);
-			BUG_ON(head->magic != PXD_IOT_MAGIC);
-			list_del(&head->item);
+	while (!list_empty(ios)) {
+		struct pxd_io_tracker *head = list_first_entry(ios, struct pxd_io_tracker, item);
+		BUG_ON(head->magic != PXD_IOT_MAGIC);
+		list_del(&head->item);
+		if (!status) {
 			// switch to native path, if px is down, then abort IO timer will cleanup
 			printk_ratelimited(KERN_ERR"%s: pxd%llu: resuming IO in native path.\n", __func__, pxd_dev->dev_id);
 			atomic_inc(&pxd_dev->fp.nslowPath);
 			pxd_reroute_slowpath(pxd_dev->disk->queue, head->orig);
-			__pxd_cleanup_block_io(head);
+		} else {
+			// If failover request failed, then route IO fail to user application as is.
+			BIO_ENDIO(head->orig, -EIO);
 		}
+		__pxd_cleanup_block_io(head);
 	}
-
-	// If failover request failed, then route IO fail to user application as is.
-	__pxd_abortfailQ(pxd_dev);
-	return 0;
 }
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev)

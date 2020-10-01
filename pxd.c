@@ -253,29 +253,14 @@ static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 
 	// does not care about async or sync request.
 	if (ncount > pxd_dev->qdepth) {
-		spin_lock(&pxd_dev->lock);
-		if (!pxd_dev->congested) {
-			pxd_dev->congested = true;
+		if (atomic_cmpxchg(&pxd_dev->congested, 0, 1) == 0) {
 			pxd_dev->nr_congestion_on++;
 		}
-		spin_unlock(&pxd_dev->lock);
 		return 1;
 	}
-
-	if (pxd_dev->congested) {
-		// If there is window, allow IO. avoiding hysteresis around congestion increases IO latency
-		if (ncount < pxd_dev->qdepth) {
-			spin_lock(&pxd_dev->lock);
-			if (pxd_dev->congested) {
-				pxd_dev->congested = false;
-				pxd_dev->nr_congestion_off++;
-			}
-			spin_unlock(&pxd_dev->lock);
-			return 0;
-		}
-		return 1;
+	if (atomic_cmpxchg(&pxd_dev->congested, 1, 0) == 1) {
+		pxd_dev->nr_congestion_off++;
 	}
-
 	return 0;
 }
 
@@ -414,15 +399,10 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
  */
 static
 int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
-		bool discard)
+		unsigned int op)
 {
 	struct request_queue *q = req->pxd_dev->disk->queue;
 	sector_t max_sectors, rq_sectors;
-#if defined(REQ_DISCARD) && defined(REQ_WRITE)
-	unsigned int op = discard ? REQ_DISCARD : REQ_WRITE;
-#else
-	unsigned int op = discard ? REQ_OP_DISCARD : REQ_OP_WRITE;
-#endif
 
 	if (req->pxd_dev->using_blkque) {
 		return 0;
@@ -432,6 +412,10 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 	BUG_ON(rq_sectors != bio_sectors(req->bio));
 
 	max_sectors = blk_queue_get_max_sectors(q, op);
+	if (!max_sectors) {
+		return -EOPNOTSUPP;
+	}
+
 	while (rq_sectors > max_sectors) {
 		struct bio *b;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) || \
@@ -467,7 +451,7 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, false);
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_READ);
 	if (rc) {
 		return rc;
 	}
@@ -488,7 +472,7 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, false);
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE);
 	if (rc) {
 		return rc;
 	}
@@ -513,7 +497,11 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, true);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_DISCARD);
+#else
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_DISCARD);
+#endif
 	if (rc) {
 		return rc;
 	}
@@ -534,7 +522,11 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, false);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_SAME);
+#else
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_WRITE_SAME);
+#endif
 	if (rc) {
 		return rc;
 	}
@@ -639,7 +631,9 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
+	struct list_head ios;
 
+	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
 	printk("device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.opcode, status);
@@ -648,8 +642,9 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
 		spin_lock(&pxd_dev->fp.fail_lock);
-		__pxd_reissuefailQ(pxd_dev, status);
-		pxd_dev->fp.active_failover = PXD_FP_FAILOVER_NONE;
+		list_splice(&pxd_dev->fp.failQ, &ios);
+		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
+		pxd_dev->fp.active_failover = false;
 		spin_unlock(&pxd_dev->fp.fail_lock);
 	}
 
@@ -658,6 +653,9 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 
 	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+
+	// reissue any failed IOs from local list
+	pxd_reissuefailQ(pxd_dev, &ios, status);
 }
 
 static
@@ -1140,7 +1138,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
 	// hard coded congestion limits within driver
-	pxd_dev->congested = false;
+	atomic_set(&pxd_dev->congested, 0);
 	pxd_dev->qdepth = DEFAULT_CONGESTION_THRESHOLD;
 	pxd_dev->nr_congestion_on = 0;
 	pxd_dev->nr_congestion_off = 0;
@@ -1550,7 +1548,7 @@ static ssize_t pxd_congestion_show(struct device *dev,
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	return sprintf(buf, "congested: %s (%d/%d)\n",
-			pxd_dev->congested ? "yes" : "no",
+			atomic_read(&pxd_dev->congested) ? "yes" : "no",
 			pxd_dev->nr_congestion_on,
 			pxd_dev->nr_congestion_off);
 }

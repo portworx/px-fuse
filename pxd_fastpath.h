@@ -17,11 +17,6 @@ struct pxd_device;
 struct pxd_context;
 struct fuse_conn;
 
-typedef enum pxd_failover_state {
-        PXD_FP_FAILOVER_NONE = 0,
-        PXD_FP_FAILOVER_ACTIVE = 1,
-} pxd_failover_state_t;
-
 // Added metadata for each bio
 struct pxd_io_tracker {
 #define PXD_IOT_MAGIC (0xbeefcafe)
@@ -66,7 +61,7 @@ struct pxd_fastpath_extension {
 
 	// failover work item
 	spinlock_t  fail_lock;
-	pxd_failover_state_t active_failover;
+	bool active_failover; // is failover active
 	bool force_fail; // debug
 	bool can_failover; // can device failover to userspace on any error
 	struct list_head failQ; // protected by fail_lock
@@ -131,7 +126,7 @@ int pxd_request_resume_internal(struct pxd_device *pxd_dev);
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
 
 // handle IO reroutes and switch events
-int __pxd_reissuefailQ(struct pxd_device *pxd_dev, int status);
+void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 void pxd_abortfailQ(struct pxd_device *pxd_dev);
 void __pxd_abortfailQ(struct pxd_device *pxd_dev);
 

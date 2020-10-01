@@ -54,7 +54,7 @@ struct pxd_device {
 	// congestion handling
 	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	unsigned int qdepth;
-	bool congested;
+	atomic_t congested;
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
