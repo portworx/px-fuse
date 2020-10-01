@@ -1088,6 +1088,15 @@ __acquires(fc->lock)
 	end_requests(fc, &fc->processing);
 }
 
+void fuse_abort_all_ios(struct fuse_conn *fc)
+{
+	printk(KERN_INFO "PXD_IOCTL : Aborting all requests...");
+	spin_lock(&fc->lock);
+	fc->allow_disconnected = 0;
+	fuse_end_queued_requests(fc);
+	spin_unlock(&fc->lock);
+}
+
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
 	if (fc->per_cpu_ids)

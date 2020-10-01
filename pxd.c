@@ -123,6 +123,25 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 	return ret;
 }
 
+static long pxd_ioctl_abort_ios(struct file *file, void __user *argp)
+{
+	struct pxd_context *ctx = NULL;
+	struct pxd_abort_ios abort_ios_args;
+	long ret = 0;
+
+	if (copy_from_user(&abort_ios_args, argp, sizeof(abort_ios_args))) {
+		return -EFAULT;
+	}
+
+	ctx =  &pxd_contexts[abort_ios_args.context_id];
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+		return -EFAULT;
+	}
+
+	fuse_abort_all_ios(&ctx->fc);
+	return ret;
+}
+
 static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -168,6 +187,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		break;
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
+	case PXD_IOC_ABORT_IOS:
+		return pxd_ioctl_abort_ios(file, (void __user *)arg);
 	default:
 		break;
 	}
