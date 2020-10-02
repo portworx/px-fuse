@@ -632,10 +632,8 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = false;
 		pxd_abortfailQ(pxd_dev);
-		disableFastPath(pxd_dev, false);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
-		enableFastPath(pxd_dev, true);
 		pxd_dev->connected = true;
 	}
 }
