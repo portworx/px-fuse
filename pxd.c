@@ -1718,7 +1718,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 		break;
 	case 'X': /* switch native path */
 		printk("dev:%llu - IO native path switch - ctrl failover\n", pxd_dev->dev_id);
-		pxd_switch_nativepath(pxd_dev);
+		pxd_debug_switch_nativepath(pxd_dev);
 		break;
 	case 's': /* suspend */
 		printk("dev:%llu - IO suspend\n", pxd_dev->dev_id);

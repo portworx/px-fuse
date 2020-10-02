@@ -1423,7 +1423,7 @@ int pxd_switch_fastpath(struct pxd_device* pxd_dev)
 	return 0;
 }
 
-int pxd_switch_nativepath(struct pxd_device* pxd_dev)
+int pxd_debug_switch_nativepath(struct pxd_device* pxd_dev)
 {
 	if (pxd_dev->fp.fastpath) {
 		printk(KERN_WARNING"pxd_dev %llu in fastpath, forcing failover\n",
