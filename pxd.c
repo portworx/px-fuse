@@ -1730,7 +1730,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 		break;
 	case 'x': /* switch fastpath*/
 		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
-		pxd_switch_fastpath(pxd_dev);
+		pxd_debug_switch_fastpath(pxd_dev);
 		break;
 	case 'S': /* app suspend */
 		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);

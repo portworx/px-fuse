@@ -1418,7 +1418,7 @@ int pxd_suspend_state(struct pxd_device *pxd_dev)
 	return atomic_read(&pxd_dev->fp.suspend);
 }
 
-int pxd_switch_fastpath(struct pxd_device* pxd_dev)
+int pxd_debug_switch_fastpath(struct pxd_device* pxd_dev)
 {
 	return 0;
 }
