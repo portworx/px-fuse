@@ -364,6 +364,29 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 	bio_put(&head->clone);
 }
 
+// will block IO on this device until failover is complete
+static void pxd_fastpath_attach_fail(struct pxd_device *pxd_dev)
+{
+	int rc;
+	spin_lock(&pxd_dev->fp.fail_lock);
+	pxd_dev->fp.active_failover = true;
+	spin_unlock(&pxd_dev->fp.fail_lock);
+
+	rc = pxd_initiate_failover(pxd_dev);
+	// If userspace cannot be informed of a failover event, fail IO on this device.
+	if (rc) {
+		pxd_dev->connected = false; // all future IO also fails.
+		printk(KERN_ERR"%s: pxd%llu: failover failed %d, aborting IO\n", __func__, pxd_dev->dev_id, rc);
+		spin_lock(&pxd_dev->fp.fail_lock);
+		pxd_dev->fp.active_failover = false;
+		spin_unlock(&pxd_dev->fp.fail_lock);
+		return;
+	}
+
+	printk(KERN_INFO"%s: Device %llu failover initiated, fastpath attach failed\n",
+		__func__, pxd_dev->dev_id);
+}
+
 static void pxd_io_failover(struct work_struct *ws)
 {
 	struct pxd_io_tracker *head = container_of(ws, struct pxd_io_tracker, wi);
@@ -1057,7 +1080,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	}
 
 	pxd_suspend_io(pxd_dev);
-
+	pxd_dev->fp.fastpath = true;
 	decode_mode(mode, modestr);
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
@@ -1099,7 +1122,6 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		}
 	}
 
-	pxd_dev->fp.fastpath = true;
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
@@ -1116,10 +1138,8 @@ out_file_failed:
 	memset(fp->file, 0, sizeof(fp->file));
 	memset(fp->device_path, 0, sizeof(fp->device_path));
 
-	pxd_dev->fp.fastpath = false;
+	pxd_fastpath_attach_fail(pxd_dev);
 	pxd_resume_io(pxd_dev);
-	printk(KERN_INFO"%s: Device %llu no backing volume setup, will take slow path\n",
-		__func__, pxd_dev->dev_id);
 }
 
 void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
