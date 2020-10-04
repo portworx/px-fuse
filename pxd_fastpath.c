@@ -437,6 +437,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_io_tracker *head = iot->head;
 	bool dofree = true;
 	int blkrc = 0;
+	unsigned int flags = get_op_flags(bio);
 
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
@@ -450,11 +451,11 @@ static void pxd_complete_io(struct bio* bio, int error)
 		}
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 		if (bio->bi_error) {
-			blkrc = bio->bi_status;
+			blkrc = bio->bi_error;
 		}
 #else
 		if (error) {
-			blkrc = bio->bi_status;
+			blkrc = error;
 		}
 #endif
 	if (blkrc != 0) {
@@ -463,7 +464,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, (long unsigned int)bio->bi_opf);
+			bio->bi_vcnt, (long unsigned int)flags);
 	}
 
 	fput(iot->file);
