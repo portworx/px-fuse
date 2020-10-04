@@ -468,11 +468,11 @@ static void pxd_complete_io(struct bio* bio, int error)
 
 		if (failed) {
 			printk("FAILED IO %s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-				"flags 0x%x\n", __func__,
+				"flags 0x%lx\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags);
+			bio->bi_vcnt, (long unsigned int)bio->bi_flags);
 		}
 
 		return;
