@@ -644,21 +644,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 #endif
 
-static inline unsigned int get_op_flags(struct bio *bio)
-{
-	unsigned int op_flags;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
-	op_flags = 0; // Not present in older kernels
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
-	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
-	op_flags = bio_flags(bio);
-#else
-	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
-#endif
-	return op_flags;
-}
-
 static
 void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
@@ -681,14 +666,14 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		spin_unlock(&pxd_dev->fp.fail_lock);
 	}
 
-	// reopen the suspended device
-	pxd_request_resume_internal(pxd_dev);
-
 	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 
 	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
+
+	// reopen the suspended device
+	pxd_request_resume_internal(pxd_dev);
 }
 
 static
@@ -783,9 +768,6 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	unsigned int flags;
-
-	flags = bio->bi_flags;
 
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
@@ -822,16 +804,13 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	unsigned int flags;
-
-	flags = bio->bi_flags;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, flags, get_op_flags(bio));
+			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {

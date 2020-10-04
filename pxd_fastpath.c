@@ -436,45 +436,41 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
 	bool dofree = true;
+	int blkrc = 0;
 
-	fput(iot->file);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	if (!atomic_dec_and_test(&head->active)) {
-		// not all responses have come back
-		// but update head status if this is a failure
-		bool failed = false;
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 		if (bio->bi_status) {
-			failed = true;
-			atomic_inc(&head->fails);
+			blkrc = blk_status_to_errno(bio->bi_status);
 		}
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 		if (bio->bi_error) {
-			failed = true;
-			atomic_inc(&head->fails);
+			blkrc = bio->bi_status;
 		}
 #else
 		if (error) {
-			failed = true;
-			atomic_inc(&head->fails);
+			blkrc = bio->bi_status;
 		}
 #endif
-		pxd_printk("pxd_complete_io for bio %px (pxd %px) with head %px active %d error %d early return\n",
-			bio, pxd_dev, head, atomic_read(&head->active), atomic_read(&head->fails));
-
-		if (failed) {
-			printk("FAILED IO %s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-				"flags 0x%lx\n", __func__,
+	if (blkrc != 0) {
+		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s at %ld len %d bytes %d pages "
+				"flags 0x%lx\n", __func__, blkrc,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, (long unsigned int)bio->bi_flags);
-		}
+			bio->bi_vcnt, (long unsigned int)bio->bi_opf);
+	}
 
+	fput(iot->file);
+	if (!atomic_dec_and_test(&head->active)) {
+		// not all responses have come back
+		// but update head status if this is a failure
+		if (blkrc != 0) atomic_inc(&head->fails);
 		return;
 	}
 
