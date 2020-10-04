@@ -117,6 +117,7 @@ int pxd_debug_switch_fastpath(struct pxd_device*);
 int pxd_debug_switch_nativepath(struct pxd_device*);
 void pxd_suspend_io(struct pxd_device*);
 void pxd_resume_io(struct pxd_device*);
+int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev);
 
 // external request from userspace to control io path
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe);

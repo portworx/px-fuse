@@ -181,6 +181,37 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 	return ret;
 }
 
+static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
+{
+	struct pxd_context *ctx = NULL;
+	struct pxd_fastpath_out cleanup_args;
+	long ret = 0;
+	struct pxd_device *pxd_dev;
+
+	if (copy_from_user(&cleanup_args, argp, sizeof(cleanup_args))) {
+		return -EFAULT;
+	}
+
+	if (cleanup_args.context_id >= pxd_num_contexts_exported) {
+		printk("%s : invalid context: %d\n", __func__, cleanup_args.context_id);
+		return -EFAULT;
+	}
+
+	ctx =  &pxd_contexts[cleanup_args.context_id];
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+		return -EFAULT;
+	}
+
+	pxd_dev = find_pxd_device(ctx, cleanup_args.dev_id);
+	if (pxd_dev != NULL) {
+		(void)get_device(&pxd_dev->dev);
+		ret = pxd_fastpath_vol_cleanup(pxd_dev);
+		put_device(&pxd_dev->dev);
+	}
+
+	return ret;
+}
+
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -220,6 +251,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_run_user_queue(file);
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
+	case PXD_IOC_FPCLEANUP:
+		return pxd_ioctl_fp_cleanup(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}

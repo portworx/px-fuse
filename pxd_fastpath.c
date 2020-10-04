@@ -444,33 +444,40 @@ static void pxd_complete_io(struct bio* bio, int error)
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
 		// but update head status if this is a failure
+		bool failed = false;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 		if (bio->bi_status) {
+			failed = true;
 			atomic_inc(&head->fails);
 		}
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 		if (bio->bi_error) {
+			failed = true;
 			atomic_inc(&head->fails);
 		}
 #else
 		if (error) {
+			failed = true;
 			atomic_inc(&head->fails);
 		}
 #endif
 		pxd_printk("pxd_complete_io for bio %px (pxd %px) with head %px active %d error %d early return\n",
 			bio, pxd_dev, head, atomic_read(&head->active), atomic_read(&head->fails));
 
-		return;
-	}
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%lx\n", __func__,
+		if (failed) {
+			printk("FAILED IO %s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+				"flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
 			bio->bi_vcnt, bio->bi_flags);
+		}
+
+		return;
+	}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
 	bio_end_io_acct(bio, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
@@ -1117,9 +1124,18 @@ out_file_failed:
 	memset(fp->device_path, 0, sizeof(fp->device_path));
 
 	pxd_dev->fp.fastpath = false;
-	pxd_resume_io(pxd_dev);
+	/// volume still remains suspended waiting for CLEANUP request to reopen IO.
 	printk(KERN_INFO"%s: Device %llu no backing volume setup, will take slow path\n",
 		__func__, pxd_dev->dev_id);
+}
+
+int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
+{
+	printk(KERN_INFO"%s: Device %llu cleanup IO reactivate received\n",
+		__func__, pxd_dev->dev_id);
+	disableFastPath(pxd_dev, false);
+	pxd_resume_io(pxd_dev);
+	return 0;
 }
 
 void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
@@ -1130,6 +1146,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
 		pxd_dev->fp.active_failover = false;
+		pxd_dev->fp.fastpath = false;
 		return;
 	}
 

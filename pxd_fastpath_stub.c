@@ -35,6 +35,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bo
 int pxd_request_resume(struct pxd_device *pxd_dev) { return 0; }
 int pxd_request_resume_internal(struct pxd_device *pxd_dev) { return 0; }
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code) { return -1; }
+int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev) { return -1; }
 
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status){}
 void pxd_abortfailQ(struct pxd_device *pxd_dev) { }
