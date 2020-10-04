@@ -467,11 +467,14 @@ static void pxd_complete_io(struct bio* bio, int error)
 			bio->bi_vcnt, (long unsigned int)flags);
 	}
 
+	iot->status = blkrc;
+	if (head->status == 0) {
+		head->status = blkrc;
+	}
 	fput(iot->file);
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
 		// but update head status if this is a failure
-		if (blkrc != 0) atomic_inc(&head->fails);
 		return;
 	}
 
@@ -491,18 +494,12 @@ static void pxd_complete_io(struct bio* bio, int error)
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->ncount);
 
-	// debug force fail IO
-	if (pxd_dev->fp.force_fail) atomic_inc(&head->fails);
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 {
-	blk_status_t status = bio->bi_status;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (pxd_dev->fp.can_failover && status) {
+	blk_status_t status = errno_to_blk_status(head->status);
+	if (pxd_dev->fp.can_failover && (status == BLK_STS_IOERR || pxd_dev->fp.force_fail)) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -513,11 +510,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
-	int status = bio->bi_error;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (pxd_dev->fp.can_failover && status) {
+	int status = head->status;
+	if (pxd_dev->fp.can_failover && (status == -EIO || pxd_dev->fp.force_fail)) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -529,10 +523,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 #else
 {
 	int status = error;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (pxd_dev->fp.can_failover && status) {
+	if (pxd_dev->fp.can_failover && (status == -EIO || pxd_dev->fp.force_fail)) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -577,9 +568,9 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	INIT_LIST_HEAD(&iot->replicas);
 	INIT_LIST_HEAD(&iot->item);
 	iot->orig = bio;
+	iot->status = 0;
 	iot->start = jiffies;
 	atomic_set(&iot->active, 0);
-	atomic_set(&iot->fails, 0);
 	iot->file = get_file(fileh);
 	INIT_WORK(&iot->wi, pxd_process_fileio);
 
