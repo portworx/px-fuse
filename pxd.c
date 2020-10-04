@@ -666,14 +666,14 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		spin_unlock(&pxd_dev->fp.fail_lock);
 	}
 
+	// reopen the suspended device
+	pxd_request_resume_internal(pxd_dev);
+
 	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 
 	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
-
-	// reopen the suspended device
-	pxd_request_resume_internal(pxd_dev);
 }
 
 static
