@@ -510,7 +510,6 @@ static void pxd_complete_io(struct bio* bio, int error)
 	iot->status = blkrc;
 	if (!atomic_dec_and_test(&head->active)) {
 		// not all responses have come back
-		// but update head status if this is a failure
 		return;
 	}
 
