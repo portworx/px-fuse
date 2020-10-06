@@ -515,6 +515,10 @@ static void pxd_complete_io(struct bio* bio, int error)
 
 	// final reconciled status
 	blkrc = reconcile_io_status(head);
+
+	// debug condition for force fail
+	if (pxd_dev->fp.force_fail) blkrc = -EIO;
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
 	bio_end_io_acct(bio, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
@@ -535,7 +539,7 @@ static void pxd_complete_io(struct bio* bio, int error)
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 {
-	if (pxd_dev->fp.can_failover && (blkrc == -EIO || pxd_dev->fp.force_fail)) {
+	if (pxd_dev->fp.can_failover && blkrc == -EIO) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -546,7 +550,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
-	if (pxd_dev->fp.can_failover && (blkrc == -EIO || pxd_dev->fp.force_fail)) {
+	if (pxd_dev->fp.can_failover && blkrc == -EIO) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
@@ -557,7 +561,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 }
 #else
 {
-	if (pxd_dev->fp.can_failover && (blkrc == -EIO || pxd_dev->fp.force_fail)) {
+	if (pxd_dev->fp.can_failover && blkrc == -EIO) {
 		dofree = false;
 		atomic_inc(&pxd_dev->fp.nerror);
 		pxd_failover_initiate(pxd_dev, head);
