@@ -525,7 +525,6 @@ static void pxd_complete_io(struct bio* bio, int error)
 	_generic_end_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
 
-	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->ncount);
 
