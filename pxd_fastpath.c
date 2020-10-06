@@ -433,12 +433,12 @@ static int remap_io_status(int status)
 // @return - update reconciled error code
 static int reconcile_io_status(struct pxd_io_tracker *head)
 {
+	struct pxd_io_tracker *repl;
 	int status = 0;
 	int tmp;
 
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
-	while (!list_empty(&head->replicas)) {
-		struct pxd_io_tracker *repl = list_first_entry(&head->replicas, struct pxd_io_tracker, item);
+	list_for_each_entry(repl, &head->replicas, item) {
 		BUG_ON(repl->magic != PXD_IOT_MAGIC);
 
 		tmp = remap_io_status(repl->status);
