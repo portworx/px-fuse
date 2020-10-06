@@ -474,9 +474,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
-	bool dofree = true;
-	int blkrc = 0;
 	unsigned int flags = get_op_flags(bio);
+	int blkrc = 0;
 
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
@@ -535,43 +534,31 @@ static void pxd_complete_io(struct bio* bio, int error)
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->ncount);
 
+	if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
+		atomic_inc(&pxd_dev->fp.nerror);
+		pxd_failover_initiate(pxd_dev, head);
+		pxd_check_q_decongested(pxd_dev);
+		return;
+	}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 {
-	if (pxd_dev->fp.can_failover && blkrc == -EIO) {
-		dofree = false;
-		atomic_inc(&pxd_dev->fp.nerror);
-		pxd_failover_initiate(pxd_dev, head);
-	} else {
 		iot->orig->bi_status = errno_to_blk_status(blkrc);
 		bio_endio(iot->orig);
-	}
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
-	if (pxd_dev->fp.can_failover && blkrc == -EIO) {
-		dofree = false;
-		atomic_inc(&pxd_dev->fp.nerror);
-		pxd_failover_initiate(pxd_dev, head);
-	} else {
 		iot->orig->bi_error = blkrc;
 		bio_endio(iot->orig);
-	}
 }
 #else
 {
-	if (pxd_dev->fp.can_failover && blkrc == -EIO) {
-		dofree = false;
-		atomic_inc(&pxd_dev->fp.nerror);
-		pxd_failover_initiate(pxd_dev, head);
-	} else {
 		bio_endio(iot->orig, blkrc);
-	}
 }
 #endif
-
-	if (dofree) __pxd_cleanup_block_io(head);
+	__pxd_cleanup_block_io(head);
 	pxd_check_q_decongested(pxd_dev);
 }
 
