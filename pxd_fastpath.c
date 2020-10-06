@@ -475,7 +475,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
 	unsigned int flags = get_op_flags(bio);
-	int blkrc = 0;
+	int blkrc;
 
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
@@ -484,18 +484,13 @@ static void pxd_complete_io(struct bio* bio, int error)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
-		if (bio->bi_status) {
-			blkrc = blk_status_to_errno(bio->bi_status);
-		}
+		blkrc = blk_status_to_errno(bio->bi_status);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-		if (bio->bi_error) {
-			blkrc = bio->bi_error;
-		}
+		blkrc = bio->bi_error;
 #else
-		if (error) {
-			blkrc = error;
-		}
+		blkrc = error;
 #endif
+
 	if (blkrc != 0) {
 		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s at %ld len %d bytes %d pages "
 				"flags 0x%lx\n", __func__, blkrc,
