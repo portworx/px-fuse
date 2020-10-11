@@ -13,6 +13,8 @@
 #endif
 
 static void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot);
+const char* pxd_decode_cmdstr(unsigned cmd, unsigned flags);
+void log_bio(int minor, unsigned cmd, unsigned flags, uint64_t size, loff_t offset, bool reroute);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
 
@@ -492,12 +494,22 @@ static void pxd_complete_io(struct bio* bio, int error)
 #endif
 
 	if (blkrc != 0) {
-		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s at %ld len %d bytes %d pages "
-				"flags 0x%lx\n", __func__, blkrc,
+		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s(%s) at %ld len %d bytes %d pages "
+				"op 0x%x flags 0x%lx\n", __func__, blkrc,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+			pxd_decode_cmdstr(bio_op(bio), bio->bi_opf),
+#else
+			pxd_decode_cmdstr(bio->bi_rw, bio->bi_rw),
+#endif
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, (long unsigned int)flags);
+			bio->bi_vcnt, bio_op(bio), (long unsigned int)flags);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+		log_bio(pxd_dev->minor, bio_op(bio), bio->bi_opf, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE, false);
+#else
+		log_bio(pxd_dev->minor, bio->bi_rw, bio->bi_rw, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE, false);
+#endif
 	}
 
 	fput(iot->file);

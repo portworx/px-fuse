@@ -1434,6 +1434,109 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
 	return 0;
 }
 
+/** journal IO */
+static const char cmd_str[7][32]={"read", "write", "write_same", "write_zero", "discard", "flush", "unknown"};
+static char jfile[80] = "/var/cores/.journalIO";
+static struct file *jfd = NULL;
+void start_journal(const char *to)
+{
+	if (jfd) {
+		printk("journal already enabled to %s\n", jfile);	
+		return;
+	}
+
+	if (to && strlen(to) != 0) {
+		memcpy(jfile, to, strlen(to));
+		jfd = filp_open(jfile, O_RDWR | O_CREAT | O_DIRECT | O_SYNC, 0600);
+		if (jfd) {
+			printk("journal successfully enabled to %s\n", jfile);	
+		}
+	}
+}
+
+void stop_journal(void)
+{
+	if (!jfd) {
+		printk("journal already disabled\n");
+		return;
+	}
+
+	filp_close(jfd, NULL);
+	jfd = NULL;
+	jfile[0] = '\0';
+	printk("journal disabled\n");
+}
+
+const char* pxd_decode_cmdstr(unsigned cmd, unsigned flags)
+{
+	const char *cmdstr;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+	switch (cmd) {
+	case REQ_OP_WRITE_SAME:
+		cmdstr = cmd_str[2];
+		break;
+	case REQ_OP_WRITE:
+		cmdstr = cmd_str[1];
+		break;
+	case REQ_OP_READ:
+		cmdstr = cmd_str[0];
+		break;
+	case REQ_OP_DISCARD:
+		cmdstr = cmd_str[4];
+		break;
+	case REQ_OP_FLUSH:
+		cmdstr = cmd_str[5];
+		break;
+	default:
+		cmdstr = cmd_str[6];
+	}
+#else
+	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
+	case REQ_WRITE:
+		/* FALLTHROUGH */
+	case (REQ_WRITE | REQ_WRITE_SAME):
+		if (flags & REQ_WRITE_SAME)
+			cmdstr = cmd_str[2];
+		else
+			cmdstr = cmd_str[1];
+		break;
+	case 0:
+		cmdstr = cmd_str[0];
+		break;
+	case REQ_DISCARD:
+		/* FALLTHROUGH */
+	case REQ_WRITE | REQ_DISCARD:
+		cmdstr = cmd_str[4];
+		break;
+	case REQ_FLUSH:
+	case (REQ_WRITE|REQ_FLUSH):
+		cmdstr = cmd_str[5];
+		break;
+	default:
+		cmdstr = cmd_str[6];
+	}
+
+#endif
+	return cmdstr;
+}
+
+void log_bio(int minor, unsigned cmd, unsigned flags, uint64_t size, loff_t offset, bool reroute)
+{
+	char buf[128];
+	const char *cmdstr;
+	int len;
+	int ret;
+
+	if (jfd > 0) {
+		loff_t pos, *ppos = &jfd->f_pos;
+		pos = *ppos;
+		cmdstr = pxd_decode_cmdstr(cmd, flags);
+		len = sprintf(buf, "%d:%#x:%#x:%s:%llu:%llu:%d\n",minor, cmd, flags, cmdstr, size, offset, reroute);
+		ret = kernel_write(jfd, buf, len, &pos);
+		if (ret > 0 && ppos) *ppos = pos;
+	}
+}
+
 static struct bus_type pxd_bus_type = {
 	.name		= "pxd",
 };
@@ -1722,6 +1825,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 			struct device_attribute *attr,
 		        const char *buf, size_t count)
 {
+	char dst[80];
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	switch (buf[0]) {
 	case 'Y': /* switch native path through IO failover */
@@ -1751,6 +1855,14 @@ static ssize_t pxd_debug_store(struct device *dev,
 	case 'R': /* app resume */
 		printk("dev:%llu - requesting IO resume\n", pxd_dev->dev_id);
 		pxd_request_resume(pxd_dev);
+		break;
+	case 'J': /* start journal to <file> */
+		__strip_nl(&buf[2], dst, sizeof(dst));
+		printk("start journal to file %s\n", dst);
+		start_journal(dst);
+		break;
+	case 'j': /* stop journal to <file> */
+		stop_journal();
 		break;
 	default:
 		/* no action */
@@ -2147,6 +2259,8 @@ int pxd_init(void)
 			gitversion, pxd_supported_features());
 #endif
 
+	start_journal("/var/cores/.journalIO");
+
 	return 0;
 
 out_blkdev:
@@ -2161,6 +2275,7 @@ out_fuse:
 out_fuse_dev:
 	fuse_dev_cleanup();
 out:
+	stop_journal();
 	return err;
 }
 
@@ -2168,6 +2283,7 @@ void pxd_exit(void)
 {
 	int i;
 
+	stop_journal();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	io_ring_unregister_device();
 #endif
