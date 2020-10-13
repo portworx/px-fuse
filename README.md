@@ -50,6 +50,24 @@ Requires kernel >= 3.10
 # rpm -Uvh /root/px-fuse/rpm/px/RPMS/x86_64/px-3.10.0-123.9.3.el7.x86_64.rpm
 ```
 
+### Building and running Tests 
+```
+A set of tests are included to test control operations attach and detach as well as I/O operations read and write.
+To build test:
+
+# cd px_fuse
+# ./configure
+# make pxd_test
+# make test_clean
+
+Make sure that px.ko can be built and sucessfully installed.
+To run test:
+
+# cd px_fuse
+# ./test/pxd_test --gtest_filter=PxdTest.write
+# ./test/pxd_test --gtest_filter=PxdTest.read
+```
+
 ### Verifying PX-FUSE will build on Ubuntu
 
 `kernel-tests.sh` is a script which can verify if headers from alternate kernels will build with PX-FUSE.  It can 
