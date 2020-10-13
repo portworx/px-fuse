@@ -146,8 +146,12 @@ clean:
 install:
 	make V=1 -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules_install
 
+test_clean:
+	@/bin/rm -f test/pxd_test
+
 pxd_test: pxd_test.cc
-	g++ -I. -std=c++11 pxd_test.cc -lgtest -lboost_iostreams -lpthread -o pxd_test
+	@echo "Building Test ..."
+	g++ -I. -std=c++11 pxd_test.cc -lgtest -lboost_iostreams -lpthread -o test/pxd_test
 
 rpm:
 	@cd rpm && ./buildrpm.sh
@@ -166,4 +170,4 @@ px_version.c:
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
-	@/bin/rm -f pxd_test
+	@/bin/rm -f test/pxd_test
