@@ -1,5 +1,5 @@
 # PX-FUSE module
-Exports a control plane to create virtual block devices in the linux namespace. Piggy-backs on FUSE transport to act as a conduit between kernel and user space. 
+Exportn a control plane to create virtual block devices in the linux namespace. Piggy-backs on FUSE transport to act as a conduit between kernel and user space. 
 
 ## Requirements
 Requires kernel >= 3.10
@@ -48,6 +48,23 @@ Requires kernel >= 3.10
 3.10.0-123.9.3.el7.x86_64
 # KERNELPATH=/usr/src/kernels/3.10.0-123.el7.x86_64 VERSION=3.10.0 REVISION=123.9.3.el7 ./buildrpm.sh
 # rpm -Uvh /root/px-fuse/rpm/px/RPMS/x86_64/px-3.10.0-123.9.3.el7.x86_64.rpm
+```
+
+### Building and running Tests 
+```
+A set of tests are included to test control operations attach and detach as well as I/O operations read and write.
+To build test:
+
+# cd px_fuse
+# make test_clean
+# make pxd_test
+
+Make sure that px.ko can be built and sucessfully installed.
+To run test:
+
+# cd px_fuse
+# ./test/pxd_test --gtest_filter=PxdTest.write
+# ./test/pxd_test --gtest_filter=PxdTest.read
 ```
 
 ### Verifying PX-FUSE will build on Ubuntu
