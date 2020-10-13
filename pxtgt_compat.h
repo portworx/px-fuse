@@ -98,7 +98,7 @@
 		} \
 	})
 
-#define PXD_SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+#define PXTGT_SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
 	__builtin_choose_expr(__type_is_ptr(bdev), \
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
 			__SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))

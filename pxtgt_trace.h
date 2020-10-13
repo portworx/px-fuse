@@ -7,7 +7,7 @@
 #include <linux/tracepoint.h>
 
 TRACE_EVENT(
-	pxd_open,
+	pxtgt_open,
 	TP_PROTO(uint64_t dev_id, int major, int minor, fmode_t mode, int err),
 	TP_ARGS(dev_id, major, minor, mode, err),
 	TP_STRUCT__entry(
@@ -31,7 +31,7 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
-	pxd_release,
+	pxtgt_release,
 	TP_PROTO(uint64_t dev_id, int major, int minor, fmode_t mode),
 	TP_ARGS(dev_id, major, minor, mode),
 	TP_STRUCT__entry(
@@ -52,7 +52,7 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
-	pxd_ioctl,
+	pxtgt_ioctl,
 	TP_PROTO(uint64_t dev_id, int major, int minor, fmode_t mode,
 			 unsigned int cmd, unsigned long arg, int err),
 	TP_ARGS(dev_id, major, minor, mode, cmd, arg, err),
@@ -81,7 +81,7 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
-	pxd_request,
+	pxtgt_request,
 	TP_PROTO(
 		uint64_t unique, uint32_t size, uint64_t off,
 		uint32_t minor, uint32_t flags),
@@ -107,7 +107,7 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
-	pxd_reply,
+	pxtgt_reply,
 	TP_PROTO(uint64_t unique, uint32_t flags),
 	TP_ARGS(unique, flags),
 	TP_STRUCT__entry(

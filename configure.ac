@@ -3,7 +3,7 @@
 
 AC_PREREQ([2.69])
 AC_INIT([FULL-PACKAGE-NAME], [VERSION], [BUG-REPORT-ADDRESS])
-AC_CONFIG_SRCDIR([pxd.c])
+AC_CONFIG_SRCDIR([pxtgt_main.c])
 AC_CONFIG_HEADERS([config.h])
 
 # Checks for programs.
