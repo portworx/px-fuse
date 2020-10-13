@@ -56,8 +56,9 @@ A set of tests are included to test control operations attach and detach as well
 To build test:
 
 # cd px_fuse
-# make test_clean
+# ./configure
 # make pxd_test
+# make test_clean
 
 Make sure that px.ko can be built and sucessfully installed.
 To run test:
