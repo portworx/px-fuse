@@ -29,14 +29,14 @@ std::string control_device(unsigned int driver_context_id)
 
 class PxdTest : public ::testing::Test {
 protected:
-	int fd;		// control file descriptor
+	int ctl_fd;		// control file descriptor
 	std::set<uint64_t> added_ids;
 	const size_t write_len = PXD_LBS * 4;
 
-	PxdTest() : fd(-1) {}
+	PxdTest() : ctl_fd(-1) {}
 	virtual ~PxdTest() {
-		if (fd >= 0)
-			close(fd);
+		if (ctl_fd >= 0)
+			close(ctl_fd);
 	}
 
 	virtual void SetUp();
@@ -58,16 +58,19 @@ void PxdTest::SetUp()
 	ASSERT_EQ(0, system("/usr/bin/sudo /sbin/insmod px.ko"));
 
 	std::cout << "Opening control dev: " << control_device(0) << "\n";
-	fd = open(control_device(0).c_str(), O_RDWR);
-	ASSERT_GT(fd, 0);
+	ctl_fd = open(control_device(0).c_str(), O_RDWR);
+	ASSERT_GT(ctl_fd, 0);
 
 	pxd_ioctl_init_args args;
-	auto ret = ioctl(fd, PXD_IOC_INIT, &args);
+	auto ret = ioctl(ctl_fd, PXD_IOC_INIT, &args);
 	if (ret < 0) {
 		fprintf(stderr, "%s: init ioctl failed: %d(%s)", __func__, errno, strerror(errno));
 	}
 
 	auto read_bytes = static_cast<size_t>(ret);
+	ASSERT_EQ(sizeof(pxd_init_in), read_bytes);
+	ASSERT_EQ(0, args.hdr.num_devices);
+	ASSERT_EQ(PXD_VERSION, args.hdr.version);
 }
 
 void PxdTest::TearDown()
@@ -76,9 +79,9 @@ void PxdTest::TearDown()
 	std::for_each(added_ids.begin(), added_ids.end(),
 			std::bind(&PxdTest::dev_remove, this, _1));
 
-	if (fd >= 0) {
-		close(fd);
-		fd = -1;
+	if (ctl_fd >= 0) {
+		close(ctl_fd);
+		ctl_fd = -1;
 	}
 
 	ASSERT_EQ(0, system("/usr/bin/sudo /sbin/rmmod px.ko"));
@@ -100,7 +103,7 @@ void PxdTest::dev_add(pxd_add_out &add, int &minor, std::string &name)
 	iov[1].iov_base = &add;
 	iov[1].iov_len = sizeof(add);
 
-	ssize_t write_bytes = writev(fd, iov, 2);
+	ssize_t write_bytes = writev(ctl_fd, iov, 2);
 	ASSERT_GT(write_bytes, 0);
 
 	added_ids.insert(add.dev_id);
@@ -109,15 +112,15 @@ void PxdTest::dev_add(pxd_add_out &add, int &minor, std::string &name)
 	name = std::string(PXD_DEV_PATH) + std::to_string(add.dev_id);
 }
 
-int PxdTest::wait_msg(int timeout)
+int PxdTest::wait_msg(int timeout_secs)
 {
 	struct pollfd fds = {};
 	int ret;
 
-	fds.fd = fd;
+	fds.fd = ctl_fd;
 	fds.events = POLLIN;
 
-	ret = poll(&fds, 1, timeout * 1000);
+	ret = poll(&fds, 1, timeout_secs * 1000);
 
 	switch (ret) {
 	case 1:
@@ -165,7 +168,7 @@ void PxdTest::read_block(fuse_in_header *hdr, pxd_rdwr_in *req)
 {
 	int iovcnt = 1;
 	struct iovec iov[iovcnt];
-	size_t iovlen = iovcnt * sizeof(iovec);
+	size_t iovlen = iovcnt * sizeof(iov);
 	char buf[req->size];
 	size_t ret = 0;
 
@@ -177,10 +180,10 @@ void PxdTest::read_block(fuse_in_header *hdr, pxd_rdwr_in *req)
 	iov[0].iov_base = buf;
 	iov[0].iov_len = req->size;
 	struct iovec wr_iov[3] = { { &oh, sizeof(oh) }, { &rd_out, sizeof(rd_out) },
-		{ iov, 1*sizeof(iovec) } };
+		{ iov, iovlen} };
 
 	// Send a read request to kernel
-	ret = writev(fd, wr_iov, 3);
+	ret = writev(ctl_fd, wr_iov, 3);
 	fprintf(stderr, "%s: read/verify data from kernel\n", __func__);
 	ASSERT_EQ(ret, oh.len);
 	ASSERT_TRUE(verify_pattern(buf, req->size));
@@ -226,7 +229,7 @@ void PxdTest::dev_remove(uint64_t dev_id)
 		iov[1].iov_base = &remove;
 		iov[1].iov_len = sizeof(remove);
 
-		ssize_t write_bytes = writev(fd, iov, 2);
+		ssize_t write_bytes = writev(ctl_fd, iov, 2);
 		if (write_bytes > 0) {
 			ASSERT_EQ(write_bytes, oh.len);
 			break;
@@ -289,7 +292,7 @@ TEST_F(PxdTest, write)
 		int ret = wait_msg(1);
 		ASSERT_EQ(0, ret);
 
-		read_bytes = read(fd, msg_buf, sizeof(msg_buf));
+		read_bytes = read(ctl_fd, msg_buf, sizeof(msg_buf));
 		rdwr = reinterpret_cast<rdwr_in *>(msg_buf);
 
 		if (rdwr->in.opcode == PXD_WRITE) {
@@ -310,7 +313,7 @@ TEST_F(PxdTest, write)
 	oh.error = 0;
 	oh.unique = rdwr->in.unique;
 	fprintf(stderr, "%s: reply to kernel: status: %d\n", __func__, oh.error);
-	size_t ret = ::write(fd, &oh, sizeof(oh));
+	size_t ret = ::write(ctl_fd, &oh, sizeof(oh));
 	ASSERT_EQ(sizeof(oh), ret);
 
 	wt.join();
@@ -348,7 +351,7 @@ TEST_F(PxdTest, read)
 		int ret = wait_msg(1);
 		ASSERT_EQ(0, ret);
 
-		read_bytes = read(fd, msg_buf, sizeof(msg_buf));
+		read_bytes = read(ctl_fd, msg_buf, sizeof(msg_buf));
 		rdwr = reinterpret_cast<rdwr_in *>(msg_buf);
 
 		if (rdwr->in.opcode == PXD_READ) {
@@ -381,7 +384,7 @@ TEST_F(PxdTest, read)
 
 	fprintf(stderr, "%s: reply to kernel: status: %d iovcnt: %d\n",
 		__func__, oh.error, iovcnt);
-	size_t ret = writev(fd, iov, iovcnt + 1);
+	size_t ret = writev(ctl_fd, iov, iovcnt + 1);
 
 	rt.join();
 
