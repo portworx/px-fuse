@@ -1291,8 +1291,10 @@ out_file_failed:
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
 void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -1326,19 +1328,21 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	pxd_check_q_congested(pxd_dev);
 	read_lock(&pxd_dev->fp.suspend_lock);
 	if (!pxd_dev->fp.fastpath) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 		int rc;
+#endif
 		atomic_inc(&pxd_dev->fp.nslowPath);
-		rc = pxd_make_request_slowpath(q, bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+		rc =
+#endif
+		pxd_make_request_slowpath(q, bio);
 		read_unlock(&pxd_dev->fp.suspend_lock);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 		return rc;
+#else
+		return;
+#endif
 	}
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%lx\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags);
 
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
 	if (!head) {
@@ -1364,7 +1368,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	pxd_process_io(head);
 	read_unlock(&pxd_dev->fp.suspend_lock);
 
-	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
 
