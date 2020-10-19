@@ -1326,9 +1326,11 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	pxd_check_q_congested(pxd_dev);
 	read_lock(&pxd_dev->fp.suspend_lock);
 	if (!pxd_dev->fp.fastpath) {
-		read_unlock(&pxd_dev->fp.suspend_lock);
+		int rc;
 		atomic_inc(&pxd_dev->fp.nslowPath);
-		return pxd_make_request_slowpath(q, bio);
+		rc = pxd_make_request_slowpath(q, bio);
+		read_unlock(&pxd_dev->fp.suspend_lock);
+		return rc;
 	}
 
 	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
@@ -1339,8 +1341,8 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 			bio->bi_vcnt, bio->bi_flags);
 
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
-	read_unlock(&pxd_dev->fp.suspend_lock);
 	if (!head) {
+		read_unlock(&pxd_dev->fp.suspend_lock);
 		BIO_ENDIO(bio, -ENOMEM);
 
 		// trivial high memory pressure failing IO
@@ -1360,6 +1362,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #endif
 
 	pxd_process_io(head);
+	read_unlock(&pxd_dev->fp.suspend_lock);
 
 	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
