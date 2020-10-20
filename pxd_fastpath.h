@@ -26,11 +26,11 @@ struct pxd_io_tracker {
 	struct list_head replicas; // only replica needs this
 	struct list_head item; // only HEAD needs this
 	atomic_t active; // only HEAD has refs to all active IO
-	atomic_t fails; // should be zero, non-zero indicates atleast one path failed
 	struct file* file;
 
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
+	int status; // should be zero, non-zero indicates consolidated fail status
 
 	struct work_struct wi; // work item
 
@@ -113,10 +113,11 @@ int get_thread_count(int id);
 
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque);
 int pxd_suspend_state(struct pxd_device *pxd_dev);
-int pxd_switch_fastpath(struct pxd_device*);
-int pxd_switch_nativepath(struct pxd_device*);
+int pxd_debug_switch_fastpath(struct pxd_device*);
+int pxd_debug_switch_nativepath(struct pxd_device*);
 void pxd_suspend_io(struct pxd_device*);
 void pxd_resume_io(struct pxd_device*);
+int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev);
 
 // external request from userspace to control io path
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe);

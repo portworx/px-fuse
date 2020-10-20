@@ -181,6 +181,37 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 	return ret;
 }
 
+static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
+{
+	struct pxd_context *ctx = NULL;
+	struct pxd_fastpath_out cleanup_args;
+	long ret = 0;
+	struct pxd_device *pxd_dev;
+
+	if (copy_from_user(&cleanup_args, argp, sizeof(cleanup_args))) {
+		return -EFAULT;
+	}
+
+	if (cleanup_args.context_id >= pxd_num_contexts_exported) {
+		printk("%s : invalid context: %d\n", __func__, cleanup_args.context_id);
+		return -EFAULT;
+	}
+
+	ctx =  &pxd_contexts[cleanup_args.context_id];
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+		return -EFAULT;
+	}
+
+	pxd_dev = find_pxd_device(ctx, cleanup_args.dev_id);
+	if (pxd_dev != NULL) {
+		(void)get_device(&pxd_dev->dev);
+		ret = pxd_fastpath_vol_cleanup(pxd_dev);
+		put_device(&pxd_dev->dev);
+	}
+
+	return ret;
+}
+
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -220,6 +251,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_run_user_queue(file);
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
+	case PXD_IOC_FPCLEANUP:
+		return pxd_ioctl_fp_cleanup(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -611,21 +644,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 #endif
 
-static inline unsigned int get_op_flags(struct bio *bio)
-{
-	unsigned int op_flags;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
-	op_flags = 0; // Not present in older kernels
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
-	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
-	op_flags = bio_flags(bio);
-#else
-	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
-#endif
-	return op_flags;
-}
-
 static
 void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
@@ -750,9 +768,6 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	unsigned int flags;
-
-	flags = bio->bi_flags;
 
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
@@ -789,16 +804,13 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	unsigned int flags;
-
-	flags = bio->bi_flags;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, flags, get_op_flags(bio));
+			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
@@ -1718,7 +1730,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 		break;
 	case 'X': /* switch native path */
 		printk("dev:%llu - IO native path switch - ctrl failover\n", pxd_dev->dev_id);
-		pxd_switch_nativepath(pxd_dev);
+		pxd_debug_switch_nativepath(pxd_dev);
 		break;
 	case 's': /* suspend */
 		printk("dev:%llu - IO suspend\n", pxd_dev->dev_id);
@@ -1730,7 +1742,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 		break;
 	case 'x': /* switch fastpath*/
 		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
-		pxd_switch_fastpath(pxd_dev);
+		pxd_debug_switch_fastpath(pxd_dev);
 		break;
 	case 'S': /* app suspend */
 		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);

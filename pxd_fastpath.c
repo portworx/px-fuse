@@ -416,6 +416,45 @@ static void pxd_failover_initiate(struct pxd_device *pxd_dev, struct pxd_io_trac
 	queue_work(pxd_dev->fp.wq, &head->wi);
 }
 
+static int remap_io_status(int status)
+{
+	switch (status) {
+	case 0: // success
+	case -EOPNOTSUPP: // op not supported - no failover
+	case -ENOSPC: // no space on device - no failover
+	case -ENOMEM: // no memory - no failover
+		return status;
+	}
+
+	return -EIO;
+}
+
+// @head [in] - io head
+// @return - update reconciled error code
+static int reconcile_io_status(struct pxd_io_tracker *head)
+{
+	struct pxd_io_tracker *repl;
+	int status = 0;
+	int tmp;
+
+	BUG_ON(head->magic != PXD_IOT_MAGIC);
+	list_for_each_entry(repl, &head->replicas, item) {
+		BUG_ON(repl->magic != PXD_IOT_MAGIC);
+
+		tmp = remap_io_status(repl->status);
+		if (status == 0 || tmp == -EIO) {
+			status = tmp;
+		}
+	}
+
+	tmp = remap_io_status(head->status);
+	if (status == 0 || tmp == -EIO) {
+		status = tmp;
+	}
+
+	return status;
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 static void pxd_complete_io_dummy(struct bio* bio)
 #else
@@ -435,42 +474,45 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
 	struct pxd_device *pxd_dev = bio->bi_private;
 	struct pxd_io_tracker *head = iot->head;
-	bool dofree = true;
+	unsigned int flags = get_op_flags(bio);
+	int blkrc;
 
-	fput(iot->file);
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-	if (!atomic_dec_and_test(&head->active)) {
-		// not all responses have come back
-		// but update head status if this is a failure
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
-		if (bio->bi_status) {
-			atomic_inc(&head->fails);
-		}
+		blkrc = blk_status_to_errno(bio->bi_status);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-		if (bio->bi_error) {
-			atomic_inc(&head->fails);
-		}
+		blkrc = bio->bi_error;
 #else
-		if (error) {
-			atomic_inc(&head->fails);
-		}
+		blkrc = error;
 #endif
-		pxd_printk("pxd_complete_io for bio %px (pxd %px) with head %px active %d error %d early return\n",
-			bio, pxd_dev, head, atomic_read(&head->active), atomic_read(&head->fails));
 
-		return;
-	}
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%lx\n", __func__,
+	if (blkrc != 0) {
+		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s at %ld len %d bytes %d pages "
+				"flags 0x%lx\n", __func__, blkrc,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags);
+			bio->bi_vcnt, (long unsigned int)flags);
+	}
+
+	fput(iot->file);
+	iot->status = blkrc;
+	if (!atomic_dec_and_test(&head->active)) {
+		// not all responses have come back
+		return;
+	}
+
+	// final reconciled status
+	blkrc = reconcile_io_status(head);
+
+	// debug condition for force fail
+	if (pxd_dev->fp.force_fail) blkrc = -EIO;
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
 	bio_end_io_acct(bio, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
@@ -483,62 +525,34 @@ static void pxd_complete_io(struct bio* bio, int error)
 	_generic_end_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #endif
 
-	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	atomic_inc(&pxd_dev->fp.ncomplete);
 	atomic_dec(&pxd_dev->ncount);
 
-	// debug force fail IO
-	if (pxd_dev->fp.force_fail) atomic_inc(&head->fails);
+	if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
+		atomic_inc(&pxd_dev->fp.nerror);
+		pxd_failover_initiate(pxd_dev, head);
+		pxd_check_q_decongested(pxd_dev);
+		return;
+	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 {
-	blk_status_t status = bio->bi_status;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (pxd_dev->fp.can_failover && status) {
-		dofree = false;
-		atomic_inc(&pxd_dev->fp.nerror);
-		pxd_failover_initiate(pxd_dev, head);
-	} else {
-		iot->orig->bi_status = status;
+		iot->orig->bi_status = errno_to_blk_status(blkrc);
 		bio_endio(iot->orig);
-	}
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 {
-	int status = bio->bi_error;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (pxd_dev->fp.can_failover && status) {
-		dofree = false;
-		atomic_inc(&pxd_dev->fp.nerror);
-		pxd_failover_initiate(pxd_dev, head);
-	} else {
-		iot->orig->bi_error = status;
+		iot->orig->bi_error = blkrc;
 		bio_endio(iot->orig);
-	}
 }
 #else
 {
-	int status = error;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (pxd_dev->fp.can_failover && status) {
-		dofree = false;
-		atomic_inc(&pxd_dev->fp.nerror);
-		pxd_failover_initiate(pxd_dev, head);
-	} else {
-		bio_endio(iot->orig, status);
-	}
+		bio_endio(iot->orig, blkrc);
 }
 #endif
-
-	if (dofree) __pxd_cleanup_block_io(head);
+	__pxd_cleanup_block_io(head);
 	pxd_check_q_decongested(pxd_dev);
 }
 
@@ -573,9 +587,9 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	INIT_LIST_HEAD(&iot->replicas);
 	INIT_LIST_HEAD(&iot->item);
 	iot->orig = bio;
+	iot->status = 0;
 	iot->start = jiffies;
 	atomic_set(&iot->active, 0);
-	atomic_set(&iot->fails, 0);
 	iot->file = get_file(fileh);
 	INIT_WORK(&iot->wi, pxd_process_fileio);
 
@@ -632,10 +646,8 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = false;
 		pxd_abortfailQ(pxd_dev);
-		disableFastPath(pxd_dev, false);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
-		enableFastPath(pxd_dev, true);
 		pxd_dev->connected = true;
 	}
 }
@@ -1119,9 +1131,18 @@ out_file_failed:
 	memset(fp->device_path, 0, sizeof(fp->device_path));
 
 	pxd_dev->fp.fastpath = false;
-	pxd_resume_io(pxd_dev);
+	/// volume still remains suspended waiting for CLEANUP request to reopen IO.
 	printk(KERN_INFO"%s: Device %llu no backing volume setup, will take slow path\n",
 		__func__, pxd_dev->dev_id);
+}
+
+int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
+{
+	printk(KERN_INFO"%s: Device %llu cleanup IO reactivate received\n",
+		__func__, pxd_dev->dev_id);
+	disableFastPath(pxd_dev, false);
+	pxd_resume_io(pxd_dev);
+	return 0;
 }
 
 void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
@@ -1132,6 +1153,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
 		pxd_dev->fp.active_failover = false;
+		pxd_dev->fp.fastpath = false;
 		return;
 	}
 
@@ -1269,8 +1291,10 @@ out_file_failed:
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
 #else
 void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL
 #endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -1304,21 +1328,25 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	pxd_check_q_congested(pxd_dev);
 	read_lock(&pxd_dev->fp.suspend_lock);
 	if (!pxd_dev->fp.fastpath) {
-		read_unlock(&pxd_dev->fp.suspend_lock);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+		int rc;
+#endif
 		atomic_inc(&pxd_dev->fp.nslowPath);
-		return pxd_make_request_slowpath(q, bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+		rc =
+#endif
+		pxd_make_request_slowpath(q, bio);
+		read_unlock(&pxd_dev->fp.suspend_lock);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+		return rc;
+#else
+		return;
+#endif
 	}
 
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%lx\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags);
-
 	head = __pxd_init_block_head(pxd_dev, bio, rw);
-	read_unlock(&pxd_dev->fp.suspend_lock);
 	if (!head) {
+		read_unlock(&pxd_dev->fp.suspend_lock);
 		BIO_ENDIO(bio, -ENOMEM);
 
 		// trivial high memory pressure failing IO
@@ -1338,8 +1366,8 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #endif
 
 	pxd_process_io(head);
+	read_unlock(&pxd_dev->fp.suspend_lock);
 
-	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
 
@@ -1400,12 +1428,12 @@ int pxd_suspend_state(struct pxd_device *pxd_dev)
 	return atomic_read(&pxd_dev->fp.suspend);
 }
 
-int pxd_switch_fastpath(struct pxd_device* pxd_dev)
+int pxd_debug_switch_fastpath(struct pxd_device* pxd_dev)
 {
 	return 0;
 }
 
-int pxd_switch_nativepath(struct pxd_device* pxd_dev)
+int pxd_debug_switch_nativepath(struct pxd_device* pxd_dev)
 {
 	if (pxd_dev->fp.fastpath) {
 		printk(KERN_WARNING"pxd_dev %llu in fastpath, forcing failover\n",
