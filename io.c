@@ -1074,6 +1074,8 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	const int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 	int ret = -EINVAL;
 	const struct io_uring_sqe *sqe = s->sqe;
+	struct inode *inode;
+
 	loff_t off = READ_ONCE(sqe->off);
 	loff_t bytes = READ_ONCE(sqe->len);
 
@@ -1083,15 +1085,31 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 
 	if (unlikely(!(req->file->f_mode & FMODE_WRITE))) {
 		ret = -EINVAL;
+		goto out;
+	}
+
+	inode = req->file->f_inode;
+	if (S_ISBLK(inode->i_mode)) {
+		ret = blkdev_issue_discard(inode->i_bdev, off / SECTOR_SIZE,
+			bytes / SECTOR_SIZE, GFP_KERNEL, 0);
+		if (ret < 0) {
+			pr_warn("%s: blkdev_issue_discard failed: ret %d", __func__, ret);
+			if (ret != -EINVAL && ret != -EOPNOTSUPP)
+				ret = -EIO;
+		}
 	} else if (unlikely(!req->file->f_op->fallocate)) {
 		printk("%s: fallocate is NULL", __func__);
 		ret = -EOPNOTSUPP;
 	} else {
 		ret = req->file->f_op->fallocate(req->file, mode, off, bytes);
-		if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
-			ret = -EIO;
+		if (ret < 0) {
+			pr_warn("%s: fallocate failed: ret %d", __func__, ret);
+			if (ret != -EINVAL && ret != -EOPNOTSUPP)
+				ret = -EIO;
+		}
 	}
 
+out:
 	io_cqring_add_event(req->ctx, req->user_data, ret);
 	io_put_req(req);
 
