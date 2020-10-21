@@ -6,6 +6,8 @@
 #include <linux/ctype.h>
 #include <linux/uio.h>
 #include <linux/bio.h>
+#include <linux/fs.h>
+#include <linux/random.h>
 #include "pxtgt.h"
 #include "pxtgt_io.h"
 
@@ -753,9 +755,6 @@ static void pxtgt_free_disk(struct pxtgt_device *pxtgt_dev)
 		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
-#ifdef __PX_BLKMQ__
-		blk_mq_free_tag_set(&pxtgt_dev->tag_set);
-#endif
 	}
 	put_disk(disk);
 }
@@ -1354,10 +1353,137 @@ static int pxtgt_control_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static struct miscdevice pxtgt_miscdev = {
-	.minor		= MISC_DYNAMIC_MINOR,
-	.name		= "pxtgt/control",
+static struct pxtgt_context *dev_to_pxctx(struct device *dev)
+{
+	struct miscdevice *mdev = dev_get_drvdata(dev);
+	struct pxtgt_context *ctx = container_of(mdev, struct pxtgt_context, miscdev);
+	BUG_ON(ctx->magic != PXTGT_CTX_MAGIC);
+	return ctx;
+}
+
+
+static ssize_t pxctx_info_show(struct device *dev,
+        struct device_attribute *attr, char *buf)
+{
+	struct pxtgt_context *ctx = dev_to_pxctx(dev);
+    return sprintf(buf, "hit show with ctx:%px\n", ctx);
+}
+
+static ssize_t pxctx_info_set(struct device *dev,
+            struct device_attribute *attr,
+            const char *buf, size_t count)
+{
+	struct pxtgt_context *ctx = dev_to_pxctx(dev);
+	(void)ctx;
+    printk("Received new msg to send: %s", buf);
+    return count;
+}
+
+static ssize_t pxctx_attached_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxtgt_context *ctx = dev_to_pxctx(dev);
+	struct pxtgt_device *pxtgt_dev_itr, *pxtgt_dev;
+	int count;
+	char *cp;
+
+	cp = buf;
+	count = 0;
+	pxtgt_dev = NULL;
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxtgt_dev_itr, &ctx->list, node) {
+		count += snprintf(cp, PAGE_SIZE-count, "dev: %llu, source %s\n",
+						pxtgt_dev_itr->dev_id, pxtgt_dev_itr->source);
+		cp = buf + count;
+	}
+	spin_unlock(&ctx->lock);
+
+	return count;
+}
+
+static ssize_t pxctx_attach_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxtgt_context *ctx = dev_to_pxctx(dev);
+	struct pxtgt_add_out add;
+	struct file *fh;
+	int rc;
+
+	add.dev_id = get_random_long();
+	snprintf(add.source, MAX_PXTGT_DEVPATH_LEN, buf);
+	add.source[MAX_PXTGT_DEVPATH_LEN] = '\0';
+
+	fh = filp_open(add.source, O_LARGEFILE|O_RDWR|O_DIRECT, 0600);
+	if (IS_ERR_OR_NULL(fh)) {
+		printk("invalid source: %s, failed open\n", add.source);
+		return count;
+	}
+
+	add.size = i_size_read(fh->f_inode);
+	if (add.size < PXTGT_LBS) {
+		printk("invalid size of source %s, too small %ld\n", add.source, add.size);
+		return count;
+	}
+
+	// some hardcoded numbers
+	add.queue_depth = 128;
+	add.discard_size = 32 * PXTGT_LBS;
+	filp_close(fh, NULL);
+
+	rc = pxtgt_add(ctx, &add);
+	if (rc <= 0) {
+		printk("pxtgt_add source %s, failed with rc %d\n", add.source, rc);
+		return count;
+	}
+
+	printk("pxtgt_add dev %llu, source %s, success with minor %d\n",
+			add.dev_id, add.source, rc);
+
+	return count;
+}
+
+static ssize_t pxctx_detach_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxtgt_context *ctx = dev_to_pxctx(dev);
+	struct pxtgt_remove_out remove;
+	uint64_t dev_id;
+	struct pxtgt_device *pxtgt_dev;
+
+	kstrtou64(buf, 10, &dev_id);
+
+	memset(&remove, 0, sizeof(remove));
+	remove.force = true;
+	remove.dev_id = dev_id;
+	pxtgt_dev = find_pxtgt_device(ctx, dev_id);
+	if (pxtgt_dev != NULL) {
+		int rc = pxtgt_remove(ctx, &remove);
+		printk("pxtgt remove %llu returned rc %d\n", dev_id, rc);
+	}
+
+
+	return count;
+}
+
+static DEVICE_ATTR(attach, S_IRUGO|S_IWUSR, pxctx_attached_show, pxctx_attach_set);
+static DEVICE_ATTR(detach, S_IRUGO|S_IWUSR, pxctx_attached_show, pxctx_detach_set);
+static DEVICE_ATTR(info, S_IRUGO|S_IWUSR, pxctx_info_show, pxctx_info_set);
+
+static struct attribute *pxtgt_control_attrs[] = {
+    &dev_attr_info.attr,
+    &dev_attr_attach.attr,
+    &dev_attr_detach.attr,
 };
+
+static struct attribute_group pxtgt_control_attrgroup = {
+    .attrs = pxtgt_control_attrs,
+};
+
+static const struct attribute_group *pxtgt_control_attrgroups[] = {
+    &pxtgt_control_attrgroup,
+    NULL
+};
+
 
 MODULE_ALIAS("devname:pxtgt-control");
 
@@ -1392,15 +1518,19 @@ int pxtgt_context_init(struct pxtgt_context *ctx, int i)
 	ctx->fops.unlocked_ioctl = pxtgt_control_ioctl;
 
 	INIT_LIST_HEAD(&ctx->list);
-	sprintf(ctx->name, "pxtgt/pxtgt-control-%d", i);
+	sprintf(ctx->name, "pxtgt/control-%d", i);
 	ctx->miscdev.minor = MISC_DYNAMIC_MINOR;
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
+	ctx->miscdev.groups = pxtgt_control_attrgroups;
+
+	ctx->magic = PXTGT_CTX_MAGIC;
 	return 0;
 }
 
 static void pxtgt_context_destroy(struct pxtgt_context *ctx)
 {
+	ctx->magic = PXTGT_POISON;
 	misc_deregister(&ctx->miscdev);
 }
 
@@ -1432,18 +1562,11 @@ int pxtgt_init(void)
 		}
 	}
 
-	pxtgt_miscdev.fops = &pxtgt_contexts[0].fops;
-	err = misc_register(&pxtgt_miscdev);
-	if (err) {
-		printk(KERN_ERR "pxtgt: failed to register dev %s: %d\n",
-			pxtgt_miscdev.name, err);
-		goto out_fuse;
-	}
 	pxtgt_major = register_blkdev(0, "pxtgt");
 	if (pxtgt_major < 0) {
 		err = pxtgt_major;
 		printk(KERN_ERR "pxtgt: failed to register dev pxtgt: %d\n", err);
-		goto out_misc;
+		goto out_fuse;
 	}
 
 	err = pxtgt_sysfs_init();
@@ -1482,8 +1605,6 @@ int pxtgt_init(void)
 
 out_blkdev:
 	unregister_blkdev(0, "pxtgt");
-out_misc:
-	misc_deregister(&pxtgt_miscdev);
 out_fuse:
 	for (j = 0; j < i; ++j) {
 		pxtgt_context_destroy(&pxtgt_contexts[j]);
@@ -1508,7 +1629,6 @@ void pxtgt_exit(void)
 
 	pxtgt_sysfs_exit();
 	unregister_blkdev(pxtgt_major, "pxtgt");
-	misc_deregister(&pxtgt_miscdev);
 
 	for (i = 0; i < pxtgt_num_contexts; ++i) {
 		/* force cleanup @@@ */

@@ -8,6 +8,7 @@
 #include <linux/blk-mq.h>
 #endif
 #include "pxtgt.h"
+#include "pxtgt_hash.h"
 
 struct pxtgt_device;
 
@@ -25,11 +26,20 @@ struct pxtgt_io_tracker {
 
 	struct work_struct wi; // work item
 
+	// crypto hash
+	struct ahash_request hreq;
+	struct crypto_result hresp;
+	u8 *digest;
+#define MAX_INLINE_BLOCKS (16)
+	u8 inline_digest[MAX_INLINE_BLOCKS][DIGEST_LEN];
+
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
 };
 
 struct pxtgt_context {
+#define PXTGT_CTX_MAGIC (0xc0debade)
+	unsigned int magic;
 	spinlock_t lock;
 	struct list_head list;
 	size_t num_devices;

@@ -80,7 +80,7 @@ struct pxtgt_init_out {
  */
 struct pxtgt_add_out {
 	uint64_t dev_id;	/**< device global id */
-	char source[128];
+	char source[MAX_PXTGT_DEVPATH_LEN+1];
 	size_t size;		/**< block device size in bytes */
 	uint32_t queue_depth;
 	uint32_t discard_size;
