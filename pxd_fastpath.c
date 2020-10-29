@@ -1138,8 +1138,11 @@ out_file_failed:
 
 int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
 {
-	printk(KERN_INFO"%s: Device %llu cleanup IO reactivate received\n",
-		__func__, pxd_dev->dev_id);
+	printk(KERN_INFO"device %llu cleanup IO reactivate received\n", pxd_dev->dev_id);
+	if (atomic_read(&pxd_dev->fp.suspend) == 0) {
+		printk(KERN_WARNING"device %llu is already active, cleanup failed\n", pxd_dev->dev_id);
+		return -EINVAL;
+	}
 	disableFastPath(pxd_dev, false);
 	pxd_resume_io(pxd_dev);
 	return 0;
