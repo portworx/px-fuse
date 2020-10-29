@@ -126,5 +126,10 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#define BDEVNAME(bio, b)   bio_devname(bio, b)
+#else
+#define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+#endif
 
 #endif //GDFS_PXD_COMPAT_H
