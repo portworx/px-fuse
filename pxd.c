@@ -484,7 +484,11 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_READ);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+    rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_READ);
+#else
+    rc = pxd_handle_device_limits(req, &size, &off, 0);
+#endif
 	if (rc) {
 		return rc;
 	}
@@ -505,7 +509,11 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+    rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE);
+#else
+    rc = pxd_handle_device_limits(req, &size, &off, REQ_WRITE);
+#endif
 	if (rc) {
 		return rc;
 	}
