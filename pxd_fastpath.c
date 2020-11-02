@@ -476,6 +476,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	struct pxd_io_tracker *head = iot->head;
 	unsigned int flags = get_op_flags(bio);
 	int blkrc;
+	char b[BDEVNAME_SIZE];
 
 	BUG_ON(iot->magic != PXD_IOT_MAGIC);
 	BUG_ON(head->magic != PXD_IOT_MAGIC);
@@ -493,11 +494,11 @@ static void pxd_complete_io(struct bio* bio, int error)
 
 	if (blkrc != 0) {
 		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s at %lld len %d bytes %d pages "
-				"flags 0x%lx\n", __func__, blkrc,
+				"flags 0x%lx\n", BDEVNAME(bio, b), blkrc,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
 			(unsigned long long)(BIO_SECTOR(bio) * SECTOR_SIZE), BIO_SIZE(bio),
-			bio->bi_vcnt, (long unsigned int)flags);
+			bio_segments(bio), (long unsigned int)flags);
 	}
 
 	fput(iot->file);
@@ -594,8 +595,8 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 	INIT_WORK(&iot->wi, pxd_process_fileio);
 
 	clone_bio->bi_private = pxd_dev;
+	BIO_SET_DEV(clone_bio, bdev);
 	if (S_ISBLK(inode->i_mode)) {
-		BIO_SET_DEV(clone_bio, bdev);
 		clone_bio->bi_end_io = pxd_complete_io;
 	} else {
 		clone_bio->bi_end_io = pxd_complete_io_dummy;
@@ -1138,8 +1139,10 @@ out_file_failed:
 
 int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
 {
-	printk(KERN_INFO"%s: Device %llu cleanup IO reactivate received\n",
-		__func__, pxd_dev->dev_id);
+	if (atomic_read(&pxd_dev->fp.suspend) == 0) {
+		printk(KERN_WARNING"device %llu is already active, cleanup failed\n", pxd_dev->dev_id);
+		return -EINVAL;
+	}
 	disableFastPath(pxd_dev, false);
 	pxd_resume_io(pxd_dev);
 	return 0;
