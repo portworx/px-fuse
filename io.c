@@ -1090,7 +1090,10 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 
 	inode = req->file->f_inode;
 	if (S_ISBLK(inode->i_mode)) {
-		ret = blkdev_issue_discard(inode->i_bdev, off / SECTOR_SIZE,
+		struct block_device *bdev = inode->i_bdev;
+		struct address_space *mapping = bdev->bd_inode->i_mapping;
+		truncate_inode_pages_range(mapping, off, off + bytes - 1);
+		ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE,
 			bytes / SECTOR_SIZE, GFP_KERNEL, 0);
 		if (ret < 0) {
 			pr_warn("%s: blkdev_issue_discard failed: ret %d", __func__, ret);
