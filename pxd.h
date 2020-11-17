@@ -28,7 +28,13 @@
 #define PXD_IOC_DUMP_FC_INFO	_IO(PXD_IOCTL_MAGIC, 1)		/* 0x505801 */
 #define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 #define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
-#define PXD_IOC_RESIZE			_IO(PXD_IOCTL_MAGIC, 4)		/* 0x505804 */
+#define PXD_IOC_RESIZE      _IO(PXD_IOCTL_MAGIC, 4)     /* 0x505804 */          
+#define PXD_IOC_RUN_USER_QUEUE  _IO(PXD_IOCTL_MAGIC, 5)     /* 0x505805 */      
+#define PXD_IOC_RUN_IO_QUEUE    _IO(PXD_IOCTL_MAGIC, 6)     /* 0x505806 */      
+#define PXD_IOC_REGISTER_FILE   _IO(PXD_IOCTL_MAGIC, 7)     /* 0x505807 */      
+#define PXD_IOC_UNREGISTER_FILE _IO(PXD_IOCTL_MAGIC, 8)     /* 0x505808 */      
+#define PXD_IOC_FPCLEANUP       _IO(PXD_IOCTL_MAGIC, 9)     /* 0x505809 */      
+#define PXD_IOC_IO_FLUSHER      _IO(PXD_IOCTL_MAGIC, 10)    /* 0x50580a */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -252,6 +258,19 @@ struct pxd_ioctl_init_args {
 
 	/** list of devices */
 	struct pxd_dev_id devices[PXD_MAX_DEVICES];
+};
+
+/** sub-actions for PXD_IOC_IO_FLUSHER ioctl */
+enum pxd_io_flusher_action {
+	PXD_IO_FLUSHER_GET = 0,	/**<  check IO FLUSHER state of the process */
+	PXD_IO_FLUSHER_SET = 1,	/**< set IO FLUSHER state of the process */
+	PXD_IO_FLUSHER_CLEAR = 2,	/**< clear IO FLUSHER state of the process */
+};
+
+struct pxd_ioctl_io_flusher_args {
+	pid_t pid; /**< pid of the process which is examined, 0 for current process */
+	uint32_t io_flusher_action; /**< one of pxd_io_flusher_action */
+	int is_io_flusher_set; /**< output argument, will be updated by driver */
 };
 
 #endif /* PXD_H_ */
