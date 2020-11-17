@@ -4,6 +4,7 @@
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
 #include <linux/ctype.h>
+#include <linux/sched.h>
 #include "fuse_i.h"
 #include "pxd.h"
 #include <linux/uio.h>
@@ -238,6 +239,117 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 	return 0;
 }
 
+#define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LESS_THROTTLE)
+#define IS_SET_IO_FLUSHER_FLAG(flg) ((flg & PF_IO_FLUSHER) == PF_IO_FLUSHER)
+#define IS_SET_IO_FLUSHER(task) (IS_SET_IO_FLUSHER_FLAG((task->flags)))
+#define SET_IO_FLUSHER(task) task->flags |= PF_IO_FLUSHER
+#define CLEAR_IO_FLUSHER(task) task->flags &= ~(PF_IO_FLUSHER)
+static void print_io_flusher_state(unsigned int old_flags, unsigned int new_flags,
+				   pid_t pid, pid_t ppid, char *comm)
+{
+	if (IS_SET_IO_FLUSHER_FLAG(new_flags)) {
+		if (IS_SET_IO_FLUSHER_FLAG(old_flags)) {
+			printk("Process %s pid %d parent pid %d IO_FLUSHER is set\n",
+			       comm, pid, ppid);
+		} else {
+			printk("Process %s pid %d parent pid %d IO_FLUSHER turned on\n",
+			       comm, pid, ppid);
+		}
+	} else {
+		printk("Process %s pid %d parent pid %d IO_FLUSHER not set\n", comm, pid,
+				ppid);
+	}
+}
+
+static int is_io_flusher_supported(void)
+{
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0) && LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
+		#if defined(PF_MEMALLOC_NOIO) && defined(PF_LESS_THROTTLE)
+			return 1;
+		#endif
+	#endif
+	return 0;
+}
+
+static long pxd_ioflusher_state(void __user *argp)
+{
+	struct pxd_ioctl_io_flusher_args io_flusher_args;
+	struct task_struct *task = NULL;
+	struct pid_namespace *ns = NULL;
+	pid_t ppid = -1;
+	pid_t pid = -1;
+	char *comm = NULL;
+	unsigned int old_flags = 0;
+	unsigned int new_flags = 0;
+	char command[TASK_COMM_LEN] = {0};
+	int is_io_flusher_set = 0;
+
+	if (!is_io_flusher_supported()) {
+		return -EOPNOTSUPP;
+	}
+
+	if (argp == NULL)
+		return -EINVAL;
+
+	if (copy_from_user(&io_flusher_args, argp, sizeof(io_flusher_args))) {
+		return -EFAULT;
+	}
+	rcu_read_lock();
+	task = current;
+	ns = task_active_pid_ns(task);
+	if (io_flusher_args.pid == 0) {
+		get_task_struct(task);
+	} else {
+		struct task_struct *temp_task;
+		struct pid *pid = NULL;
+		//printk("user specified pid %d\n", io_flusher_args.pid);
+		rcu_read_lock();
+		pid = find_pid_ns(io_flusher_args.pid, ns);
+		if (pid == NULL) {
+			printk("Input pid %d does not exist", io_flusher_args.pid);
+			return -ENOENT;
+		}
+		temp_task = pid_task(pid, PIDTYPE_PID);
+		if (temp_task == NULL) {
+			rcu_read_unlock();
+			printk("Input pid %d does not exist", io_flusher_args.pid);
+			return -ENOENT;
+		}
+		task = temp_task;
+		get_task_struct(task);
+	}
+	rcu_read_unlock();
+	ppid = task_pgrp_nr(task);
+	pid = task_pid_nr(task);
+	comm = get_task_comm(command, task);
+	old_flags = task->flags;
+	switch (io_flusher_args.io_flusher_action) {
+	case PXD_IO_FLUSHER_GET:
+		if (IS_SET_IO_FLUSHER(task)) {
+			is_io_flusher_set = 1;
+		}
+		break;
+	case PXD_IO_FLUSHER_SET:
+		SET_IO_FLUSHER(task);
+		is_io_flusher_set = 1;
+		break;
+	case PXD_IO_FLUSHER_CLEAR:
+		CLEAR_IO_FLUSHER(task);
+		is_io_flusher_set = 0;
+		break;
+	}
+	new_flags = task->flags;
+	put_task_struct(task);
+	print_io_flusher_state(old_flags, new_flags, pid, ppid, comm);
+
+	if (copy_to_user(argp + offsetof(struct pxd_ioctl_io_flusher_args, is_io_flusher_set),
+			&is_io_flusher_set, sizeof(is_io_flusher_set))) {
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
 static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -253,6 +365,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_resize(file, (void __user *)arg);
 	case PXD_IOC_FPCLEANUP:
 		return pxd_ioctl_fp_cleanup(file, (void __user *)arg);
+	case PXD_IOC_IO_FLUSHER:
+		return pxd_ioflusher_state((void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -266,18 +380,18 @@ static const struct block_device_operations pxd_bd_ops = {
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
-        struct pxd_device *pxd_dev = req->queue->queuedata;
+		struct pxd_device *pxd_dev = req->queue->queuedata;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
-        part_stat_lock();
-        part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-        part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
+		part_stat_lock();
+		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
 #else
-        int cpu = part_stat_lock();
-        part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
-        part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
+		int cpu = part_stat_lock();
+		part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
 #endif
-        part_stat_unlock();
+		part_stat_unlock();
 }
 
 static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
@@ -421,8 +535,8 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #else
 	req->pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
-				      ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
-				      ((flags & REQ_META) ? PXD_FLAGS_META : 0);
+					  ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+					  ((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #endif
 }
 
@@ -1000,7 +1114,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
 	  if (err)
-	    goto out_disk;
+		goto out_disk;
 
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
@@ -1139,8 +1253,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_lock_init(&pxd_dev->qlock);
 
 	new_minor = ida_simple_get(&pxd_minor_ida,
-				    1, 1 << MINORBITS,
-				    GFP_KERNEL);
+					1, 1 << MINORBITS,
+					GFP_KERNEL);
 	if (new_minor < 0) {
 		err = new_minor;
 		goto out_module;
@@ -1461,7 +1575,7 @@ static struct pxd_device *dev_to_pxd_dev(struct device *dev)
 }
 
 static ssize_t pxd_size_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
+				 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1470,7 +1584,7 @@ static ssize_t pxd_size_show(struct device *dev,
 }
 
 static ssize_t pxd_major_show(struct device *dev,
-		     struct device_attribute *attr, char *buf)
+			 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1479,7 +1593,7 @@ static ssize_t pxd_major_show(struct device *dev,
 }
 
 static ssize_t pxd_minor_show(struct device *dev,
-		     struct device_attribute *attr, char *buf)
+			 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1488,7 +1602,7 @@ static ssize_t pxd_minor_show(struct device *dev,
 }
 
 static ssize_t pxd_timeout_show(struct device *dev,
-		     struct device_attribute *attr, char *buf)
+			 struct device_attribute *attr, char *buf)
 {
 	return sprintf(buf, "%u\n", pxd_timeout_secs);
 }
@@ -1523,7 +1637,7 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 }
 
 static ssize_t pxd_active_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	char *cp = buf;
@@ -1553,7 +1667,7 @@ static ssize_t pxd_active_show(struct device *dev,
 }
 
 static ssize_t pxd_mode_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	char modestr[32];
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
@@ -1563,7 +1677,7 @@ static ssize_t pxd_mode_show(struct device *dev,
 }
 
 static ssize_t pxd_congestion_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1597,7 +1711,7 @@ static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *a
 }
 
 static ssize_t pxd_fastpath_state(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	return sprintf(buf, "%d\n", pxd_dev->fp.fastpath);
@@ -1676,7 +1790,7 @@ static void __strip_nl(const char *src, char *dst, int maxlen) {
 }
 
 static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *attr,
-		               const char *buf, size_t count)
+					   const char *buf, size_t count)
 {
 	// format: path,path,path
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
