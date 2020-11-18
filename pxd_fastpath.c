@@ -519,7 +519,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) &&  \
      defined(bvec_iter_sectors))
-	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
+	generic_end_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
 #else
