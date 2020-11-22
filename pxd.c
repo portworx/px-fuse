@@ -34,6 +34,12 @@
 #define PXD_TIMER_SECS_DEFAULT 600
 #define PXD_TIMER_SECS_MAX (U32_MAX)
 
+#define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LESS_THROTTLE)
+#define IS_SET_IO_FLUSHER_FLAG(flg) ((flg & PF_IO_FLUSHER) == PF_IO_FLUSHER)
+#define IS_SET_IO_FLUSHER(task) (IS_SET_IO_FLUSHER_FLAG((task->flags)))
+#define SET_IO_FLUSHER(task) (task->flags |= PF_IO_FLUSHER)
+#define CLEAR_IO_FLUSHER(task) (task->flags &= ~(PF_IO_FLUSHER))
+
 #define TOSTRING_(x) #x
 #define VERTOSTR(x) TOSTRING_(x)
 
@@ -125,22 +131,12 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 	return ret;
 }
 
-#define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LESS_THROTTLE)
-#define IS_SET_IO_FLUSHER_FLAG(flg) ((flg & PF_IO_FLUSHER) == PF_IO_FLUSHER)
-#define IS_SET_IO_FLUSHER(task) (IS_SET_IO_FLUSHER_FLAG((task->flags)))
-#define SET_IO_FLUSHER(task) task->flags |= PF_IO_FLUSHER
-#define CLEAR_IO_FLUSHER(task) task->flags &= ~(PF_IO_FLUSHER)
-static void print_io_flusher_state(unsigned int old_flags, unsigned int new_flags,
+static void print_io_flusher_state(unsigned int new_flags,
 				   pid_t pid, pid_t ppid, char *comm)
 {
 	if (IS_SET_IO_FLUSHER_FLAG(new_flags)) {
-		if (IS_SET_IO_FLUSHER_FLAG(old_flags)) {
-			printk("Process %s pid %d parent pid %d IO_FLUSHER is set\n",
+		printk("Process %s pid %d parent pid %d IO_FLUSHER is set\n",
 			       comm, pid, ppid);
-		} else {
-			printk("Process %s pid %d parent pid %d IO_FLUSHER turned on\n",
-			       comm, pid, ppid);
-		}
 	} else {
 		printk("Process %s pid %d parent pid %d IO_FLUSHER not set\n", comm, pid,
 				ppid);
@@ -152,9 +148,12 @@ static int is_io_flusher_supported(void)
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0) && LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
 		#if defined(PF_MEMALLOC_NOIO) && defined(PF_LESS_THROTTLE)
 			return 1;
+		#else
+			return 0;
 		#endif
+	#else
+		return 0;
 	#endif
-	return 0;
 }
 
 static long pxd_ioflusher_state(void __user *argp)
@@ -188,7 +187,6 @@ static long pxd_ioflusher_state(void __user *argp)
 	} else {
 		struct task_struct *temp_task;
 		struct pid *pid = NULL;
-		//printk("user specified pid %d\n", io_flusher_args.pid);
 		rcu_read_lock();
 		pid = find_pid_ns(io_flusher_args.pid, ns);
 		if (pid == NULL) {
@@ -211,22 +209,20 @@ static long pxd_ioflusher_state(void __user *argp)
 	old_flags = task->flags;
 	switch (io_flusher_args.io_flusher_action) {
 	case PXD_IO_FLUSHER_GET:
-		if (IS_SET_IO_FLUSHER(task)) {
-			is_io_flusher_set = 1;
-		}
 		break;
 	case PXD_IO_FLUSHER_SET:
 		SET_IO_FLUSHER(task);
-		is_io_flusher_set = 1;
 		break;
 	case PXD_IO_FLUSHER_CLEAR:
 		CLEAR_IO_FLUSHER(task);
-		is_io_flusher_set = 0;
 		break;
 	}
 	new_flags = task->flags;
 	put_task_struct(task);
-	print_io_flusher_state(old_flags, new_flags, pid, ppid, comm);
+
+	is_io_flusher_set = IS_SET_IO_FLUSHER_FLAG(new_flags);
+
+	print_io_flusher_state(new_flags, pid, ppid, comm);
 
 	if (copy_to_user(argp + offsetof(struct pxd_ioctl_io_flusher_args, is_io_flusher_set),
 			&is_io_flusher_set, sizeof(is_io_flusher_set))) {
