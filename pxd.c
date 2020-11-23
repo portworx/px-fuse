@@ -173,8 +173,9 @@ static long pxd_ioflusher_state(void __user *argp)
 		return -EOPNOTSUPP;
 	}
 
-	if (argp == NULL)
+	if (argp == NULL) {
 		return -EINVAL;
+	}
 
 	if (copy_from_user(&io_flusher_args, argp, sizeof(io_flusher_args))) {
 		return -EFAULT;
@@ -187,9 +188,9 @@ static long pxd_ioflusher_state(void __user *argp)
 	} else {
 		struct task_struct *temp_task;
 		struct pid *pid = NULL;
-		rcu_read_lock();
 		pid = find_pid_ns(io_flusher_args.pid, ns);
 		if (pid == NULL) {
+			rcu_read_unlock();
 			printk("Input pid %d does not exist", io_flusher_args.pid);
 			return -ENOENT;
 		}
