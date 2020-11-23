@@ -35,7 +35,6 @@
 #define PXD_IOC_UNREGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 7)		/* 0x505807 */
 #define PXD_IOC_RESIZE			_IO(PXD_IOCTL_MAGIC, 8)		/* 0x505808 */
 #define PXD_IOC_FPCLEANUP		_IO(PXD_IOCTL_MAGIC, 9)		/* 0x505809 */
-#define PXD_IOC_NODEWIPE		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */

@@ -15,14 +15,6 @@
 #include "io.h"
 #endif
 
-// context tracking node wipe
-struct wiperctx {
-	struct list_head rmlist;
-	struct work_struct work;
-	struct completion complete;
-	bool active;
-};
-
 struct pxd_context {
 	spinlock_t lock;
 	struct list_head list;
@@ -34,7 +26,6 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct delayed_work abort_work;
 	uint64_t open_seq;
-	struct wiperctx wipectx;
 };
 
 struct pxd_context* find_context(unsigned ctx);
