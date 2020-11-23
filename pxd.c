@@ -1782,12 +1782,10 @@ static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
 {
 	struct list_head *cur;
 
-printk("%s:%d entered\n", __func__, __LINE__);
 	if (ctx->fc.connected) {
 		return -EINVAL;
 	}
 
-printk("%s:%d entered\n", __func__, __LINE__);
 	cancel_delayed_work_sync(&ctx->abort_work);
 	pxd_abort_context(&ctx->abort_work.work);
 
@@ -1795,7 +1793,6 @@ printk("%s:%d entered\n", __func__, __LINE__);
 		return 0;
 	}
 
-printk("%s:%d entered\n", __func__, __LINE__);
 	spin_lock(&ctx->lock);
 	list_for_each(cur, &ctx->list) {
 		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
@@ -1804,7 +1801,6 @@ printk("%s:%d entered\n", __func__, __LINE__);
 	}
 	spin_unlock(&ctx->lock);
 
-printk("%s:%d complete\n", __func__, __LINE__);
 	return 0;
 }
 
@@ -1827,8 +1823,6 @@ static ssize_t pxd_release_store(struct device *dev,
 				continue;
 			}
 
-			printk("for context %d, num_devices %lu, connected flag %d initiating cleanup..\n",
-					i, ctx->num_devices, ctx->fc.connected);
 			pxd_nodewipe_cleanup(ctx);
 		}
 	}
