@@ -57,6 +57,7 @@ module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
+static void pxd_abort_context(struct work_struct *work);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
 struct pxd_context* find_context(unsigned ctx)
@@ -1801,6 +1802,10 @@ static ssize_t pxd_inprogress_show(struct device *dev,
 static void pxd_nodewipe_cleanup(struct pxd_context *ctx)
 {
 	struct list_head *cur, *tmp;
+
+	cancel_delayed_work_sync(&ctx->abort_work);
+	pxd_abort_context(&ctx->abort_work.work);
+
 	spin_lock(&ctx->lock);
 	list_for_each_safe(cur, tmp, &ctx->list) {
 		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
