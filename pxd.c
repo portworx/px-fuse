@@ -58,6 +58,7 @@ module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
+static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
 struct pxd_context* find_context(unsigned ctx)
@@ -213,6 +214,41 @@ static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
 	return ret;
 }
 
+static long pxd_ioctl_nodewipe(struct file *file, void __user *argp)
+{
+	static const char wipemagic[] = "PWXWIPE";
+	int i;
+	struct pxd_context *ctx;
+	int ret = -EINVAL;
+	char buf[16];
+
+	if (copy_from_user(buf, argp, sizeof(buf))) {
+		return -EFAULT;
+	}
+
+	if (!strncmp(wipemagic, buf, sizeof(wipemagic))) {
+		ret = 0;
+		printk("pxd kernel node wipe action initiated\n");
+		for (i = 0; i < pxd_num_contexts; ++i) {
+			ctx = &pxd_contexts[i];
+			if (ctx->fc.connected) {
+				printk("%s px is still connected... cannot release\n", __func__);
+				return -EBUSY;
+			}
+			if (ctx->num_devices == 0) {
+				continue;
+			}
+
+			printk("for context %d, num_devices %lu, connected flag %d initiating cleanup..\n",
+					i, ctx->num_devices, ctx->fc.connected);
+			ret = pxd_nodewipe_cleanup(ctx);
+			if (ret) return ret;
+		}
+	}
+
+	return ret;
+}
+
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -254,6 +290,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_resize(file, (void __user *)arg);
 	case PXD_IOC_FPCLEANUP:
 		return pxd_ioctl_fp_cleanup(file, (void __user *)arg);
+	case PXD_IOC_NODEWIPE:
+		return pxd_ioctl_nodewipe(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -1222,7 +1260,7 @@ out:
 }
 
 static
-void pxd_remove_direct(struct pxd_device *pxd_dev)
+void pxd_remove_direct2(struct pxd_device *pxd_dev)
 {
 	spin_lock(&pxd_dev->lock);
 	list_del(&pxd_dev->node);
@@ -1230,6 +1268,23 @@ void pxd_remove_direct(struct pxd_device *pxd_dev)
 	pxd_dev->removing = true;
 	wmb();
 
+	/* Make sure the req_fn isn't called anymore even if the device hangs around */
+	if (pxd_dev->disk && pxd_dev->disk->queue){
+		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
+		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+	}
+	spin_unlock(&pxd_dev->lock);
+
+	pxd_fastpath_cleanup(pxd_dev);
+	device_unregister(&pxd_dev->dev);
+	module_put(THIS_MODULE);
+}
+
+static
+void pxd_remove_direct(struct pxd_device *pxd_dev)
+{
+	spin_lock(&pxd_dev->lock);
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
 		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
@@ -1799,23 +1854,71 @@ static ssize_t pxd_inprogress_show(struct device *dev,
 	return sprintf(buf, "%d", atomic_read(&pxd_dev->ncount));
 }
 
-static void pxd_nodewipe_cleanup(struct pxd_context *ctx)
+static void pxd_bg_wiper(struct work_struct *work)
 {
 	struct list_head *cur, *tmp;
+	struct wiperctx *wipectx = container_of(work, struct wiperctx, work);
 
+printk("%s entered\n", __func__);
+	list_for_each_safe(cur, tmp, &wipectx->rmlist) {
+		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+		pxd_remove_direct(pxd_dev);
+	}
+
+	wipectx->active = false;
+	complete(&wipectx->complete);
+printk("%s done\n", __func__);
+}
+
+static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
+{
+	struct list_head *cur, *tmp;
+	struct wiperctx *wipectx = &ctx->wipectx;
+
+printk("%s:%d entered\n", __func__, __LINE__);
+	if (ctx->fc.connected) {
+		return -EINVAL;
+	}
+
+printk("%s:%d entered\n", __func__, __LINE__);
+	if (wipectx->active || work_busy(&wipectx->work)) {
+		return -EBUSY;
+	}
+
+printk("%s:%d entered\n", __func__, __LINE__);
 	cancel_delayed_work_sync(&ctx->abort_work);
 	pxd_abort_context(&ctx->abort_work.work);
+
+	if (ctx->num_devices == 0) {
+		return 0;
+	}
+
+printk("%s:%d entered\n", __func__, __LINE__);
+	wipectx->active = true;
 
 	spin_lock(&ctx->lock);
 	list_for_each_safe(cur, tmp, &ctx->list) {
 		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
 
-		pxd_remove_direct(pxd_dev);
+printk("%s:%d device %llu entered\n", __func__, __LINE__, pxd_dev->dev_id);
+		pxd_remove_direct2(pxd_dev);
 	}
 	spin_unlock(&ctx->lock);
+
+	if (!list_empty(&wipectx->rmlist)) {
+		int ret;
+printk("%s:%d work scheduled \n", __func__, __LINE__);
+		schedule_work(&wipectx->work);
+		ret = wait_for_completion_timeout(&wipectx->complete, 30*HZ);
+		if (!ret) return -EBUSY;
+	}
+
+printk("%s:%d complete\n", __func__, __LINE__);
+	return 0;
 }
 
-static ssize_t pxd_release_store(struct device *dev,
+//static
+ssize_t pxd_release_store(struct device *dev,
 			struct device_attribute *attr, const char *buf, size_t count)
 {
 	static const char wipemagic[] = "PWXWIPE";
@@ -1826,9 +1929,16 @@ static ssize_t pxd_release_store(struct device *dev,
 		printk("pxd kernel node wipe action initiated\n");
 		for (i = 0; i < pxd_num_contexts; ++i) {
 			ctx = &pxd_contexts[i];
+			if (ctx->fc.connected) {
+				printk("%s px is still connected... cannot release\n", __func__);
+				break;
+			}
 			if (ctx->num_devices == 0) {
 				continue;
 			}
+
+			printk("for context %d, num_devices %lu, connected flag %d initiating cleanup..\n",
+					i, ctx->num_devices, ctx->fc.connected);
 			pxd_nodewipe_cleanup(ctx);
 		}
 	}
@@ -1846,7 +1956,6 @@ static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_u
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);
 static DEVICE_ATTR(inprogress, S_IRUGO, pxd_inprogress_show, NULL);
-static DEVICE_ATTR(release, S_IWUSR, NULL, pxd_release_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -1859,7 +1968,6 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_mode.attr,
 	&dev_attr_debug.attr,
 	&dev_attr_inprogress.attr,
-	&dev_attr_release.attr,
 	NULL
 };
 
@@ -2107,6 +2215,10 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops.release = pxd_control_release;
 	ctx->fops.unlocked_ioctl = pxd_control_ioctl;
 	ctx->fops.mmap = pxd_mmap;
+	INIT_LIST_HEAD(&ctx->wipectx.rmlist);
+	INIT_WORK(&ctx->wipectx.work, pxd_bg_wiper);
+	init_completion(&ctx->wipectx.complete);
+	ctx->wipectx.active = false;
 
 	if (ctx->id < pxd_num_contexts_exported) {
 		err = fuse_conn_init(&ctx->fc);
