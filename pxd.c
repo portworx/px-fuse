@@ -1081,7 +1081,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #else
 	if (!pxd_dev->using_blkque) {
 		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+	  q = blk_alloc_queue(NUMA_NO_NODE);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
@@ -1090,9 +1092,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 			err = -ENOMEM;
 			goto out_disk;
 		}
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
 		// add hooks to control congestion only while using fastpath
 		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0)
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 #endif
