@@ -741,12 +741,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 			err = -ENOMEM;
 			goto out_disk;
 		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
-		// add hooks to control congestion only while using fastpath
-		q->backing_dev_info->congested_fn = pxd_device_congested;
-		q->backing_dev_info->congested_data = pxd_dev;
-#endif
-		
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0)
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 #endif
