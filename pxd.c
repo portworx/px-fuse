@@ -1807,7 +1807,7 @@ static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
 static ssize_t pxd_release_store(struct device *dev,
 			struct device_attribute *attr, const char *buf, size_t count)
 {
-	static const char wipemagic[] = "PWXWIPE";
+	static const char wipemagic[] = "P0RXR3l3@53";
 	int i;
 	struct pxd_context *ctx;
 
