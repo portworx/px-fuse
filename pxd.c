@@ -1786,9 +1786,6 @@ static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
 		return -EINVAL;
 	}
 
-	cancel_delayed_work_sync(&ctx->abort_work);
-	pxd_abort_context(&ctx->abort_work.work);
-
 	if (ctx->num_devices == 0) {
 		return 0;
 	}
