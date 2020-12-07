@@ -64,6 +64,8 @@ module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 
+static void pxd_abort_context(struct work_struct *work);
+static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 
 struct pxd_context* find_context(unsigned ctx)
@@ -1891,6 +1893,55 @@ static ssize_t pxd_inprogress_show(struct device *dev,
 	return sprintf(buf, "%d", atomic_read(&pxd_dev->ncount));
 }
 
+static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
+{
+	struct list_head *cur;
+
+	if (ctx->fc.connected) {
+		return -EINVAL;
+	}
+
+	if (ctx->num_devices == 0) {
+		return 0;
+	}
+
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+
+		disableFastPath(pxd_dev, true);
+	}
+	spin_unlock(&ctx->lock);
+
+	return 0;
+}
+
+static ssize_t pxd_release_store(struct device *dev,
+			struct device_attribute *attr, const char *buf, size_t count)
+{
+	static const char wipemagic[] = "P0RXR3l3@53";
+	int i;
+	struct pxd_context *ctx;
+
+	if (!strncmp(wipemagic, buf, sizeof(wipemagic))) {
+		printk("pxd kernel node wipe action initiated\n");
+		for (i = 0; i < pxd_num_contexts; ++i) {
+			ctx = &pxd_contexts[i];
+			if (ctx->fc.connected) {
+				printk("%s px is still connected... cannot release\n", __func__);
+				break;
+			}
+			if (ctx->num_devices == 0) {
+				continue;
+			}
+
+			pxd_nodewipe_cleanup(ctx);
+		}
+	}
+
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
@@ -1901,6 +1952,7 @@ static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_u
 static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);
 static DEVICE_ATTR(inprogress, S_IRUGO, pxd_inprogress_show, NULL);
+static DEVICE_ATTR(release, S_IWUSR, NULL, pxd_release_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -1913,6 +1965,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_mode.attr,
 	&dev_attr_debug.attr,
 	&dev_attr_inprogress.attr,
+	&dev_attr_release.attr,
 	NULL
 };
 
