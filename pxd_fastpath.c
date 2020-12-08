@@ -1328,6 +1328,68 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		return BLK_QC_RETVAL;
 	}
 
+	/*
+	 * Use blk_queue_split() to ensure queue limits are always honoured.
+	 * same as kernel dm commit: 89f5fa47476eda56402e29fff3c5097f5c2a1e19
+	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+	blk_queue_split(&bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
+	blk_queue_split(q, &bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
+	blk_queue_split(q, &bio, q->bio_split);
+#else
+{
+	unsigned op = 0; // READ
+	sector_t rq_sectors = BIO_SIZE(bio) >> SECTOR_SHIFT;
+	sector_t max_sectors;
+	unsigned flags = bio->bi_rw;
+
+	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
+	case REQ_WRITE:
+		/* FALLTHROUGH */
+	case (REQ_WRITE | REQ_WRITE_SAME):
+		if (flags & REQ_WRITE_SAME)
+			op = REQ_WRITE_SAME;
+		else
+			op = REQ_WRITE;
+		break;
+	case REQ_DISCARD:
+		/* FALLTHROUGH */
+	case REQ_WRITE | REQ_DISCARD:
+		op = REQ_DISCARD;
+		break;
+	case 0: // read
+		break;
+	default:
+		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(flags=%#x): size=%lu, minor=%d\n",
+			pxd_dev->dev_id, flags, rq_sectors, pxd_dev->minor);
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
+	max_sectors = blk_queue_get_max_sectors(q, op);
+	if (!max_sectors) {
+		bio_io_error(bio);
+		return BLK_QC_RETVAL;
+	}
+
+	if (rq_sectors > max_sectors) {
+		struct bio_pair *bp = bio_split(bio, max_sectors);
+		if (!bp) {
+			bio_io_error(bio);
+			return BLK_QC_RETVAL;
+		}
+
+		// process the split BIOs in next submission
+		generic_make_request(&bp->bio1);
+		generic_make_request(&bp->bio2);
+		bio_pair_release(bp);
+		return BLK_QC_RETVAL;
+	}
+}
+#endif
+
 	pxd_check_q_congested(pxd_dev);
 	read_lock(&pxd_dev->fp.suspend_lock);
 	if (!pxd_dev->fp.fastpath) {
