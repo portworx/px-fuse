@@ -703,7 +703,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	int rc;
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
-	atomic_inc(&req->pxd_dev->ncount);
 	switch (op) {
 	case REQ_OP_WRITE_SAME:
 		rc = pxd_write_same_request(req, size, off, minor, flags);
@@ -726,6 +725,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		return -1;
 	}
 
+	if (rc == 0) atomic_inc(&req->pxd_dev->ncount);
 	return rc;
 }
 
@@ -737,7 +737,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	int rc;
 	trace_pxd_request(req->in.unique, size, off, minor, flags);
 
-	atomic_inc(&req->pxd_dev->ncount);
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
 		/* FALLTHROUGH */
@@ -761,6 +760,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		return -1;
 	}
 
+	if (rc == 0) atomic_inc(&req->pxd_dev->ncount);
 	return rc;
 }
 #endif
