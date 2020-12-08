@@ -1341,10 +1341,11 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #else
 {
 	unsigned op = 0; // READ
-	sector_t rq_size = BIO_SIZE(bio);
-	sector_t max_size;
+	sector_t rq_sectors = BIO_SIZE(bio) >> SECTOR_SHIFT;
+	sector_t max_sectors;
+	unsigned flags = bio->bi_rw;
 
-	switch (bio->bi_rw & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
+	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
 		/* FALLTHROUGH */
 	case (REQ_WRITE | REQ_WRITE_SAME):
@@ -1359,21 +1360,21 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		op = REQ_DISCARD;
 		break;
 	default:
-		printk(KERN_ERR"[%lu] REQ_OP_UNKNOWN(flags=%#x): size=%d, off=%lld, minor=%d\n",
-			pxd_dev->dev_id, bio->bi_rw, rq_size, max_size, pxd_dev->minor);
+		printk(KERN_ERR"[%lu] REQ_OP_UNKNOWN(flags=%#x): size=%u, max_size=%u, minor=%d\n",
+			pxd_dev->dev_id, flags, rq_sectors, max_sectors, pxd_dev->minor);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
-	max_size = blk_queue_get_max_bytes(q, op);
+	max_sectors = blk_queue_get_max_sectors(q, op);
 
-	if (!max_size) {
+	if (!max_sectors) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
-	if (rq_size > max_size) {
-		struct bio_pair *bp = bio_split(bio, max_size >> SECTOR_SHIFT);
+	if (rq_sectors > max_sectors) {
+		struct bio_pair *bp = bio_split(bio, max_sectors >> SECTOR_SHIFT);
 		if (!bp) {
 			bio_io_error(bio);
 			return BLK_QC_RETVAL;
