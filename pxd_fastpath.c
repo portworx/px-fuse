@@ -1360,14 +1360,13 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		op = REQ_DISCARD;
 		break;
 	default:
-		printk(KERN_ERR"[%lu] REQ_OP_UNKNOWN(flags=%#x): size=%u, max_size=%u, minor=%d\n",
-			pxd_dev->dev_id, flags, rq_sectors, max_sectors, pxd_dev->minor);
+		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(flags=%#x): size=%lu, minor=%d\n",
+			pxd_dev->dev_id, flags, rq_sectors, pxd_dev->minor);
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
 
 	max_sectors = blk_queue_get_max_sectors(q, op);
-
 	if (!max_sectors) {
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
