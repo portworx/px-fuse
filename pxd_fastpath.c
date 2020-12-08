@@ -1373,7 +1373,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 	if (rq_sectors > max_sectors) {
-		struct bio_pair *bp = bio_split(bio, max_sectors >> SECTOR_SHIFT);
+		struct bio_pair *bp = bio_split(bio, max_sectors);
 		if (!bp) {
 			bio_io_error(bio);
 			return BLK_QC_RETVAL;
