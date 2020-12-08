@@ -9,6 +9,8 @@
 #endif
 #include "pxtgt.h"
 #include "pxtgt_hash.h"
+#include "pxlib.h"
+
 
 struct pxtgt_device;
 
