@@ -1359,6 +1359,8 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	case REQ_WRITE | REQ_DISCARD:
 		op = REQ_DISCARD;
 		break;
+	case 0: // read
+		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(flags=%#x): size=%lu, minor=%d\n",
 			pxd_dev->dev_id, flags, rq_sectors, pxd_dev->minor);
