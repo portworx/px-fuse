@@ -43,6 +43,67 @@ static inline block_t from_dblock(dblock_t b)
 	return (__force block_t) b;
 }
 
+static inline sector_t to_sector(uint64_t  n)
+{
+	return (n >> SECTOR_SHIFT);
+}
+
+static inline uint64_t  to_bytes(sector_t n)
+{
+	return (n << SECTOR_SHIFT);
+}
+
+/*
+ * Some utility functions commonly used by policies and the core target.
+ */
+#define dm_sector_div64(x, y)( \
+{ \
+	u64 _res; \
+	(x) = div64_u64_rem(x, y, &_res); \
+	_res; \
+} \
+)
+
+/*
+ * Ceiling(n / sz)
+ */
+#define dm_div_up(n, sz) (((n) + (sz) - 1) / (sz))
+
+#define dm_sector_div_up(n, sz) ( \
+{ \
+	sector_t _r = ((n) + (sz) - 1); \
+	sector_div(_r, (sz)); \
+	_r; \
+} \
+)
+
+/*
+ * ceiling(n / size) * size
+ */
+#define dm_round_up(n, sz) (dm_div_up((n), (sz)) * (sz))
+
+static inline size_t bitset_size_in_bytes(unsigned nr_entries)
+{
+	return sizeof(unsigned long) * dm_div_up(nr_entries, BITS_PER_LONG);
+}
+
+static inline unsigned long *alloc_bitset(unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	return vzalloc(s);
+}
+
+static inline void clear_bitset(void *bitset, unsigned nr_entries)
+{
+	size_t s = bitset_size_in_bytes(nr_entries);
+	memset(bitset, 0, s);
+}
+
+static inline void free_bitset(unsigned long *bits)
+{
+	vfree(bits);
+}
+
 
 /*----------------------------------------------------------------*/
 
