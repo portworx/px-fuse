@@ -21,6 +21,10 @@ struct pxrealm_properties {
 	uint64_t volume_id;
 };
 
+sector_t pxrealm_sector_offset(pxrealm_index_t id);
+sector_t pxrealm_sector_end(pxrealm_index_t id);
+sector_t pxrealm_sector_size(pxrealm_index_t id);
+
 pxrealm_index_t pxrealm_lookup(uint64_t vol);
 int pxrealm_properties(pxrealm_index_t, struct pxrealm_properties*);
 

@@ -15,7 +15,10 @@
 #include "pxtgt_core.h"
 #include "pxrealm.h"
 
-#define REALM_SIZE (1ULL << 30) // each realm is 1G
+#define REALM_SECTOR_SHIFT (21)
+#define REALM_SECTORS (1ULL << REALM_SECTOR_SHIFT)
+#define REALM_SIZE (REALM_SECTORS << SECTOR_SHIFT) // each realm is 1G
+
 #define MIN_REALM_MAP (1) // 1GB
 #define MAX_REALM_MAP (256) // 256GB
 #define MIN_ORIGIN_SIZE (REALM_SIZE * 10)
@@ -23,11 +26,8 @@
 #define MAX_REALM_MAPS (2*PXTGT_MAX_DEVICES)
 
 #define REALM_SB_SIZE (8192) // first 8K (sb, spare etc)
-
 #define PRIMARY_JOURNAL_SIZE REALM_SIZE
 #define SECONDARY_JOURNAL_SIZE PRIMARY_JOURNAL_SIZE
-
-#define REALM_OFFSET (3 * REALM_SIZE)
 
 #define PXREALM_ROUND_UP(sz)  (((sz) + REALM_SIZE - 1) & (REALM_SIZE - 1))
 
@@ -63,6 +63,7 @@ struct pxrealm_map_t {
 
 static struct pxrealm_t pxrealm;
 static struct pxrealm_map_t maps[MAX_REALM_MAPS];
+
 
 static
 void pxrealm_map_dump(struct pxrealm_map_t *m)
@@ -101,6 +102,30 @@ struct pxrealm_map_t* pxrealm_map(pxrealm_index_t id)
 	return &maps[id];
 }
 
+sector_t pxrealm_sector_offset(pxrealm_index_t id)
+{
+	struct pxrealm_map_t *pmap = pxrealm_map(id);
+
+	BUG_ON(!pmap);
+	BUG_ON(!pmap->inuse);
+
+	return pmap->off >> SECTOR_SHIFT;
+}
+
+sector_t pxrealm_sector_size(pxrealm_index_t id)
+{
+	struct pxrealm_map_t *pmap = pxrealm_map(id);
+
+	BUG_ON(!pmap);
+	BUG_ON(!pmap->inuse);
+
+	return pmap->nrealms << REALM_SECTOR_SHIFT;
+}
+
+sector_t pxrealm_sector_end(pxrealm_index_t id)
+{
+	return pxrealm_sector_offset(id) + pxrealm_sector_size(id);
+}
 
 static
 int compute_needed_realms(uint64_t size, pxrealm_hint_t hint)
