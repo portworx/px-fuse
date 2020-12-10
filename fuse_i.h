@@ -115,15 +115,15 @@ struct ____cacheline_aligned fuse_queue_reader {
 
 #else
 
-#include <pthread.h>
 #include <atomic>
+#include <mutex>
 #include "spin_lock.h"
 
 /** writer control block */
 struct alignas(64) fuse_queue_writer {
 	uint32_t write;         	/** cached write index */
 	uint32_t read;			/** cached read index */
-	pthread_spinlock_t lock;	/** writer lock */
+	px::spinlock lock;		/** writer lock */
 	bool in_runq;			/** a thread is processing the queue */
 	char pad_1[3];
 	uint64_t sequence;        	/** next request sequence number */
@@ -137,6 +137,20 @@ struct alignas(64) fuse_queue_reader {
 	px::spinlock lock;
 	uint64_t pad_2[6];
 };
+
+struct fuse_queue_cb;
+
+namespace px {
+namespace ioring {
+/// call into the kernel to run pending entries
+/// @param queue user->kernel queue
+/// @param fd file descriptor associated with the queue
+/// @param ioctl_cmd ioctl command
+/// @param lock queue lock, unlocked around ioctl
+void run_queue(fuse_queue_cb *queue, int fd, int ioctl_cmd,
+	       std::unique_lock<px::spinlock> &lock);
+}
+}
 
 #endif
 
