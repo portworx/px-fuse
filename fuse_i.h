@@ -127,7 +127,8 @@ struct alignas(64) fuse_queue_writer {
 	bool in_runq;			/** a thread is processing the queue */
 	char pad_1[3];
 	uint64_t sequence;        	/** next request sequence number */
-	uint64_t pad[5];
+	uint32_t committed_;		/** last write index committed to reader */
+	uint32_t pad_2[9];
 };
 
 /** reader control block */
