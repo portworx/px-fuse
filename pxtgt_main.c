@@ -1473,6 +1473,7 @@ static struct attribute *pxtgt_control_attrs[] = {
     &dev_attr_info.attr,
     &dev_attr_attach.attr,
     &dev_attr_detach.attr,
+	NULL,
 };
 
 static struct attribute_group pxtgt_control_attrgroup = {
