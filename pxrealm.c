@@ -65,6 +65,19 @@ static struct pxrealm_t pxrealm;
 static struct pxrealm_map_t maps[MAX_REALM_MAPS];
 
 static
+void pxrealm_debug_dump(void)
+{
+	printk("global realm: cachedev %s\n\tcdev_size %llu\n\tcdev_sectors %llu\n\t"
+			"max_realms %d\n\trealm_inuse_bitmap %p\n\tmap_indices %p\n\t"
+			"initialized %d\n\tcdev %p\n",
+			pxrealm.cdevname, pxrealm.cdev_size, pxrealm.cdev_sectors,
+			pxrealm.max_realms, pxrealm.realm_inuse_bitmap,
+			pxrealm.map_indices,
+			pxrealm.initialized,
+			pxrealm.cdev);
+}
+
+static
 struct pxrealm_map_t* pxrealm_map(pxrealm_index_t id)
 {
 	if (id >= MAX_REALM_MAPS) {
@@ -269,12 +282,13 @@ int pxrealm_init(const char* cdevpath)
 	__bitmap_set(pxrealm.realm_inuse_bitmap, 0, 3);
 	pxrealm.initialized = 1;
 
+	pxrealm_debug_dump();
+
 	return 0;
 }
 
 void pxrealm_exit()
 {
-
 	if (pxrealm.map_indices) {
 		bitmap_free(pxrealm.map_indices);
 		pxrealm.map_indices = NULL;

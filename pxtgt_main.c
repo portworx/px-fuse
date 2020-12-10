@@ -1364,6 +1364,32 @@ static struct pxtgt_context *dev_to_pxctx(struct device *dev)
 }
 
 
+static
+ssize_t pxctx_cache_show(struct device *dev,
+        struct device_attribute *attr, char *buf)
+{
+	//struct pxtgt_context *ctx = dev_to_pxctx(dev);
+    return sprintf(buf, "TODO will extend this for debugging");
+}
+
+static
+ssize_t pxctx_cache_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	int rc;
+	char cdevname[MAX_DEVNAME+1];
+
+	strncpy(cdevname, buf, MAX_DEVNAME);
+	cdevname[MAX_DEVNAME] = '\0';
+
+	rc = pxmgr_init(cdevname);
+	if (rc != 0) {
+		printk("cache init failed %d\n", rc);
+	}
+
+	return count;
+}
+
 static ssize_t pxctx_info_show(struct device *dev,
         struct device_attribute *attr, char *buf)
 {
@@ -1378,7 +1404,8 @@ static ssize_t pxctx_info_set(struct device *dev,
 	struct pxtgt_context *ctx = dev_to_pxctx(dev);
 	(void)ctx;
     printk("Received new msg to send: %s", buf);
-    return count;
+
+	return count;
 }
 
 static ssize_t pxctx_attached_show(struct device *dev,
@@ -1467,49 +1494,17 @@ static ssize_t pxctx_detach_set(struct device *dev, struct device_attribute *att
 	return count;
 }
 
-static ssize_t pxctx_cache_set(struct device *dev, struct device_attribute *attr,
-			   const char *buf, size_t count)
-{
-	struct file *fh;
-	int rc;
-
-	char cdevname[MAX_DEVNAME+1];
-
-	strncpy(cdevname, buf, MAX_DEVNAME);
-	cdevname[MAX_DEVNAME] = '\0';
-
-	fh = filp_open(cdevname, O_LARGEFILE|O_RDWR|O_DIRECT, 0600);
-	if (IS_ERR_OR_NULL(fh)) {
-		printk("invalid source: %s, failed open\n", cdevname);
-		return count;
-	}
-
-	if (i_size_read(fh->f_inode)  < PXTGT_LBS) {
-		printk("invalid size of source %s, too small %lld\n", cdevname, i_size_read(fh->f_inode));
-		return count;
-	}
-
-	printk("using device %s size %lld as cache device\n", cdevname, i_size_read(fh->f_inode));
-	filp_close(fh, NULL);
-
-	rc = pxmgr_init(cdevname);
-	if (rc != 0) {
-		printk("cache init failed %d\n", rc);
-	}
-
-	return count;
-}
-
-static DEVICE_ATTR(cdev, S_IWUSR, NULL, pxctx_cache_set);
 static DEVICE_ATTR(attach, S_IRUGO|S_IWUSR, pxctx_attached_show, pxctx_attach_set);
 static DEVICE_ATTR(detach, S_IRUGO|S_IWUSR, pxctx_attached_show, pxctx_detach_set);
 static DEVICE_ATTR(info, S_IRUGO|S_IWUSR, pxctx_info_show, pxctx_info_set);
+static DEVICE_ATTR(cache, S_IRUGO|S_IWUSR, pxctx_cache_show, pxctx_cache_set);
 
 static struct attribute *pxtgt_control_attrs[] = {
     &dev_attr_info.attr,
     &dev_attr_attach.attr,
     &dev_attr_detach.attr,
-	&dev_attr_cdev.attr,
+    &dev_attr_cache.attr,
+	NULL,
 };
 
 static struct attribute_group pxtgt_control_attrgroup = {
