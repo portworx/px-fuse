@@ -115,6 +115,11 @@ static inline unsigned safe_div(unsigned n, unsigned d)
 	return d ? n / d : 0u;
 }
 
+static inline unsigned safe_div64(uint64_t n, uint64_t d)
+{
+	return d ? n / d : 0u;
+}
+
 static inline unsigned safe_mod(unsigned n, unsigned d)
 {
 	return d ? n % d : 0u;

@@ -65,8 +65,16 @@ static struct pxrealm_t pxrealm;
 static struct pxrealm_map_t maps[MAX_REALM_MAPS];
 
 static
+void pxrealm_map_dump(struct pxrealm_map_t *m)
+{
+	printk("%lu: offset %lu nrealms %d inuse %x private %p origin vol %llu size %llu\n",
+			m->id, m->off, m->nrealms, m->inuse, m->private, m->volume_id, m->origin_size);
+}
+
 void pxrealm_debug_dump(void)
 {
+	int i;
+
 	printk("global realm: cachedev %s\n\tcdev_size %llu\n\tcdev_sectors %llu\n\t"
 			"max_realms %d\n\trealm_inuse_bitmap %p\n\tmap_indices %p\n\t"
 			"initialized %d\n\tcdev %p\n",
@@ -75,6 +83,12 @@ void pxrealm_debug_dump(void)
 			pxrealm.map_indices,
 			pxrealm.initialized,
 			pxrealm.cdev);
+
+	for (i=0; i<MAX_REALM_MAPS; i++) {
+		if (maps[i].inuse) {
+			pxrealm_map_dump(&maps[i]);
+		}
+	}
 }
 
 static
@@ -99,13 +113,18 @@ int compute_needed_realms(uint64_t size, pxrealm_hint_t hint)
 	case PXREALM_MEDIUM:
 		// 15% of origin
 		size = size * 15/100;
+		break;
 	case PXREALM_SMALL:
 	default:
 		// 10% of origin
 		size = size /10;
 	}
 
-	return min(MAX_REALM_MAP, (int)safe_div(size, REALM_SIZE));
+	printk("%s size %llu, hint %d, nrealms %d\n",
+			__func__, size, hint,
+			min(MAX_REALM_MAP, (int)safe_div64(size, REALM_SIZE)));
+
+	return min(MAX_REALM_MAP, (int)safe_div64(size, REALM_SIZE));
 }
 
 static
@@ -159,21 +178,35 @@ pxrealm_index_t pxrealm_alloc(uint64_t volume_id, uint64_t origin_size,
 	pxrealm_index_t id;
 	int rc;
 
+
+	printk("%s volume %llu, origin size %llu, hint %d, context %p, nrealms %d\n",
+			__func__,
+			volume_id, origin_size, hint, context,
+			nrealms);
+
 	// if the origin px volume is smaller then do not apply caching
 	if (MIN_ORIGIN_SIZE > origin_size || nrealms <= 0) {
 		return (pxrealm_index_t) -EINVAL;
 	}
 
+	id = pxrealm_lookup(volume_id);
+	if (id >= 0) { // lookup passed
+		printk("cache mapping for volume %llu exists with id %lu\n", volume_id, id);
+		return id;
+	}
+
+	// search for first zero bit, position is index.
 	id = bitmap_find_next_zero_area_off(pxrealm.map_indices, MAX_REALM_MAPS,
 			0, 1, 0, 0);
 	if (id >= MAX_REALM_MAPS) {
 		return (pxrealm_index_t) -EBUSY;
 	}
+	bitmap_set(pxrealm.map_indices, id, 1);
 
 	pmap = pxrealm_map(id);
+	BUG_ON(!pmap);
 	BUG_ON(pmap->inuse);
 
-	// search for first zero bit, position is index.
 	// allocate a context to track cache state for this realm
 	rc = pxrealm_assign(&pxrealm, pmap, nrealms);
 	if (rc < 0) {
@@ -204,21 +237,24 @@ pxrealm_index_t pxrealm_lookup(uint64_t vol)
 }
 
 
-void pxrealm_free(pxrealm_index_t id)
+int pxrealm_free(pxrealm_index_t id)
 {
 	struct pxrealm_map_t *pmap;
 
 	if (id >= MAX_REALM_MAPS) {
-		return;
+		printk("%s index out of range %lu\n", __func__, id);
+		return -EINVAL;
 	}
 
 	pmap = pxrealm_map(id);
 	if (!pmap || !pmap->inuse) {
-		return;
+		printk("%s index not in use %lu\n", __func__, id);
+		return -EINVAL;
 	}
 
 	pxrealm_dealloc(pmap);
 	bitmap_clear(pxrealm.map_indices, id, 1);
+	return 0; // successful
 }
 
 

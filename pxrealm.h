@@ -5,9 +5,9 @@ typedef long pxrealm_index_t;
 
 typedef enum {
 	PXREALM_AUTO, // allow on the fly changing cache size! not supported
-	PXREALM_LARGE,
-	PXREALM_MEDIUM,
 	PXREALM_SMALL,
+	PXREALM_MEDIUM,
+	PXREALM_LARGE,
 } pxrealm_hint_t;
 
 
@@ -21,13 +21,15 @@ struct pxrealm_properties {
 	uint64_t volume_id;
 };
 
+pxrealm_index_t pxrealm_lookup(uint64_t vol);
 int pxrealm_properties(pxrealm_index_t, struct pxrealm_properties*);
 
 pxrealm_index_t pxrealm_alloc(uint64_t volumeId, uint64_t origin_size,
 		pxrealm_hint_t hint, void *context);
-void pxrealm_free(pxrealm_index_t);
+int pxrealm_free(pxrealm_index_t);
 
 int pxrealm_init(const char* cdevpath);
 void pxrealm_exit(void);
 
+void pxrealm_debug_dump(void);
 #endif /* _PXREALM_H_ */
