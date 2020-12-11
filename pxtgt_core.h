@@ -13,6 +13,7 @@
 
 
 struct pxtgt_device;
+struct pxmgr_context;
 
 // Added metadata for each bio
 struct pxtgt_io_tracker {
@@ -71,6 +72,9 @@ struct pxtgt_device {
 	bool removing;
 	struct pxtgt_context *ctx;
 	bool connected;
+
+#define cache_enabled(pxd_dev)  ((pxd_dev)->mc != NULL)
+	struct pxmgr_context *mc;
 
 #define PXTGT_ACTIVE(pxtgt_dev)  (atomic_read(&pxtgt_dev->ncount))
 	// congestion handling

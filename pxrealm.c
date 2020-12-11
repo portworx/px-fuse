@@ -55,6 +55,7 @@ struct pxrealm_map_t {
 	int nrealms;
 
 	int inuse:1;
+	pxrealm_hint_t hint;
 
 	void *private;
 	uint64_t origin_size;
@@ -64,6 +65,13 @@ struct pxrealm_map_t {
 static struct pxrealm_t pxrealm;
 static struct pxrealm_map_t maps[MAX_REALM_MAPS];
 
+struct block_device* pxrealm_cache_device(void)
+{
+	if (pxrealm.initialized)
+		return pxrealm.cdev;
+
+	return NULL;
+}
 
 static
 void pxrealm_map_dump(struct pxrealm_map_t *m)
@@ -243,6 +251,7 @@ pxrealm_index_t pxrealm_alloc(uint64_t volume_id, uint64_t origin_size,
 	pmap->private = context;
 	pmap->origin_size = origin_size;
 	pmap->volume_id = volume_id;
+	pmap->hint = hint;
 
 	return id;
 }
@@ -292,11 +301,14 @@ int pxrealm_properties(pxrealm_index_t id, struct pxrealm_properties* prop)
 	}
 
 	prop->id = id;
-	prop->offset = realm_byte_offset(pmap->off);
-	prop->size = pmap->nrealms * REALM_SIZE;
+	prop->cdev = pxrealm.cdev;
+	prop->offset = pmap->off >> SECTOR_SHIFT;
+	prop->nsectors = pmap->nrealms << REALM_SECTOR_SHIFT;
+	prop->end = prop->offset + prop->nsectors;
 	prop->context = pmap->private;
 	prop->origin_size = pmap->origin_size;
 	prop->volume_id = pmap->volume_id;
+	prop->hint = pmap->hint;
 
 	return 0;
 }

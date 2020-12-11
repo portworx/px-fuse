@@ -1,26 +1,25 @@
 #ifndef _PXREALM_H_
 #define _PXREALM_H_
 
+#include "pxmgr.h"
+
 typedef long pxrealm_index_t;
-
-typedef enum {
-	PXREALM_AUTO, // allow on the fly changing cache size! not supported
-	PXREALM_SMALL,
-	PXREALM_MEDIUM,
-	PXREALM_LARGE,
-} pxrealm_hint_t;
-
 
 struct pxrealm_properties {
 	pxrealm_index_t id;
-	uint64_t offset; // begin byte offset
-	uint64_t size; // number of bytes in this realm
 
-	void* context;
+	struct block_device *cdev;
+	sector_t offset; // begin sector offset
+	sector_t end;    // end sector offset
+	sector_t nsectors; // number of sectors in this realm
+
+	pxrealm_hint_t hint;
 	uint64_t origin_size;
 	uint64_t volume_id;
+	void* context;
 };
 
+struct block_device* pxrealm_cache_device(void);
 sector_t pxrealm_sector_offset(pxrealm_index_t id);
 sector_t pxrealm_sector_end(pxrealm_index_t id);
 sector_t pxrealm_sector_size(pxrealm_index_t id);

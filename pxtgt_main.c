@@ -12,7 +12,6 @@
 #include "pxtgt_io.h"
 
 #include "pxmgr.h"
-#include "pxrealm.h"
 
 #define STATIC
 
@@ -1237,11 +1236,49 @@ void __strip_nl(const char *src, char *dst, int maxlen) {
 			src, dst, len);
 }
 
+static ssize_t pxtgt_cachealloc_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxtgt_device *pxtgt_dev = dev_to_pxtgt_dev(dev);
+	struct pxmgr_context *mc;
+
+	if (pxtgt_dev->mc != NULL) {
+		printk("px target device %llu already has cache assigned\n", pxtgt_dev->dev_id);
+		return count;
+	}
+
+	mc = pxmgr_cache_alloc(pxtgt_dev->dev_id, pxtgt_dev->size, PXREALM_SMALL, pxtgt_dev);
+	printk("cache alloc result: %p\n", mc);
+	pxtgt_dev->mc = mc;
+
+	return count;
+}
+
+static ssize_t pxtgt_cachefree_set(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxtgt_device *pxtgt_dev = dev_to_pxtgt_dev(dev);
+	int rc;
+
+	if (!pxtgt_dev->mc) {
+		printk("px target device %llu already has cache freed\n", pxtgt_dev->dev_id);
+		return count;
+	}
+
+	rc = pxmgr_cache_dealloc(pxtgt_dev->mc);
+	printk("freeing cache returned %d\n", rc);
+	pxtgt_dev->mc = NULL;
+
+	return count;
+}
+
 static DEVICE_ATTR(size, S_IRUGO, pxtgt_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxtgt_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxtgt_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxtgt_timeout_show, pxtgt_timeout_store);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxtgt_congestion_show, pxtgt_congestion_set);
+static DEVICE_ATTR(calloc, S_IRUGO|S_IWUSR, NULL, pxtgt_cachealloc_set);
+static DEVICE_ATTR(cfree, S_IRUGO|S_IWUSR, NULL, pxtgt_cachefree_set);
 
 static struct attribute *pxtgt_attrs[] = {
 	&dev_attr_size.attr,
@@ -1249,6 +1286,8 @@ static struct attribute *pxtgt_attrs[] = {
 	&dev_attr_minor.attr,
 	&dev_attr_timeout.attr,
 	&dev_attr_congested.attr,
+	&dev_attr_calloc.attr,
+	&dev_attr_cfree.attr,
 	NULL
 };
 
@@ -1369,8 +1408,16 @@ static
 ssize_t pxctx_cache_show(struct device *dev,
         struct device_attribute *attr, char *buf)
 {
-	//struct pxtgt_context *ctx = dev_to_pxctx(dev);
-	pxrealm_debug_dump();
+	struct pxtgt_context *ctx = dev_to_pxctx(dev);
+	struct pxtgt_device *pxtgt_dev;
+
+	pxtgt_dev = NULL;
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxtgt_dev, &ctx->list, node) {
+		pxmgr_debug_dump(pxtgt_dev->mc);
+	}
+	spin_unlock(&ctx->lock);
+
 	return sprintf(buf, "TODO will extend this for debugging");
 }
 
@@ -1496,51 +1543,16 @@ static ssize_t pxctx_detach_set(struct device *dev, struct device_attribute *att
 	return count;
 }
 
-static ssize_t pxctx_cachealloc_set(struct device *dev, struct device_attribute *attr,
-			   const char *buf, size_t count)
-{
-	//struct pxtgt_context *ctx = dev_to_pxctx(dev);
-	uint64_t dev_id, size;
-	pxrealm_index_t id;
-
-	sscanf(buf, "%llu %llu", &dev_id, &size);
-	printk("cache alloc device %llu, size %llu\n", dev_id, size);
-
-	id = pxrealm_alloc(dev_id, size, PXREALM_SMALL, NULL);
-	printk("cache alloc result: %lu\n", id);
-
-	return count;
-}
-
-static ssize_t pxctx_cachefree_set(struct device *dev, struct device_attribute *attr,
-			   const char *buf, size_t count)
-{
-	//struct pxtgt_context *ctx = dev_to_pxctx(dev);
-	pxrealm_index_t id;
-	int rc;
-
-	sscanf(buf, "%lu", &id);
-	printk("cache free id %lu\n", id);
-	rc = pxrealm_free(id);
-	printk("freeing cache index %lu returned %d\n", id, rc);
-
-	return count;
-}
-
 static DEVICE_ATTR(attach, S_IRUGO|S_IWUSR, pxctx_attached_show, pxctx_attach_set);
 static DEVICE_ATTR(detach, S_IRUGO|S_IWUSR, pxctx_attached_show, pxctx_detach_set);
 static DEVICE_ATTR(info, S_IRUGO|S_IWUSR, pxctx_info_show, pxctx_info_set);
 static DEVICE_ATTR(cache, S_IRUGO|S_IWUSR, pxctx_cache_show, pxctx_cache_set);
-static DEVICE_ATTR(calloc, S_IRUGO|S_IWUSR, pxctx_cache_show, pxctx_cachealloc_set);
-static DEVICE_ATTR(cfree, S_IRUGO|S_IWUSR, pxctx_cache_show, pxctx_cachefree_set);
 
 static struct attribute *pxtgt_control_attrs[] = {
     &dev_attr_info.attr,
     &dev_attr_attach.attr,
     &dev_attr_detach.attr,
     &dev_attr_cache.attr,
-    &dev_attr_calloc.attr,
-    &dev_attr_cfree.attr,
     NULL,
 };
 
