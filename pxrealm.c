@@ -15,12 +15,17 @@
 #include "pxtgt_core.h"
 #include "pxrealm.h"
 
+// each realm is 1G
 #define REALM_SECTOR_SHIFT (21)
 #define REALM_SECTORS (1ULL << REALM_SECTOR_SHIFT)
-#define REALM_SIZE (REALM_SECTORS << SECTOR_SHIFT) // each realm is 1G
+#define REALM_SIZE (REALM_SECTORS << SECTOR_SHIFT)
 
 #define MIN_REALM_MAP (1) // 1GB
 #define MAX_REALM_MAP (256) // 256GB
+
+#define DEBUG
+
+// do not attach cache for small volumes
 #define MIN_ORIGIN_SIZE (REALM_SIZE * 10)
 
 #define MAX_REALM_MAPS (2*PXTGT_MAX_DEVICES)
@@ -34,8 +39,8 @@
 typedef unsigned long pxrealm_offset_t;
 
 struct pxrealm_t {
-#define MAX_DEVNAME (127)
-	char cdevname[MAX_DEVNAME+1];
+#define MAX_CDEVNAME (127)
+	char cdevname[MAX_CDEVNAME+1];
 	uint64_t cdev_size; // in bytes
 	uint64_t cdev_sectors;// in 512 byte sectors
 
@@ -117,7 +122,7 @@ sector_t pxrealm_sector_offset(pxrealm_index_t id)
 	BUG_ON(!pmap);
 	BUG_ON(!pmap->inuse);
 
-	return pmap->off >> SECTOR_SHIFT;
+	return pmap->off << (REALM_SECTOR_SHIFT - SECTOR_SHIFT);
 }
 
 sector_t pxrealm_sector_size(pxrealm_index_t id)
@@ -158,18 +163,6 @@ int compute_needed_realms(uint64_t size, pxrealm_hint_t hint)
 			min(MAX_REALM_MAP, (int)safe_div64(size, REALM_SIZE)));
 
 	return min(MAX_REALM_MAP, (int)safe_div64(size, REALM_SIZE));
-}
-
-static
-uint64_t realm_byte_offset(pxrealm_offset_t off)
-{
-	return (off * REALM_SIZE);
-}
-
-//static
-sector_t realm_sector_offset(pxrealm_offset_t off)
-{
-	return to_sector(realm_byte_offset(off));
 }
 
 static 
@@ -217,8 +210,17 @@ pxrealm_index_t pxrealm_alloc(uint64_t volume_id, uint64_t origin_size,
 			volume_id, origin_size, hint, context,
 			nrealms);
 
+#ifndef DEBUG
 	// if the origin px volume is smaller then do not apply caching
-	if (MIN_ORIGIN_SIZE > origin_size || nrealms <= 0) {
+	if (MIN_ORIGIN_SIZE > origin_size) {
+		return (pxrealm_index_t) -EINVAL;
+	}
+#else
+	// debug code enabled, assign a single realm even for smaller volumes
+	if (!nrealms) nrealms = 1;
+#endif
+
+	if (nrealms <= 0) {
 		return (pxrealm_index_t) -EINVAL;
 	}
 
@@ -302,7 +304,7 @@ int pxrealm_properties(pxrealm_index_t id, struct pxrealm_properties* prop)
 
 	prop->id = id;
 	prop->cdev = pxrealm.cdev;
-	prop->offset = pmap->off >> SECTOR_SHIFT;
+	prop->offset = pmap->off << REALM_SECTOR_SHIFT;
 	prop->nsectors = pmap->nrealms << REALM_SECTOR_SHIFT;
 	prop->end = prop->offset + prop->nsectors;
 	prop->context = pmap->private;
@@ -331,7 +333,7 @@ int pxrealm_init(const char* cdevpath)
     bdput(cdev);
 
 	strncpy(pxrealm.cdevname, cdevpath, sizeof(pxrealm.cdevname));
-	pxrealm.cdevname[MAX_DEVNAME] = '\0';
+	pxrealm.cdevname[MAX_CDEVNAME] = '\0';
 
 	// find cdev size and compute max realms
 	pxrealm.cdev_size = i_size_read(cdev->bd_inode);

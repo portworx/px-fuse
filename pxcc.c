@@ -38,7 +38,7 @@ struct pxcc_c* pxcc_init(struct block_device *cdev, sector_t start, uint32_t nse
 		return ERR_PTR(-EINVAL);
 	}
 
-	cc = kzalloc(sizeof(*cc), GFP_KERNEL);
+	cc = kzalloc(sizeof(struct pxcc_c), GFP_KERNEL);
 	if (!cc) {
 		return ERR_PTR(-ENOMEM);
 	}
@@ -48,7 +48,10 @@ struct pxcc_c* pxcc_init(struct block_device *cdev, sector_t start, uint32_t nse
 	cc->realm_start = start;
 	cc->realm_sectors = nsectors;
 	cc->realm_end = start + nsectors;
-	cc->cdev_logical_block_size = queue_logical_block_size(cdev->bd_disk->queue);
+	cc->cdev_logical_block_size = 4096;
+	if (cdev->bd_disk != NULL && cdev->bd_disk->queue != NULL) {
+		cc->cdev_logical_block_size = queue_logical_block_size(cdev->bd_disk->queue);
+	}
 
 	cc->origin_device_size = origin_size; // is this needed?
 
@@ -64,7 +67,7 @@ struct pxcc_c* pxcc_init(struct block_device *cdev, sector_t start, uint32_t nse
 		cc->cache_blk_size = cache_blk_size;
 	}
 	// ensure cache block size is a multiple of logical block size.
-	cc->cache_blk_size = (cc->cache_blk_size + cc->cdev_logical_block_size - 1) & (cc->cdev_logical_block_size-1);
+	cc->cache_blk_size = pow2_roundup(cc->cache_blk_size, cc->cdev_logical_block_size);
 	cc->cache_blk_sectors = cc->cache_blk_size >> SECTOR_SHIFT;
 
 	cc->cdata_len = cc->realm_sectors - MIN_RESERVED_SECTORS;
@@ -73,7 +76,7 @@ struct pxcc_c* pxcc_init(struct block_device *cdev, sector_t start, uint32_t nse
 	cc->cdata_start = cc->realm_sectors - cc->cdata_len;
 
 	// adjust reserved sectors for alignment
-	cc->nreserved = cc->cdata_start - cc->realm_start;
+	cc->nreserved = cc->cdata_start;
 
 	pxcc_debug_dump(cc);
 	return cc;

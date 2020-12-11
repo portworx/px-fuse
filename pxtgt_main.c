@@ -950,6 +950,11 @@ ssize_t pxtgt_remove(struct pxtgt_context *ctx, struct pxtgt_remove_out *remove)
 	fput(pxtgt_dev->fp);
 	filp_close(pxtgt_dev->fp, NULL);
 
+	if (pxtgt_dev->mc != NULL) {
+		int rc = pxmgr_cache_dealloc(pxtgt_dev->mc);
+		printk("device %llu caching dealloc returned %d\n", pxtgt_dev->dev_id, rc);
+	}
+
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxtgt_dev->disk && pxtgt_dev->disk->queue){
 		mutex_lock(&pxtgt_dev->disk->queue->sysfs_lock);
@@ -1247,7 +1252,7 @@ static ssize_t pxtgt_cachealloc_set(struct device *dev, struct device_attribute 
 		return count;
 	}
 
-	mc = pxmgr_cache_alloc(pxtgt_dev->dev_id, pxtgt_dev->size, PXREALM_SMALL, pxtgt_dev);
+	mc = pxmgr_cache_alloc(pxtgt_dev->dev_id, pxtgt_dev->size, PXREALM_SMALL, 0, pxtgt_dev);
 	printk("cache alloc result: %p\n", mc);
 	pxtgt_dev->mc = mc;
 
@@ -1410,11 +1415,15 @@ ssize_t pxctx_cache_show(struct device *dev,
 {
 	struct pxtgt_context *ctx = dev_to_pxctx(dev);
 	struct pxtgt_device *pxtgt_dev;
+	extern void pxrealm_debug_dump(void);
+
+	// global realm debug info
+	pxrealm_debug_dump();
 
 	pxtgt_dev = NULL;
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxtgt_dev, &ctx->list, node) {
-		pxmgr_debug_dump(pxtgt_dev->mc);
+		pxmgr_debug_dump(pxtgt_dev->dev_id, pxtgt_dev->mc);
 	}
 	spin_unlock(&ctx->lock);
 

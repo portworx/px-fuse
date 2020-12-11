@@ -53,6 +53,9 @@ static inline uint64_t  to_bytes(sector_t n)
 	return (n << SECTOR_SHIFT);
 }
 
+/// works only if 'sz' is power of 2
+#define pow2_roundup(v, sz) (((v) + (sz) - 1) & ~((sz)-1))
+
 /*
  * Some utility functions commonly used by policies and the core target.
  */
