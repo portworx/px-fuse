@@ -8,6 +8,10 @@
 #include <linux/mutex.h>
 #include <linux/vmalloc.h>
 #include <linux/math64.h>
+#include <linux/blkdev.h>
+
+#define STATIC
+// #define STATIC static
 
 // for origin block and cache block
 typedef uint64_t block_t;
@@ -52,6 +56,25 @@ static inline uint64_t  to_bytes(sector_t n)
 {
 	return (n << SECTOR_SHIFT);
 }
+
+/*
+ * The cache policy makes the important decisions about which blocks get to
+ * live on the faster cache device.
+ */
+enum policy_operation {
+	POLICY_PROMOTE,
+	POLICY_DEMOTE,
+	POLICY_WRITEBACK
+};
+
+/*
+ * This is the instruction passed back to the core target.
+ */
+struct policy_work {
+	enum policy_operation op;
+	oblock_t oblock;
+	cblock_t cblock;
+};
 
 /// works only if 'sz' is power of 2
 #define pow2_roundup(v, sz) (((v) + (sz) - 1) & ~((sz)-1))
@@ -344,7 +367,7 @@ static inline struct entry *l_pop_tail(struct entry_space *es, struct ilist *l)
  */
 #define MAX_LEVELS 64u
 
-struct queue {
+struct lqueue {
 	struct entry_space *es;
 
 	unsigned nr_elts;
@@ -361,7 +384,7 @@ struct queue {
 	unsigned target_count[MAX_LEVELS];
 };
 
-static inline void q_init(struct queue *q, struct entry_space *es, unsigned nr_levels)
+static inline void q_init(struct lqueue *q, struct entry_space *es, unsigned nr_levels)
 {
 	unsigned i;
 
@@ -379,7 +402,7 @@ static inline void q_init(struct queue *q, struct entry_space *es, unsigned nr_l
 	q->nr_in_top_levels = 0u;
 }
 
-static inline unsigned q_size(struct queue *q)
+static inline unsigned q_size(struct lqueue *q)
 {
 	return q->nr_elts;
 }
@@ -387,7 +410,7 @@ static inline unsigned q_size(struct queue *q)
 /*
  * Insert an entry to the back of the given level.
  */
-static inline void q_push(struct queue *q, struct entry *e)
+static inline void q_push(struct lqueue *q, struct entry *e)
 {
 	BUG_ON(e->pending_work);
 
@@ -397,7 +420,7 @@ static inline void q_push(struct queue *q, struct entry *e)
 	l_add_tail(q->es, q->qs + e->level, e);
 }
 
-static inline void q_push_front(struct queue *q, struct entry *e)
+static inline void q_push_front(struct lqueue *q, struct entry *e)
 {
 	BUG_ON(e->pending_work);
 
@@ -407,7 +430,7 @@ static inline void q_push_front(struct queue *q, struct entry *e)
 	l_add_head(q->es, q->qs + e->level, e);
 }
 
-static inline void q_push_before(struct queue *q, struct entry *old, struct entry *e)
+static inline void q_push_before(struct lqueue *q, struct entry *old, struct entry *e)
 {
 	BUG_ON(e->pending_work);
 
@@ -417,7 +440,7 @@ static inline void q_push_before(struct queue *q, struct entry *old, struct entr
 	l_add_before(q->es, q->qs + e->level, old, e);
 }
 
-static inline void q_del(struct queue *q, struct entry *e)
+static inline void q_del(struct lqueue *q, struct entry *e)
 {
 	l_del(q->es, q->qs + e->level, e);
 	if (!e->sentinel)
@@ -427,7 +450,7 @@ static inline void q_del(struct queue *q, struct entry *e)
 /*
  * Return the oldest entry of the lowest populated level.
  */
-static inline struct entry *q_peek(struct queue *q, unsigned max_level, bool can_cross_sentinel)
+static inline struct entry *q_peek(struct lqueue *q, unsigned max_level, bool can_cross_sentinel)
 {
 	unsigned level;
 	struct entry *e;
@@ -449,7 +472,7 @@ static inline struct entry *q_peek(struct queue *q, unsigned max_level, bool can
 	return NULL;
 }
 
-static inline struct entry *q_pop(struct queue *q)
+static inline struct entry *q_pop(struct lqueue *q)
 {
 	struct entry *e = q_peek(q, q->nr_levels, true);
 
@@ -464,7 +487,7 @@ static inline struct entry *q_pop(struct queue *q)
  * used by redistribute, so we know this is true.  It also doesn't adjust
  * the q->nr_elts count.
  */
-static inline struct entry *__redist_pop_from(struct queue *q, unsigned level)
+static inline struct entry *__redist_pop_from(struct lqueue *q, unsigned level)
 {
 	struct entry *e;
 
@@ -478,7 +501,7 @@ static inline struct entry *__redist_pop_from(struct queue *q, unsigned level)
 	return NULL;
 }
 
-static inline void q_set_targets_subrange_(struct queue *q, unsigned nr_elts, unsigned lbegin, unsigned lend)
+static inline void q_set_targets_subrange_(struct lqueue *q, unsigned nr_elts, unsigned lbegin, unsigned lend)
 {
 	unsigned level, nr_levels, entries_per_level, remainder;
 
@@ -497,7 +520,7 @@ static inline void q_set_targets_subrange_(struct queue *q, unsigned nr_elts, un
  * Typically we have fewer elements in the top few levels which allows us
  * to adjust the promote threshold nicely.
  */
-static inline void q_set_targets(struct queue *q)
+static inline void q_set_targets(struct lqueue *q)
 {
 	if (q->last_target_nr_elts == q->nr_elts)
 		return;
@@ -519,7 +542,7 @@ static inline void q_set_targets(struct queue *q)
 	}
 }
 
-static inline void q_redistribute(struct queue *q)
+static inline void q_redistribute(struct lqueue *q)
 {
 	unsigned target, level;
 	struct ilist *l, *l_above;
@@ -562,7 +585,7 @@ static inline void q_redistribute(struct queue *q)
 	}
 }
 
-static inline void q_requeue(struct queue *q, struct entry *e, unsigned extra_levels,
+static inline void q_requeue(struct lqueue *q, struct entry *e, unsigned extra_levels,
 		      struct entry *s1, struct entry *s2)
 {
 	struct entry *de;
