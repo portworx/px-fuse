@@ -1,5 +1,3 @@
-#include "pxtgt.h"
-#include "pxtgt_io.h"
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/crc32.h>
@@ -10,7 +8,9 @@
 #include <linux/sysfs.h>
 #include <linux/uio.h>
 
+#include "pxtgt.h"
 #include "pxmgr.h"
+#include "pxtgt_io.h"
 
 #define STATIC
 

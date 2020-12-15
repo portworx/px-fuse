@@ -13,6 +13,12 @@ typedef enum {
         PXREALM_LARGE,
 } pxrealm_hint_t;
 
+enum { CMODE_PASSTHROUGH,
+       CMODE_WRITETHROUGH,
+       CMODE_WRITEBACK_LRU,
+       CMODE_WRITEBACK_WRITEPREFER,
+};
+
 void pxmgr_debug_dump(uint64_t dev_id, struct pxmgr_context *cc);
 
 struct pxmgr_context *pxmgr_cache_alloc(uint64_t vol_id, uint64_t vol_size,

@@ -1,6 +1,8 @@
 #ifndef __PXTGT_IO_H_
 #define __PXTGT_IO_H_
 
+#include <linux/workqueue.h>
+
 extern const struct file_operations pxtgt_ops;
 
 /** fuse opcodes */

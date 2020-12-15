@@ -1,6 +1,8 @@
 #ifndef _PXCC_H_
 #define _PXCC_H_
 
+#include <linux/workqueue.h>
+
 #include "pxlib.h"
 
 enum { CACHE_SUBMITTED, // IO submitted to cache
@@ -19,12 +21,6 @@ enum { CACHE_SUBMITTED, // IO submitted to cache
 typedef uint32_t pxcc_block_t;
 
 struct background_tracker;
-
-enum { CMODE_PASSTHROUGH,
-       CMODE_WRITETHROUGH,
-       CMODE_WRITEBACK_LRU,
-       CMODE_WRITEBACK_WRITEPREFER,
-};
 
 struct pxcc_c {
         struct block_device *cdev;
