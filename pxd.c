@@ -34,7 +34,11 @@
 #define PXD_TIMER_SECS_DEFAULT 600
 #define PXD_TIMER_SECS_MAX (U32_MAX)
 
+#if defined(PF_LESS_THROTTLE)
 #define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LESS_THROTTLE)
+#elif defined(PF_LOCAL_THROTTLE)
+#define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LOCAL_THROTTLE)
+#endif
 #define IS_SET_IO_FLUSHER_FLAG(flg) ((flg & PF_IO_FLUSHER) == PF_IO_FLUSHER)
 #define IS_SET_IO_FLUSHER(task) (IS_SET_IO_FLUSHER_FLAG((task->flags)))
 #define SET_IO_FLUSHER(task) (task->flags |= PF_IO_FLUSHER)
@@ -145,8 +149,8 @@ static void print_io_flusher_state(unsigned int new_flags,
 
 static int is_io_flusher_supported(void)
 {
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0) && LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
-		#if defined(PF_MEMALLOC_NOIO) && defined(PF_LESS_THROTTLE)
+  	#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0) && defined(PF_MEMALLOC_NOIO)
+                #if defined(PF_LESS_THROTTLE) || defined(PF_LOCAL_THROTTLE)
 			return 1;
 		#else
 			return 0;
