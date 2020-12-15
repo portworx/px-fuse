@@ -1470,7 +1470,11 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 			if (bque) {
 				printk(KERN_INFO"pxd device %llu queue limits adjusted with block dev %p(%s)\n",
 					pxd_dev->dev_id, bdev, bdevname(bdev, name));
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
 				blk_queue_stack_limits(topque, bque);
+#else
+				blk_stack_limits(&topque->limits, &bque->limits, 0);
+#endif
 			}
 		}
 	}
