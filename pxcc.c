@@ -11,8 +11,10 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 
 #include "background-tracker.h"
+#include "bio-prison-v2.h"
 #include "pxcc.h"
 #include "pxlib.h"
 #include "pxmgr.h"
@@ -140,6 +142,37 @@ static void calc_hotspot_params(sector_t origin_size, sector_t cache_block_size,
                 *hotspot_block_size /= 2u;
 }
 
+STATIC
+oblock_t get_bio_block(struct pxcc_c *cc, struct bio *bio) {
+        sector_t block_nr = bio->bi_iter.bi_sector;
+
+        block_nr >>= (cc->cache_blk_shift - SECTOR_SHIFT);
+
+        return to_oblock(block_nr);
+}
+
+static void periodic_waker(struct work_struct *ws) {}
+
+static void cache_destroy(struct pxcc_c *cc) {
+        // TODO Introduce below wq draining logic outside cache destroy
+        // cancel_delayed_work_sync(&cache->waker);
+        // drain_workqueue(cache->wq);
+
+        if (cc->prison)
+                bio_prison_destroy_v2(cc->prison);
+        if (cc->wq)
+                destroy_workqueue(cc->wq);
+        if (cc->bt_work)
+                btracker_destroy(cc->bt_work);
+        h_exit(&cc->hotspot_table);
+        h_exit(&cc->lookup_table);
+        if (cc->cache_hit_bits)
+                bitmap_free(cc->cache_hit_bits);
+        if (cc->hotspot_hit_bits)
+                bitmap_free(cc->hotspot_hit_bits);
+        space_exit(&cc->es);
+}
+
 static int cache_create(struct pxcc_c *cc) {
         unsigned i;
         uint64_t cache_size = cc->nblocks;
@@ -185,8 +218,7 @@ static int cache_create(struct pxcc_c *cc) {
 
         cc->cache_hit_bits = bitmap_zalloc(cc->nblocks, GFP_KERNEL);
         if (!cc->cache_hit_bits) {
-                bitmap_free(cc->hotspot_hit_bits);
-                space_exit(&cc->es);
+                cache_destroy(cc);
                 return -ENOMEM;
         }
 
@@ -200,18 +232,13 @@ static int cache_create(struct pxcc_c *cc) {
 
         if (h_init(&cc->lookup_table, &cc->es, cc->nblocks)) {
                 // no memory
-                bitmap_free(cc->cache_hit_bits);
-                bitmap_free(cc->hotspot_hit_bits);
-                space_exit(&cc->es);
+                cache_destroy(cc);
                 return -ENOMEM;
         }
 
         if (h_init(&cc->hotspot_table, &cc->es, cc->nr_hotspot_blocks)) {
                 // no memory
-                h_exit(&cc->lookup_table);
-                bitmap_free(cc->cache_hit_bits);
-                bitmap_free(cc->hotspot_hit_bits);
-                space_exit(&cc->es);
+                cache_destroy(cc);
                 return -ENOMEM;
         }
 
@@ -224,16 +251,53 @@ static int cache_create(struct pxcc_c *cc) {
         // bg work
         cc->bt_work = btracker_create(4096);
         if (IS_ERR_OR_NULL(cc->bt_work)) {
-                h_exit(&cc->hotspot_table);
-                h_exit(&cc->lookup_table);
-                bitmap_free(cc->cache_hit_bits);
-                bitmap_free(cc->hotspot_hit_bits);
-                space_exit(&cc->es);
+                cache_destroy(cc);
+                return -ENOMEM;
+        }
+
+        cc->wq = alloc_workqueue("pxcc", WQ_MEM_RECLAIM, 0);
+        if (!cc->wq) {
+                cache_destroy(cc);
+                return -ENOMEM;
+        }
+        INIT_DELAYED_WORK(&cc->waker, periodic_waker);
+
+        cc->prison = bio_prison_create_v2(cc->wq);
+        if (!cc->prison) {
+                cache_destroy(cc);
                 return -ENOMEM;
         }
 
         return 0;
 }
+
+#if 0
+static int cache_map(struct pxcc_c *cc, struct bio *bio)
+{
+	oblock_t block = get_bio_block(cc, bio);
+	bool commit_needed;
+	int r;
+
+	if (block >= cc->origin_blocks) {
+		// last block maybe... or resized backend... not caching.
+		return REMAP_TO_ORIGIN;
+	}
+
+	// TODO defered bio handling need to be setup
+	if (discard_or_flush(bio)) {
+		defer_bio(cc, bio);
+		return CACHE_SUBMITTED;
+	}
+
+
+	r = map_bio(cc, bio, block, &commit_needed);
+	// TODO persistent meta support not ready yet.
+	if (commit_needed)
+		schedule_commit(&cc->commiter);
+
+	return r;
+}
+#endif
 
 // cache_blk_size [0=auto, any other value use as is, should be atleast
 // logical_blk_size), do we need origin_size?
@@ -289,6 +353,7 @@ struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
 
         // adjust reserved sectors for alignment
         cc->nreserved = cc->cdata_start;
+        cc->origin_blocks = cc->origin_sectors >> cc->cache_blk_sectors;
 
         // setup for policy
         // writethrough, writecache, writeback, passthrough
@@ -306,6 +371,9 @@ struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
 }
 
 int pxcc_exit(struct pxcc_c *cc) {
+        cancel_delayed_work_sync(&cc->waker);
+        drain_workqueue(cc->wq);
+        cache_destroy(cc);
         kfree(cc);
         return 0;
 }

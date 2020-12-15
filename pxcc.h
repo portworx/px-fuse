@@ -3,6 +3,10 @@
 
 #include "pxlib.h"
 
+enum { CACHE_SUBMITTED, // IO submitted to cache
+       REMAP_TO_ORIGIN, // submit IO to origin
+};
+
 #define NR_HOTSPOT_LEVELS 64u
 #define NR_CACHE_LEVELS 64u
 
@@ -30,6 +34,7 @@ struct pxcc_c {
 
         uint64_t origin_device_size;
         uint32_t origin_sectors;
+        uint32_t origin_blocks;
 
         // work only in blocks... sanitize with boundary regions before passing
         // to other layers.
@@ -76,6 +81,11 @@ struct pxcc_c {
         struct stats cache_stats;
 
         struct background_tracker *bt_work;
+
+        // periodic background op
+        struct workqueue_struct *wq;
+        struct delayed_work waker;
+        struct bio_prison_v2 *prison;
 };
 
 void pxcc_debug_dump(struct pxcc_c *cc);
