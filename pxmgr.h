@@ -16,8 +16,8 @@ typedef enum {
 void pxmgr_debug_dump(uint64_t dev_id, struct pxmgr_context *cc);
 
 struct pxmgr_context *pxmgr_cache_alloc(uint64_t vol_id, uint64_t vol_size,
-                                        pxrealm_hint_t, uint32_t cblksize,
-                                        void *priv);
+                                        pxrealm_hint_t, int cmode,
+                                        uint32_t cblksize, void *priv);
 
 int pxmgr_cache_dealloc(struct pxmgr_context *);
 

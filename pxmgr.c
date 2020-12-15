@@ -29,7 +29,7 @@ void pxmgr_debug_dump(uint64_t dev_id, struct pxmgr_context *mc) {
 }
 
 struct pxmgr_context *pxmgr_cache_alloc(uint64_t vol_id, uint64_t vol_size,
-                                        pxrealm_hint_t cache_hint,
+                                        pxrealm_hint_t cache_hint, int cmode,
                                         uint32_t cache_blksize, void *priv) {
         struct pxmgr_context *mc;
         pxrealm_index_t id;
@@ -58,7 +58,7 @@ struct pxmgr_context *pxmgr_cache_alloc(uint64_t vol_id, uint64_t vol_size,
         }
 
         cc = pxcc_init(mc->prop.cdev, mc->prop.offset, mc->prop.nsectors,
-                       cache_blksize, vol_size);
+                       cache_blksize, vol_size, cmode);
         if (IS_ERR_OR_NULL(cc)) {
                 pxrealm_free(id);
                 kfree(mc);

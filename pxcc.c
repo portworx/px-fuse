@@ -24,10 +24,9 @@
 
 void pxcc_debug_dump(struct pxcc_c *cc) {
         printk("cache context: cdev %p, realm [start: %lu, end: %lu, nsectors: "
-               "%u] "
-               "logical block size %u\n",
+               "%u] logical block size %u mode %u\n",
                cc->cdev, cc->realm_start, cc->realm_end, cc->realm_sectors,
-               cc->cdev_logical_block_size);
+               cc->cdev_logical_block_size, cc->cmode);
         printk("cache origin: size %llu, blocks %u\n", cc->origin_device_size,
                cc->origin_sectors);
         printk("cache block size: %u, sectors: %u, shift: %u\n",
@@ -171,6 +170,8 @@ static void cache_destroy(struct pxcc_c *cc) {
         if (cc->hotspot_hit_bits)
                 bitmap_free(cc->hotspot_hit_bits);
         space_exit(&cc->es);
+
+        bio_prison_exit_v2();
 }
 
 static int cache_create(struct pxcc_c *cc) {
@@ -189,9 +190,15 @@ static int cache_create(struct pxcc_c *cc) {
             cc->hotspot_block_size >> cc->cache_blk_shift;
         cc->hotspot_level_jump = 1u;
 
-        if (space_init(&cc->es,
-                       total_sentinels + cc->nr_hotspot_blocks + cache_size))
+        if (bio_prison_init_v2()) {
                 return -ENOMEM;
+        }
+
+        if (space_init(&cc->es,
+                       total_sentinels + cc->nr_hotspot_blocks + cache_size)) {
+                bio_prison_exit_v2();
+                return -ENOMEM;
+        }
 
         init_allocator(&cc->writeback_sentinel_alloc, &cc->es, 0,
                        nr_sentinels_per_queue);
@@ -303,7 +310,7 @@ static int cache_map(struct pxcc_c *cc, struct bio *bio)
 // logical_blk_size), do we need origin_size?
 struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
                          uint32_t nsectors, uint32_t cache_blk_size,
-                         uint64_t origin_size) {
+                         uint64_t origin_size, int cmode) {
         struct pxcc_c *cc;
 
         if (!cdev) {
@@ -328,6 +335,8 @@ struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
 
         cc->origin_device_size = origin_size; // is this needed?
         cc->origin_sectors = cc->origin_device_size >> SECTOR_SHIFT;
+
+        cc->cmode = cmode; // cache mode
 
         cc->sb_start = 0;
         cc->sb_len = 8;

@@ -20,12 +20,20 @@ typedef uint32_t pxcc_block_t;
 
 struct background_tracker;
 
+enum { CMODE_PASSTHROUGH,
+       CMODE_WRITETHROUGH,
+       CMODE_WRITEBACK_LRU,
+       CMODE_WRITEBACK_WRITEPREFER,
+};
+
 struct pxcc_c {
         struct block_device *cdev;
         sector_t realm_start;
         sector_t realm_end;
         uint32_t realm_sectors;
         uint32_t cdev_logical_block_size;
+
+        int cmode; // one of CMODE_xxx above
 
 #define DEFAULT_CACHE_BLOCK_SIZE (1U << 20)
         uint32_t cache_blk_size;
@@ -94,7 +102,7 @@ void pxcc_debug_dump(struct pxcc_c *cc);
 // logical_blk_size), do we need origin_size?
 struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
                          uint32_t nsectors, uint32_t cache_blk_size,
-                         uint64_t origin_size);
+                         uint64_t origin_size, int cmode);
 int pxcc_exit(struct pxcc_c *cc);
 
 #endif /* _PXCC_H_ */
