@@ -3,31 +3,36 @@
 
 #define MAX_DEVNAME (127)
 
-struct pxd_device;
+struct pxtgt_device;
 struct pxmgr_context;
+struct bio;
 
 typedef enum {
-        PXREALM_AUTO, // allow on the fly changing cache size! not supported
-        PXREALM_SMALL,
-        PXREALM_MEDIUM,
-        PXREALM_LARGE,
+  PXREALM_AUTO,  // allow on the fly changing cache size! not supported
+  PXREALM_SMALL,
+  PXREALM_MEDIUM,
+  PXREALM_LARGE,
 } pxrealm_hint_t;
 
-enum { CMODE_PASSTHROUGH,
-       CMODE_WRITETHROUGH,
-       CMODE_WRITEBACK_LRU,
-       CMODE_WRITEBACK_WRITEPREFER,
+enum {
+  CMODE_PASSTHROUGH,
+  CMODE_WRITETHROUGH,
+  CMODE_WRITEBACK,   // writeback cache based on hotspot/lru
+  CMODE_WRITECACHE,  // writeback cache writes
 };
 
 void pxmgr_debug_dump(uint64_t dev_id, struct pxmgr_context *cc);
 
-struct pxmgr_context *pxmgr_cache_alloc(uint64_t vol_id, uint64_t vol_size,
-                                        pxrealm_hint_t, int cmode,
-                                        uint32_t cblksize, void *priv);
+struct pxmgr_context *pxmgr_cache_alloc(
+    uint64_t vol_id, uint64_t vol_size, pxrealm_hint_t, int cmode,
+    uint32_t cblksize, void *priv,
+    void (*enqueue_to_origin)(struct pxtgt_device *, struct bio *));
 
 int pxmgr_cache_dealloc(struct pxmgr_context *);
 
 int pxmgr_init(const char *cdev);
 void pxmgr_exit(void);
+
+void pxmgr_cache_submit_io(struct pxmgr_context *mc, struct bio *b);
 
 #endif /* _PXMGR_H_ */
