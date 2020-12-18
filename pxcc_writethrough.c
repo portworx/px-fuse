@@ -9,7 +9,7 @@
 #include <linux/uio.h>
 
 #include "pxcc.h"
-#include "pxcc_passthrough.h"
+#include "pxcc_writethrough.h"
 #include "pxtgt.h"
 #include "pxtgt_acct.h"
 #include "pxtgt_compat.h"
@@ -26,15 +26,17 @@ struct per_io {
   struct per_io *head;
   struct per_io *clones;
 
+  int req_nr : 4;
   int status;  // io status
 
   atomic_t nactive;
   unsigned long start;
+  struct work_struct witem;
 
   struct bio clone;
 };
 
-struct pt_context {
+struct wt_context {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) && \
      defined(bvec_iter_sectors))
@@ -46,24 +48,24 @@ struct pt_context {
 #endif
 };
 
-// private context for managing passthrough io
-static struct pt_context ptcc;
+// private context for managing writethrough io
+static struct wt_context wtcc;
 
-int pt_setup(void) {
+int wt_setup(void) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) && \
      defined(bvec_iter_sectors))
-  if (bioset_init(&ptcc.bs, PT_MIN_POOL_PAGES, offsetof(struct per_io, clone),
+  if (bioset_init(&wtcc.bs, PT_MIN_POOL_PAGES, offsetof(struct per_io, clone),
                   0)) {
     printk(KERN_ERR
-           "pxcc passthrough: failed to initialize bioset_init: -ENOMEM\n");
+           "pxcc writethrough: failed to initialize bioset_init: -ENOMEM\n");
     goto out_blkdev;
   }
 #else
-  ptcc.bs = BIOSET_CREATE(PT_MIN_POOL_PAGES, offsetof(struct per_io, clone));
+  wtcc.bs = BIOSET_CREATE(PT_MIN_POOL_PAGES, offsetof(struct per_io, clone));
 #endif
 
-  if (!get_bio_set(ptcc)) {
+  if (!get_bio_set(wtcc)) {
     printk(KERN_ERR "pxtgt: bioset init failed\n");
     goto out_blkdev;
   }
@@ -73,24 +75,24 @@ out_blkdev:
   return -ENOMEM;
 }
 
-int pt_init(struct pxcc_c *cc) {
+int wt_init(struct pxcc_c *cc) {
   // nothing to do
   return 0;
 }
 
-void pt_destroy(void) {
-  if (get_bio_set(ptcc)) {
+void wt_destroy(void) {
+  if (get_bio_set(wtcc)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) && \
      defined(bvec_iter_sectors))
-    bioset_exit(get_bio_set(ptcc));
+    bioset_exit(get_bio_set(wtcc));
 #else
-    bioset_free(get_bio_set(ptcc));
+    bioset_free(get_bio_set(wtcc));
 #endif
   }
 }
 
-void pt_exit(struct pxcc_c *cc) {
+void wt_exit(struct pxcc_c *cc) {
   // nothing to do
 }
 
@@ -128,6 +130,26 @@ static int reconcile_io_status(struct per_io *head) {
 
   return status;
 }
+
+static void wt_handle_io(struct work_struct *witem) {
+  // TODO process cache IO
+  // struct per_io *pio = container_of(witem, struct per_io, witem);
+}
+
+static void dummy_handler(struct work_struct *witem) {
+  BUG_ON(!"this should never be called");
+}
+
+// forward decl
+static
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+    void
+    wt_clone_endio(struct bio *bio);
+#else
+    void
+    wt_clone_endio(struct bio *bio, int error);
+#endif
+
 static int alloc_clones(struct bio_list *l, int count, struct pxcc_c *cc,
                         struct bio *orig) {
   struct bio *clone_bio;
@@ -137,9 +159,9 @@ static int alloc_clones(struct bio_list *l, int count, struct pxcc_c *cc,
 
   for (i = 0; i < count; i++) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
-    clone_bio = bio_clone_fast(orig, GFP_NOIO, get_bio_set(ptcc));
+    clone_bio = bio_clone_fast(orig, GFP_NOIO, get_bio_set(wtcc));
 #else
-    clone_bio = bio_clone_bioset(bio, GFP_NOIO, get_bio_set(ptcc));
+    clone_bio = bio_clone_bioset(bio, GFP_NOIO, get_bio_set(wtcc));
 #endif
     if (!clone_bio) {
       pxtgt_printk(KERN_ERR "No memory for io context");
@@ -153,6 +175,17 @@ static int alloc_clones(struct bio_list *l, int count, struct pxcc_c *cc,
     pio->pxtgt_dev = cc->priv;
     pio->orig_bio = orig;
     pio->start = jiffies;
+    pio->req_nr = i;
+
+    clone_bio->bi_private = cc->priv;
+    clone_bio->bi_end_io = wt_clone_endio;
+    if (i == 0) {  // cache IO
+      BIO_SET_DEV(clone_bio, cc->cdev);
+      INIT_WORK(&pio->witem, wt_handle_io);
+    } else {                          // origin IO
+      bio_copy_dev(clone_bio, orig);  // same target
+      INIT_WORK(&pio->witem, dummy_handler);
+    }
 
     if (!head) {
       pio->head = pio;
@@ -200,10 +233,10 @@ static void dealloc_clones(struct bio *clone) {
 static
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
     void
-    pt_clone_endio(struct bio *bio)
+    wt_clone_endio(struct bio *bio)
 #else
     void
-    pt_clone_endio(struct bio *bio, int error)
+    wt_clone_endio(struct bio *bio, int error)
 #endif
 {
   struct per_io *pio = container_of(bio, struct per_io, clone);
@@ -241,7 +274,7 @@ static
 
   blkrc = reconcile_io_status(head);
 
-  // passthrough mode all IO accounting is done in the origin device.
+  // writethrough mode all IO accounting is done in the origin device.
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 1)
   bio_end_io_acct(bio, head->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || \
@@ -274,25 +307,46 @@ static
   dealloc_clones(bio);
 }
 
-int pt_process_io(struct pxcc_c *cc, struct bio *orig) {
+int wt_process_io(struct pxcc_c *cc, struct bio *orig) {
   struct pxtgt_device *pxtgt_dev = cc->priv;
   struct bio_list bl;
   struct bio *clone;
-  struct per_io *pio;
+  struct per_io *pio, *head;
+  int ncount;
 
   bio_list_init(&bl);
-  if (alloc_clones(&bl, 1, cc, orig)) {
+
+  ncount = 1;
+  if (bio_data_dir(orig) == WRITE) ncount = 2;
+
+  if (alloc_clones(&bl, ncount, cc, orig)) {
     return -ENOMEM;
   }
 
-  // only clone for passthrough requests
-  clone = bio_list_pop(&bl);
-  BUG_ON(!clone);
-  BUG_ON(!bio_list_empty(&bl));
+  head = NULL;
+  // only clone for writethrough requests
+  while ((clone = bio_list_pop(&bl)) != NULL) {
+    BUG_ON(!clone);
 
-  pio = container_of(clone, struct per_io, clone);
+    pio = container_of(clone, struct per_io, clone);
+
+    if (!head) head = pio->head;
+
+    // pio->req_nr == 0 ==> cache IO
+    // pio->req_nr == 1 ==> origin IO
+
+    if (pio->req_nr == 0) {  // cache IO
+      // reschedule in cache wq
+      queue_work(cc->wq, &pio->witem);
+    } else {
+      cc->enqueue_to_origin(cc->priv, clone);
+    }
+  }
+
+  // start IO accounting
+  BUG_ON(!head);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 1)
-  pio->head->start = bio_start_io_acct(bio);
+  bio_start_io_acct(bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) &&  \
      defined(bvec_iter_sectors))
@@ -306,10 +360,5 @@ int pt_process_io(struct pxcc_c *cc, struct bio *orig) {
                          REQUEST_GET_SECTORS(orig), &pxtgt_dev->disk->part0);
 #endif
 
-  clone->bi_private = cc->priv;
-  clone->bi_end_io = pt_clone_endio;
-  bio_copy_dev(clone, orig);  // same target
-
-  cc->enqueue_to_origin(cc->priv, clone);
   return CACHE_SUBMITTED;
 }

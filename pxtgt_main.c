@@ -1559,6 +1559,11 @@ int pxtgt_init(void) {
     goto out_blkdev;
   }
 
+  if (pxmgr_setup()) {
+	  printk(KERN_ERR "pxtgt manager setup failed\n");
+	  goto out_blkdev;
+  }
+
 #ifdef __PX_BLKMQ__
   printk(KERN_INFO "pxtgt: blk-mq driver loaded version %s\n", gitversion);
 #else
@@ -1581,7 +1586,7 @@ out:
 void pxtgt_exit(void) {
   int i;
 
-  pxmgr_exit();
+  pxmgr_destroy();
 
   if (ppxtgt_bio_set) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)

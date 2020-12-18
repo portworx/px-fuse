@@ -30,9 +30,13 @@ struct pxmgr_context *pxmgr_cache_alloc(
 
 int pxmgr_cache_dealloc(struct pxmgr_context *);
 
+// setup once the global cache device
 int pxmgr_init(const char *cdev);
-void pxmgr_exit(void);
 
 void pxmgr_cache_submit_io(struct pxmgr_context *mc, struct bio *b);
+
+// one time global init/cleanup
+int pxmgr_setup(void);
+void pxmgr_destroy(void);
 
 #endif /* _PXMGR_H_ */

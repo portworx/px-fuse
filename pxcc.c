@@ -17,6 +17,7 @@
 #include "bio-prison-v2.h"
 #include "pxcc.h"
 #include "pxcc_passthrough.h"
+#include "pxcc_writethrough.h"
 #include "pxlib.h"
 #include "pxmgr.h"
 #include "pxtgt_core.h"
@@ -411,8 +412,6 @@ struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
   cc->origin_device_size = origin_size;  // is this needed?
   cc->origin_sectors = cc->origin_device_size >> SECTOR_SHIFT;
 
-  cc->cmode = cmode;  // cache mode
-
   cc->enqueue_to_origin = enqueue_to_origin;
   cc->priv = priv;
 
@@ -453,12 +452,31 @@ struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
     return ERR_PTR(-ENOMEM);
   }
 
-  cc->enqueue_to_origin = enqueue_to_origin;
+  cc->cmode = cmode;  // cache mode
+  cc->cmode_context = NULL;
 
-  if (pt_init(cc)) {
-    printk("pass through init failed\n");
-    cache_destroy(cc);
-    return ERR_PTR(-ENOMEM);
+  switch (cmode) {
+    case CMODE_PASSTHROUGH:
+      if (pt_init(cc)) {
+        printk("pass through init failed\n");
+        cache_destroy(cc);
+        return ERR_PTR(-ENOMEM);
+      }
+      break;
+    case CMODE_WRITETHROUGH:
+      if (wt_init(cc)) {
+        printk("writethrough init failed\n");
+        cache_destroy(cc);
+        return ERR_PTR(-ENOMEM);
+      }
+      break;
+    case CMODE_WRITEBACK:
+      break;
+    case CMODE_WRITECACHE:
+      break;
+    default:
+      // unknown cache mode
+      BUG_ON(!"unknown cache mode");
   }
 
   pxcc_debug_dump(cc);
@@ -466,10 +484,42 @@ struct pxcc_c *pxcc_init(struct block_device *cdev, sector_t start,
 }
 
 int pxcc_exit(struct pxcc_c *cc) {
-  pt_exit(cc);
+  switch (cc->cmode) {
+    case CMODE_PASSTHROUGH:
+      pt_exit(cc);
+      break;
+    case CMODE_WRITETHROUGH:
+      wt_exit(cc);
+      break;
+    case CMODE_WRITEBACK:
+      break;
+    case CMODE_WRITECACHE:
+      break;
+    default:
+      // unknown cache mode
+      BUG_ON(!"unknown cache mode");
+  }
+
   cancel_delayed_work_sync(&cc->waker);
   drain_workqueue(cc->wq);
   cache_destroy(cc);
   kfree(cc);
   return 0;
+}
+
+int pxcc_setup(void) {
+  // global one time setup
+  int rc;
+
+  rc = pt_setup();
+  if (rc) return rc;
+
+  rc = wt_setup();
+  return rc;
+}
+
+void pxcc_destroy(void) {
+  // global one time cleanup
+  pt_destroy();
+  wt_destroy();
 }

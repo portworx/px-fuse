@@ -32,7 +32,8 @@ struct pxcc_c {
   uint32_t realm_sectors;
   uint32_t cdev_logical_block_size;
 
-  int cmode;  // one of CMODE_xxx
+  int cmode;            // one of CMODE_xxx
+  void *cmode_context;  // cache mode private context
 
   /// handler to pass request to origin device
   struct pxtgt_device *priv;
@@ -135,4 +136,7 @@ int pxcc_exit(struct pxcc_c *cc);
 void pxcc_cache_submit_io(struct pxcc_c *, struct bio *);
 
 bool discard_or_flush(struct bio *bio);
+
+int pxcc_setup(void);
+void pxcc_destroy(void);
 #endif /* _PXCC_H_ */

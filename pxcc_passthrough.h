@@ -3,6 +3,9 @@
 
 struct pxcc_c;
 
+int pt_setup(void);
+void pt_destroy(void);
+
 int pt_init(struct pxcc_c *cc);
 void pt_exit(struct pxcc_c *cc);
 

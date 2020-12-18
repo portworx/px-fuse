@@ -95,4 +95,5 @@ int pxmgr_init(const char *cdevpath) {
   return rc;
 }
 
-void pxmgr_exit(void) { pxrealm_exit(); }
+int pxmgr_setup(void) { return pxcc_setup(); }
+void pxmgr_destroy(void) { pxrealm_exit(); pxcc_destroy(); }
