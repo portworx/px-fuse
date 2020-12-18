@@ -322,7 +322,7 @@ bool cell_unlock_v2(struct bio_prison_v2 *prison,
 
 /*----------------------------------------------------------------*/
 
-int __init bio_prison_init_v2(void) {
+int bio_prison_init_v2(void) {
   _cell_cache = KMEM_CACHE(bio_prison_cell_v2, 0);
   if (!_cell_cache) return -ENOMEM;
 
