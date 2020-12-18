@@ -1,4 +1,4 @@
-pxtgt-objs = pxtgt_main.o iov_iter.o px_version.o pxtgt_io.o pxrealm.o pxmgr.o pxcc.o background-tracker.o bio-prison-v2.o
+pxtgt-objs = pxtgt_main.o iov_iter.o px_version.o pxtgt_io.o pxrealm.o pxmgr.o pxcc.o background-tracker.o bio-prison-v2.o pxcc_passthrough.o
 obj-m = pxtgt.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__

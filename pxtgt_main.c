@@ -14,96 +14,6 @@
 
 #define STATIC
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-
-#ifdef RHEL_RELEASE_CODE
-
-#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7, 6)
-static void _generic_end_io_acct(struct request_queue *q, int rw,
-                                 struct hd_struct *part,
-                                 unsigned long start_time) {
-  unsigned long duration = jiffies - start_time;
-  int cpu = part_stat_lock();
-
-  part_stat_add(cpu, part, ticks[rw], duration);
-  part_round_stats(q, cpu, part);
-  part_dec_in_flight(q, part, rw);
-
-  part_stat_unlock();
-}
-
-static void _generic_start_io_acct(struct request_queue *q, int rw,
-                                   unsigned long sectors,
-                                   struct hd_struct *part) {
-  int cpu = part_stat_lock();
-
-  part_round_stats(q, cpu, part);
-  part_stat_inc(cpu, part, ios[rw]);
-  part_stat_add(cpu, part, sectors[rw], sectors);
-  part_inc_in_flight(q, part, rw);
-
-  part_stat_unlock();
-}
-#else
-static void _generic_end_io_acct(struct request_queue *q, int rw,
-                                 struct hd_struct *part,
-                                 unsigned long start_time) {
-  unsigned long duration = jiffies - start_time;
-  int cpu = part_stat_lock();
-
-  part_stat_add(cpu, part, ticks[rw], duration);
-  part_round_stats(cpu, part);
-  part_dec_in_flight(part, rw);
-
-  part_stat_unlock();
-}
-
-static void _generic_start_io_acct(struct request_queue *q, int rw,
-                                   unsigned long sectors,
-                                   struct hd_struct *part) {
-  int cpu = part_stat_lock();
-
-  part_round_stats(cpu, part);
-  part_stat_inc(cpu, part, ios[rw]);
-  part_stat_add(cpu, part, sectors[rw], sectors);
-  part_inc_in_flight(part, rw);
-
-  part_stat_unlock();
-}
-#endif
-
-#else
-// non RHEL distro
-// based on unpatched pristine kernel release
-static void _generic_end_io_acct(struct request_queue *q, int rw,
-                                 struct hd_struct *part,
-                                 unsigned long start_time) {
-  unsigned long duration = jiffies - start_time;
-  int cpu = part_stat_lock();
-
-  part_stat_add(cpu, part, ticks[rw], duration);
-  part_round_stats(cpu, part);
-  part_dec_in_flight(part, rw);
-
-  part_stat_unlock();
-}
-
-static void _generic_start_io_acct(struct request_queue *q, int rw,
-                                   unsigned long sectors,
-                                   struct hd_struct *part) {
-  int cpu = part_stat_lock();
-
-  part_round_stats(cpu, part);
-  part_stat_inc(cpu, part, ios[rw]);
-  part_stat_add(cpu, part, sectors[rw], sectors);
-  part_inc_in_flight(part, rw);
-
-  part_stat_unlock();
-}
-
-#endif
-#endif
-
 // A private global bio mempool for punting requests bypassing vfs
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) ||  \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) && \
@@ -341,20 +251,6 @@ void pxtgt_check_q_decongested(struct pxtgt_device *pxtgt_dev) {
   if (!pxtgt_device_congested(pxtgt_dev, 0)) {
     wake_up(&pxtgt_dev->suspend_wq);
   }
-}
-
-static inline unsigned int get_op_flags(struct bio *bio) {
-  unsigned int op_flags;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0)
-  op_flags = 0;  // Not present in older kernels
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0)
-  op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0)
-  op_flags = bio_flags(bio);
-#else
-  op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
-#endif
-  return op_flags;
 }
 
 // All fileio reads will use this work entry.
