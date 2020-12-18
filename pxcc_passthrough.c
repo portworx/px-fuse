@@ -119,6 +119,74 @@ static int reconcile_io_status(struct per_io *head) {
 
   return status;
 }
+static int alloc_clones(struct bio_list *l, int count, struct pxcc_c *cc,
+                        struct bio *orig) {
+  struct bio *clone_bio;
+  struct per_io *pio, *head = NULL;
+  int i;
+  int rc = -EINVAL;
+
+  for (i = 0; i < count; i++) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+    clone_bio = bio_clone_fast(orig, GFP_NOIO, get_bio_set(ptcc));
+#else
+    clone_bio = bio_clone_bioset(bio, GFP_NOIO, get_bio_set(ptcc));
+#endif
+    if (!clone_bio) {
+      pxtgt_printk(KERN_ERR "No memory for io context");
+      rc = -ENOMEM;
+      goto fail;
+    }
+
+    pio = container_of(clone_bio, struct per_io, clone);
+    BUG_ON(&pio->clone != clone_bio);
+
+    pio->pxtgt_dev = cc->priv;
+    pio->orig_bio = orig;
+    pio->start = jiffies;
+
+    if (!head) {
+      pio->head = pio;
+      pio->clones = NULL;
+      head = pio;
+    } else {
+      pio->head = head;
+      pio->clones = head->clones;
+      head->clones = pio;
+    }
+
+    // only head will have 'nactive' set
+    atomic_set(&pio->nactive, 0);
+    bio_list_add(l, clone_bio);
+  }
+
+  if (!head) goto fail;
+  atomic_set(&head->nactive, bio_list_size(l));
+
+  return 0;
+fail:
+  while ((clone_bio = bio_list_pop(l)) != NULL) {
+    bio_put(clone_bio);
+  }
+  return rc;
+}
+
+static void dealloc_clones(struct bio *clone) {
+  struct per_io *pio, *head;
+
+  pio = container_of(clone, struct per_io, clone);
+  head = pio->head;
+
+  BUG_ON(atomic_read(&head->nactive));
+  while (head->clones != NULL) {
+    struct per_io *tio = head->clones;
+
+    head->clones = tio->clones;
+    bio_put(&tio->clone);
+  }
+
+  bio_put(&head->clone);
+}
 
 static
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
@@ -164,6 +232,7 @@ static
 
   blkrc = reconcile_io_status(head);
 
+  // passthrough mode all IO accounting is done in the origin device.
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 1)
   bio_end_io_acct(bio, head->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || \
@@ -177,88 +246,30 @@ static
   _generic_end_io_acct(pxtgt_dev->disk->queue, bio_data_dir(bio),
                        &pxtgt_dev->disk->part0, head->start);
 #endif
-}
 
-static int alloc_clones(struct bio_list *l, int count, struct pxcc_c *cc,
-                        struct bio *orig) {
-  struct bio *clone_bio;
-  struct per_io *pio, *head = NULL;
-  int i;
-  int rc = -EINVAL;
-
-  for (i = 0; i < count; i++) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
-    clone_bio = bio_clone_fast(orig, GFP_NOIO, get_bio_set(ptcc));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0) ||  \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) && \
+     defined(bvec_iter_sectors))
+  {
+    pio->orig_bio->bi_status = errno_to_blk_status(blkrc);
+    bio_endio(pio->orig_bio);
+  }
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+  {
+    pio->orig_bio->bi_error = blkrc;
+    bio_endio(pio->orig_bio);
+  }
 #else
-    clone_bio = bio_clone_bioset(bio, GFP_NOIO, get_bio_set(ptcc));
+  { bio_endio(pio->orig_bio, blkrc); }
 #endif
-    if (!clone_bio) {
-      pxtgt_printk(KERN_ERR "No memory for io context");
-      rc = -ENOMEM;
-      goto fail;
-    }
-
-    pio = container_of(clone_bio, struct per_io, clone);
-    BUG_ON(&pio->clone != clone_bio);
-
-    pio->pxtgt_dev = cc->priv;
-    pio->orig_bio = orig;
-
-    if (!head) {
-      pio->head = pio;
-      pio->clones = NULL;
-      head = pio;
-    } else {
-      pio->head = head;
-      pio->clones = head->clones;
-      head->clones = pio;
-    }
-
-    // only head will have 'nactive' set
-    atomic_set(&pio->nactive, 0);
-    bio_list_add(l, clone_bio);
-  }
-
-  if (!head) goto fail;
-  atomic_set(&head->nactive, bio_list_size(l));
-
-  return 0;
-fail:
-  while ((clone_bio = bio_list_pop(l)) != NULL) {
-    bio_put(clone_bio);
-  }
-  return rc;
+  dealloc_clones(bio);
 }
-
-STATIC
-int dealloc_clones(struct bio *clone) {
-  struct per_io *pio, *head;
-
-  pio = container_of(clone, struct per_io, clone);
-  head = pio->head;
-
-  while (head->clones != NULL) {
-    struct per_io *tio = head->clones;
-
-    head->clones = tio->clones;
-    bio_put(&tio->clone);
-  }
-
-  bio_put(&head->clone);
-  return 0;
-}
-
-STATIC
-int pt_process_flush_io(struct bio *orig) { return 0; }
-
-STATIC
-int pt_process_discard_io(struct bio *orig) { return 0; }
 
 int pt_process_io(struct pxcc_c *cc, struct bio *orig) {
+  struct pxtgt_device *pxtgt_dev = cc->priv;
   struct bio_list bl;
   struct bio *clone;
   struct per_io *pio;
-  struct pxtgt_device *pxtgt_dev = cc->priv;
 
   bio_list_init(&bl);
   if (alloc_clones(&bl, 1, cc, orig)) {
@@ -288,8 +299,7 @@ int pt_process_io(struct pxcc_c *cc, struct bio *orig) {
 
   clone->bi_private = cc->priv;
   clone->bi_end_io = pt_clone_endio;
-
-  // TODO - set bdev on bio
+  bio_copy_dev(clone, orig);  // same target
 
   cc->enqueue_to_origin(cc->priv, clone);
   return CACHE_SUBMITTED;
