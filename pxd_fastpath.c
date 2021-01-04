@@ -1426,7 +1426,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	bio_start_io_acct(bio);
+	iot->start = bio_start_io_acct(bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
