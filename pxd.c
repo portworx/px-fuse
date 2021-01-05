@@ -10,6 +10,8 @@
 #include <linux/uio.h>
 #include <linux/bio.h>
 
+#define STATIC 
+
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
@@ -809,9 +811,11 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 {
 	struct fuse_req *req;
 
+#if 0
 	if (pxd_dev->using_blkque) {
 		return -EINVAL;
 	}
+#endif
 
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
@@ -1021,7 +1025,8 @@ static void pxd_rq_fn(struct request_queue *q)
 }
 #else
 
-static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
+STATIC
+blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
 	struct request *rq = bd->rq;
@@ -1054,8 +1059,44 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	return BLK_STS_OK;
 }
 
+// that understands fastpath routing
+static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
+		const struct blk_mq_queue_data *bd)
+{
+	struct request *rq = bd->rq;
+	struct pxd_device *pxd_dev = rq->q->queuedata;
+	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
+	struct fp_root_context *fproot = &req->fproot;
+
+	if (BLK_RQ_IS_PASSTHROUGH(rq))
+		return BLK_STS_IOERR;
+
+	fuse_request_init(req);
+
+	blk_mq_start_request(rq);
+
+	req->pxd_dev = pxd_dev;
+	req->rq = rq;
+	if (!pxd_dev->fp.fastpath) {
+		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+			pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
+			return BLK_STS_IOERR;
+		}
+
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+
+		return BLK_STS_OK;
+	}
+
+	// route through fastpath
+	fproot->status = 0;
+	atomic_set(&fproot->nactive, 0);
+
+	return clone_and_map(fproot);
+}
+
 static const struct blk_mq_ops pxd_mq_ops = {
-	.queue_rq       = pxd_queue_rq,
+	.queue_rq       = pxd_queue_rq2,
 };
 #endif
 
@@ -1170,7 +1211,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	BLK_QUEUE_FLUSH(q);
 
 	/* adjust queue limits to be compatible with backing device */
-	if (!pxd_dev->using_blkque) {
+	if (pxd_dev->fp.fastpath) {
 		pxd_fastpath_adjust_limits(pxd_dev, q);
 	}
 
@@ -1197,7 +1238,8 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
 #ifdef __PX_BLKMQ__
-		if (pxd_dev->using_blkque) blk_mq_free_tag_set(&pxd_dev->tag_set);
+		//if (pxd_dev->using_blkque) blk_mq_free_tag_set(&pxd_dev->tag_set);
+		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
 	}
 	put_disk(disk);
@@ -1277,7 +1319,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->connected = true; // fuse slow path connection
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
+#if 0
 	pxd_dev->using_blkque = !add->enable_fp;
+#else
+	pxd_dev->using_blkque = 1; // hardcoded to using blkmq.
+#endif
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -1472,7 +1518,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.blkmq_device = 0;
 		id.suspend = 0;
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
-		if (pxd_dev->using_blkque) id.blkmq_device = 1;
+		if (pxd_dev->using_blkque) id.blkmq_device = 0; // do not report outside
 		if (atomic_read(&pxd_dev->fp.app_suspend)) id.suspend = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
@@ -1497,10 +1543,13 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
+#if 0
 	if (pxd_dev->using_blkque) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
-	} else if (pxd_dev->fp.fastpath) {
+	} else
+#endif
+	if (pxd_dev->fp.fastpath) {
 		printk(KERN_ERR"%llu: device already in fast path - cannot update\n", pxd_dev->dev_id);
 		return -EINVAL;
 	}
@@ -2322,6 +2371,12 @@ int pxd_init(void)
 		printk(KERN_ERR "pxd: fastpath initialization failed: %d\n", err);
 		goto out_blkdev;
 	}
+
+	err = fastpath2_init();
+	if (err) {
+		printk(KERN_ERR "pxd: fastpath initialization failed: %d\n", err);
+		goto out_blkdev;
+	}
 #ifdef __PX_BLKMQ__
 	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
 			gitversion, pxd_supported_features());
@@ -2355,6 +2410,7 @@ void pxd_exit(void)
 	io_ring_unregister_device();
 #endif
 
+	fastpath2_cleanup();
 	fastpath_cleanup();
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");

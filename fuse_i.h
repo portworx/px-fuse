@@ -37,13 +37,14 @@
 #endif
 
 #include "pxd.h"
+#include "pxd2_fastpath.h"
 
 struct fuse_conn;
+struct pxd_device;
 
 /**
  * A request to the client
  */
-struct pxd_device;
 struct fuse_req {
 	/** Need to fetch state of device and keep counters updated */
 	struct pxd_device *pxd_dev;
@@ -70,7 +71,30 @@ struct fuse_req {
 
 	/** sequence number used for restart */
 	u64 sequence;
+
+#if 1
+	// Additional fastpath context
+	struct fp_root_context fproot;
+#endif
 };
+
+#if 1
+static inline
+struct pxd_device* fproot_to_pxd(struct fp_root_context* fproot)
+{
+	struct fuse_req *f = container_of(fproot, struct fuse_req, fproot);
+
+	return f->pxd_dev;
+}
+
+static inline
+struct request* fproot_to_request(struct fp_root_context* fproot)
+{
+	struct fuse_req *f = container_of(fproot, struct fuse_req, fproot);
+
+	return f->rq;
+}
+#endif
 
 #define FUSE_MAX_PER_CPU_IDS 256
 

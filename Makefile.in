@@ -84,13 +84,13 @@ endif
 ## fastpath specific checks
 ifeq ($(call verlater,${kmajor},${fp_major}),0)
 PXDEFINES += -D__PX_FASTPATH__
-px-objs += pxd_fastpath.o
+px-objs += pxd_fastpath.o pxd2_fastpath.o
 $(info Kernel fast path enabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
 else
 ifeq ($(call versame,${kmajor},${fp_major}),0)
 ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
 PXDEFINES += -D__PX_FASTPATH__
-px-objs += pxd_fastpath.o
+px-objs += pxd_fastpath.o pxd2_fastpath.o
 $(info Kernel fast path enabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
 else
 px-objs += pxd_fastpath_stub.o
