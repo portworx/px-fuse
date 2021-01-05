@@ -1292,15 +1292,22 @@ out_file_failed:
 }
 
 /* fast path make request function, io entry point */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+blk_qc_t pxd_make_request_fastpath(struct bio *bio)
+{
+	struct request_queue *q = bio->bi_disk->queue;
+	struct pxd_device *pxd_dev = bio->bi_disk->private_data;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
+{
+	struct pxd_device *pxd_dev = q->queuedata;
 #else
 void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #define BLK_QC_RETVAL
-#endif
 {
 	struct pxd_device *pxd_dev = q->queuedata;
+#endif
 	int rw = bio_data_dir(bio);
 	struct pxd_io_tracker *head;
 
@@ -1426,7 +1433,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	bio_start_io_acct(bio);
+	iot->start = bio_start_io_acct(bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
