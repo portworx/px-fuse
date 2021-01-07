@@ -210,18 +210,16 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	u64 uid = req->in.unique;
-#ifdef __PX_BLKMQ__
-	bool using_blkque = req->pxd_dev->using_blkque;
-#endif
+	bool shouldfree = false;
+
+	// if 'req' gets used, always req->end is set
+	// if processing path has a failure, then explicit free of 'req' is taken
+	// care in error handling path at call site.
 	if (req->end)
-		req->end(fc, req, status);
+		shouldfree = req->end(fc, req, status);
 	fuse_put_unique(fc, uid);
 
-#ifndef __PX_BLKMQ__
-	fuse_request_free(req);
-#else
-	if (!using_blkque) fuse_request_free(req);
-#endif
+	if (shouldfree) fuse_request_free(req);
 }
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool force)

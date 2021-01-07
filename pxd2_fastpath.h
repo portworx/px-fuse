@@ -54,8 +54,7 @@ void fp_root_context_init(struct fp_root_context *fproot)
 int fastpath2_init(void);
 void fastpath2_cleanup(void);
 
-blk_status_t clone_and_map(struct fp_root_context *fproot);
 void fp_handle_io(struct work_struct*);
-
 void clone_cleanup(struct fp_root_context *fproot);
+
 #endif /* _PXD2_FASTPATH_H_ */

@@ -9,6 +9,7 @@
 #include "pxd.h"
 #include <linux/uio.h>
 #include <linux/bio.h>
+#include <linux/printk.h>
 
 #define STATIC 
 
@@ -432,6 +433,8 @@ int pxd_device_congested(void *data, int bits)
 
 void pxd_check_q_congested(struct pxd_device *pxd_dev)
 {
+	if (pxd_dev->using_blkque) return;
+
 	if (pxd_device_congested(pxd_dev, 0)) {
 		wait_event_interruptible(pxd_dev->suspend_wq,
 			!pxd_device_congested(pxd_dev, 0));
@@ -440,6 +443,8 @@ void pxd_check_q_congested(struct pxd_device *pxd_dev)
 
 void pxd_check_q_decongested(struct pxd_device *pxd_dev)
 {
+	if (pxd_dev->using_blkque) return;
+
 	if (!pxd_device_congested(pxd_dev, 0)) {
 		wake_up(&pxd_dev->suspend_wq);
 	}
@@ -457,16 +462,18 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 	if (req->pxd_dev->fastpath) clone_cleanup(&req->fproot);
 }
 
-static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	trace_pxd_reply(req->in.unique, 0u);
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
+
+	return true;
 }
 
-static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
@@ -477,29 +484,35 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
+
+	return true;
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
+	return true;
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(status));
+	return false;
 #endif
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
+	return true;
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(status));
+	return false;
 #endif
 }
 
@@ -510,7 +523,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	int status;
 
-	BUG_ON("pxd_fuse_req not expected to be called");
+	dump_stack();
 	while (req == NULL) {
 		req = fuse_get_req_for_background(fc);
 		if (IS_ERR(req) && PTR_ERR(req) == -EINTR) {
@@ -779,7 +792,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 
 static
-void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
+bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
@@ -808,6 +821,8 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 
 	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
+
+	return true;
 }
 
 static
@@ -1097,7 +1112,6 @@ static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
 	// route through fastpath
 	// while in blkmq mode: cannot directly process IO from this thread... involves
 	// recursive BIO submission to the backing devices, causing deadlock.
-	atomic_inc(&pxd_dev->ncount);
 	INIT_WORK(&fproot->work, fp_handle_io);
 	queue_work(pxd_dev->fp.wq, &fproot->work);
 	return BLK_STS_OK;
@@ -1560,7 +1574,7 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-	if (pxd_dev->fastpath) {
+	if (!pxd_dev->fastpath) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
 	} else if (pxd_dev->fp.fastpath) {

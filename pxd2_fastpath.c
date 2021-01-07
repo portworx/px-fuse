@@ -16,9 +16,8 @@ inline bool rq_is_special(struct request *rq)
 	return (req_op(rq) == REQ_OP_DISCARD) || (req_op(rq) == REQ_OP_FLUSH);
 }
 
-atomic_t nclones;
-atomic_t nrootbios;
-
+static atomic_t nclones;
+static atomic_t nrootbios;
 static void dump_allocs(void)
 {
 	printk("blkmq fastpath: nclone: %d, root bios: %d\n", atomic_read(&nclones), atomic_read(&nrootbios));
@@ -261,18 +260,22 @@ struct bio* clone_root(struct fp_root_context *fproot, struct file *fileh)
 
 // discard and flush are special ops
 static
-void fp_handle_specialops(struct work_struct *work)
+void fp_handle_specialops(struct fp_root_context *fproot)
 {
-	struct fp_root_context *fproot = container_of(work, struct fp_root_context, work);
 	struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
 	struct request *rq = fproot_to_request(fproot); // orig request
-	int i;
-	blk_status_t r;
 	struct page *pg = ZERO_PAGE(0); // global shared zero page
+	blk_status_t r;
+	int i;
 
 	BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+	if (req_op(rq) == REQ_OP_FLUSH) {
+		atomic_inc(&pxd_dev->fp.nio_flush);
+	} else {
+		atomic_inc(&pxd_dev->fp.nio_discard);
+	}
 
 	// submit flush/discard inline to each replica one at a time.
 	for(i=0; i<pxd_dev->fp.nfd; i++) {
@@ -282,17 +285,13 @@ void fp_handle_specialops(struct work_struct *work)
 		struct request_queue *q = bdev_get_queue(bdev);
 
 		if (req_op(rq) == REQ_OP_FLUSH) {
-			atomic_inc(&pxd_dev->fp.nio_flush);
 			rc = blkdev_issue_flush(bdev, 0, NULL);
 		} else if (blk_queue_discard(q)) { // discard supported
-			atomic_inc(&pxd_dev->fp.nio_discard);
 			rc = blkdev_issue_discard(bdev, blk_rq_pos(rq), blk_rq_sectors(rq), GFP_NOIO, 0);
 		} else if (bdev_write_same(bdev)) {
-			atomic_inc(&pxd_dev->fp.nio_discard);
 			// convert discard to write same
 			rc = blkdev_issue_write_same(bdev, blk_rq_pos(rq), blk_rq_sectors(rq), GFP_NOIO, pg);
 		} else {
-			atomic_inc(&pxd_dev->fp.nio_discard);
 			// zero-out
 			rc = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq), GFP_NOIO, 0);
 		}
@@ -306,29 +305,10 @@ void fp_handle_specialops(struct work_struct *work)
 	// all replicas completed good.
 	r = BLK_STS_OK;
 err:
+	atomic_dec(&pxd_dev->ncount);
+	atomic_inc(&pxd_dev->fp.ncomplete);
 	blk_mq_end_request(rq, r);
 }
-
-// entry point to handle IO
-void fp_handle_io(struct work_struct* work)
-{
-	struct fp_root_context *fproot = container_of(work, struct fp_root_context, work);
-	struct request *rq = fproot_to_request(fproot); // orig request
-	blk_status_t r;
-
-	BUG_ON(fproot->magic != FP_ROOT_MAGIC);
-
-	if (rq_is_special(rq)) {
-		fp_handle_specialops(work);
-		return;
-	}
-
-	r = clone_and_map(fproot);
-	if (r != BLK_STS_OK) {
-		blk_mq_end_request(rq, r);
-	}
-}
-
 
 static
 void stub_endio(struct bio *bio)
@@ -398,6 +378,7 @@ if (req_op(rq) != REQ_OP_FLUSH && req_op(rq) != REQ_OP_DISCARD)
 	return 0;
 }
 
+static
 blk_status_t clone_and_map(struct fp_root_context *fproot)
 {
 	struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
@@ -461,12 +442,10 @@ blk_status_t clone_and_map(struct fp_root_context *fproot)
 		BUG_ON(!clone);
 		cc = container_of(clone, struct fp_clone_context, clone);
 
-		atomic_inc(&pxd_dev->ncount);
 		// initialize active io to configured replicas
 		if (S_ISBLK(get_mode(cc->file))) {
 			atomic_inc(&pxd_dev->fp.nswitch);
 			SUBMIT_BIO(clone);
-			atomic_inc(&pxd_dev->fp.nswitch);
 		} else {
 			INIT_WORK(&cc->work, pxd_process_fileio);
 			queue_work(pxd_dev->fp.wq, &cc->work);
@@ -477,4 +456,27 @@ blk_status_t clone_and_map(struct fp_root_context *fproot)
 err:
 	clone_cleanup(fproot);
 	return r;
+}
+
+// entry point to handle IO
+void fp_handle_io(struct work_struct* work)
+{
+	struct fp_root_context *fproot = container_of(work, struct fp_root_context, work);
+	struct request *rq = fproot_to_request(fproot); // orig request
+	struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+	blk_status_t r;
+
+	BUG_ON(fproot->magic != FP_ROOT_MAGIC);
+	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
+
+	atomic_inc(&pxd_dev->ncount);
+	if (rq_is_special(rq)) {
+		fp_handle_specialops(fproot);
+		return;
+	}
+
+	r = clone_and_map(fproot);
+	if (r != BLK_STS_OK) {
+		blk_mq_end_request(rq, r);
+	}
 }
