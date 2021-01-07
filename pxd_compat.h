@@ -50,9 +50,15 @@
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#include <linux/bio.h>
+#ifndef BIOSET_NEED_BVECS
+#define BIOSET_NEED_BVECS (1)
+#endif
+#define BIOSET_CREATE(sz, pad, opt)   do ({\
+		bioset_create(sz, pad, (opt != 0)); \
+}) while (0)
 #endif
 
 #if defined(bio_set_dev)

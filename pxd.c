@@ -452,6 +452,10 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 	pxd_printk("%s: receive reply to %px(%lld) at %lld\n",
 			__func__, req, req->in.unique,
 			req->pxd_rdwr_in.offset);
+
+	// do this only if the request is on a fastpath enabled device
+	// TODO - change using_blkque to fastpath_registered device
+	// if (pxd_dev->fp.) clone_cleanup(&req->fproot);
 }
 
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
@@ -507,6 +511,7 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	int status;
 
+	BUG_ON("pxd_fuse_req not expected to be called");
 	while (req == NULL) {
 		req = fuse_get_req_for_background(fc);
 		if (IS_ERR(req) && PTR_ERR(req) == -EINTR) {
@@ -1032,6 +1037,7 @@ blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
+	struct fp_root_context *fproot = &req->fproot;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
@@ -1044,6 +1050,7 @@ blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		rq->nr_phys_segments, rq->cmd_flags);
 
 	fuse_request_init(req);
+	fp_root_context_init(fproot);
 
 	blk_mq_start_request(rq);
 
@@ -1089,10 +1096,12 @@ static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
 	}
 
 	// route through fastpath
-	fproot->status = 0;
-	atomic_set(&fproot->nactive, 0);
-
-	return clone_and_map(fproot);
+	fp_root_context_init(fproot);
+	// while in blkmq mode: cannot directly process IO from this thread... involves
+	// recursive BIO submission to the backing devices, causing deadlock.
+	INIT_WORK(&fproot->work, fp_handle_io);
+	queue_work(pxd_dev->fp.wq, &fproot->work);
+	return BLK_STS_OK;
 }
 
 static const struct blk_mq_ops pxd_mq_ops = {

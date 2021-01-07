@@ -1007,7 +1007,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
 	int curr = atomic_inc_return(&pxd_dev->fp.suspend);
 	if (curr == 1) {
-		blk_mq_quiesce_queue(pxd_dev->disk->queue);
+		if (pxd_dev->disk && pxd_dev->disk->queue) blk_mq_quiesce_queue(pxd_dev->disk->queue);
 		//write_lock(&pxd_dev->fp.suspend_lock);
 		printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
 	} else {
@@ -1053,7 +1053,7 @@ void pxd_resume_io(struct pxd_device *pxd_dev)
 	if (wakeup) {
 		printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
 		//write_unlock(&pxd_dev->fp.suspend_lock);
-		blk_mq_unquiesce_queue(pxd_dev->disk->queue);
+		if (pxd_dev->disk && pxd_dev->disk->queue) blk_mq_unquiesce_queue(pxd_dev->disk->queue);
 		pxd_check_q_decongested(pxd_dev);
 	} else {
 		printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, curr);
