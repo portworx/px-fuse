@@ -14,6 +14,25 @@
 
 static void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot);
 
+struct block_device* get_bdev(struct file *fileh)
+{
+    struct address_space *mapping = fileh->f_mapping;
+    struct inode *inode = mapping->host;
+    struct block_device *bdev = I_BDEV(inode);
+
+    BUG_ON(!bdev);
+    return bdev;
+}
+
+unsigned get_mode(struct file *fileh)
+{
+    struct address_space *mapping = fileh->f_mapping;
+    struct inode *inode = mapping->host;
+
+    return inode->i_mode;
+}
+
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
 
 #ifdef RHEL_RELEASE_CODE
@@ -562,9 +581,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 		struct bio *bio, struct file *fileh) {
 	struct bio* clone_bio;
 	struct pxd_io_tracker* iot;
-	struct address_space *mapping = fileh->f_mapping;
-	struct inode *inode = mapping->host;
-	struct block_device *bdev = I_BDEV(inode);
+	struct block_device *bdev = get_bdev(fileh);
 
 	pxd_printk("pxd %px:__pxd_init_block_replica entering with bio %px, fileh %px\n",
 			pxd_dev, bio, fileh);
@@ -596,7 +613,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 
 	clone_bio->bi_private = pxd_dev;
 	BIO_SET_DEV(clone_bio, bdev);
-	if (S_ISBLK(inode->i_mode)) {
+	if (S_ISBLK(get_mode(fileh))) {
 		clone_bio->bi_end_io = pxd_complete_io;
 	} else {
 		clone_bio->bi_end_io = pxd_complete_io_dummy;
@@ -665,7 +682,40 @@ void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	spin_unlock(&ctx->lock);
 }
 
+// special handling for discards
+static void fp_handle_special(struct work_struct *work)
+{
+	struct pxd_io_tracker *iot = container_of(work, struct pxd_io_tracker, wi);
+	struct bio *b = &iot->clone;
+	sector_t start = BIO_SECTOR(b);
+	unsigned nsectors = BIO_SIZE(b) >> SECTOR_SHIFT;
+	struct block_device *bdev = get_bdev(iot->file);
+	struct request_queue *q = bdev_get_queue(bdev);
+	struct page *pg = ZERO_PAGE(0); // global shared zero page
+	int rc;
+
+	if (blk_queue_discard(q)) { // discard supported
+		rc = blkdev_issue_discard(bdev, start, nsectors, GFP_NOIO, 0);
+	} else if (bdev_write_same(bdev)) { // convert discard to write same
+		rc = blkdev_issue_write_same(bdev, start, nsectors, GFP_NOIO, pg);
+	} else { // zero-out
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+		rc = blkdev_issue_zeroout(bdev, start, nsectors, GFP_NOIO, 0);
+#else
+		rc = blkdev_issue_zeroout(bdev, start, nsectors, GFP_NOIO);
+#endif
+	}
+
+	BIO_ENDIO(b, rc);
+}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+static inline
+bool special_op(unsigned int op)
+{
+	return (op == REQ_OP_DISCARD);
+}
+
 static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 {
 	struct bio *bio = &iot->clone;
@@ -737,6 +787,13 @@ out:
 }
 
 #else
+static inline
+bool special_op(unsigned int op)
+{
+	// flush gets handled inline to a write
+	return (op & REQ_DISCARD);
+}
+
 static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot)
 {
 	loff_t pos;
@@ -834,7 +891,12 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 		// submit all replicas linked from head, if not read
 		list_for_each_entry(curr, &head->replicas, item) {
 			if (S_ISBLK(curr->file->f_inode->i_mode)) {
-				SUBMIT_BIO(&curr->clone);
+				if (special_op(bio_op(&curr->clone))) {
+					INIT_WORK(&curr->wi, fp_handle_special);
+					queue_work(pxd_dev->fp.wq, &curr->wi);
+				} else {
+					SUBMIT_BIO(&curr->clone);
+				}
 				atomic_inc(&pxd_dev->fp.nswitch);
 			} else {
 				queue_work(pxd_dev->fp.wq, &curr->wi);
@@ -846,7 +908,12 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 
 	// submit head bio the last
 	if (S_ISBLK(head->file->f_inode->i_mode)) {
-		SUBMIT_BIO(&head->clone);
+		if (special_op(bio_op(&head->clone))) {
+			INIT_WORK(&head->wi, fp_handle_special);
+			queue_work(pxd_dev->fp.wq, &head->wi);
+		} else {
+			SUBMIT_BIO(&head->clone);
+		}
 		atomic_inc(&pxd_dev->fp.nswitch);
 	} else {
 		queue_work(pxd_dev->fp.wq, &head->wi);
