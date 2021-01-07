@@ -523,7 +523,6 @@ static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	int status;
 
-	dump_stack();
 	while (req == NULL) {
 		req = fuse_get_req_for_background(fc);
 		if (IS_ERR(req) && PTR_ERR(req) == -EINTR) {
