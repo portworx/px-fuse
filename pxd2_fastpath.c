@@ -208,6 +208,9 @@ void end_clone_bio(struct bio *bio)
 	// CAREFUL NOW - fproot will be lost once end_request below gets called
 	// finish the original request
 	blk_mq_end_request(rq, errno_to_blk_status(blkrc));
+
+	atomic_inc(&pxd_dev->fp.ncomplete);
+	atomic_dec(&pxd_dev->ncount);
 }
 
 static
@@ -270,6 +273,7 @@ void fp_handle_specialops(struct work_struct *work)
 	BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+
 	// submit flush/discard inline to each replica one at a time.
 	for(i=0; i<pxd_dev->fp.nfd; i++) {
 		int rc;
@@ -278,17 +282,17 @@ void fp_handle_specialops(struct work_struct *work)
 		struct request_queue *q = bdev_get_queue(bdev);
 
 		if (req_op(rq) == REQ_OP_FLUSH) {
-			// ensure all currently scheduled on work queue completes.
-			// drain_workqueue(pxd_dev->fp.wq);
-			// hangs!
-
+			atomic_inc(&pxd_dev->fp.nio_flush);
 			rc = blkdev_issue_flush(bdev, 0, NULL);
 		} else if (blk_queue_discard(q)) { // discard supported
+			atomic_inc(&pxd_dev->fp.nio_discard);
 			rc = blkdev_issue_discard(bdev, blk_rq_pos(rq), blk_rq_sectors(rq), GFP_NOIO, 0);
 		} else if (bdev_write_same(bdev)) {
+			atomic_inc(&pxd_dev->fp.nio_discard);
 			// convert discard to write same
 			rc = blkdev_issue_write_same(bdev, blk_rq_pos(rq), blk_rq_sectors(rq), GFP_NOIO, pg);
 		} else {
+			atomic_inc(&pxd_dev->fp.nio_discard);
 			// zero-out
 			rc = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq), GFP_NOIO, 0);
 		}
@@ -460,6 +464,7 @@ blk_status_t clone_and_map(struct fp_root_context *fproot)
 		atomic_inc(&pxd_dev->ncount);
 		// initialize active io to configured replicas
 		if (S_ISBLK(get_mode(cc->file))) {
+			atomic_inc(&pxd_dev->fp.nswitch);
 			SUBMIT_BIO(clone);
 			atomic_inc(&pxd_dev->fp.nswitch);
 		} else {

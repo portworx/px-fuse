@@ -899,16 +899,14 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 // external request to initiate failover/fallback on fastpath device
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 {
-	//struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
 	// incompat device
-#if 0
-	if (pxd_dev->using_blkque) {
-		printk("device %llu ioswitch request failed (blkque %d, fastpath %d)\n",
-			   pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
+	if (!pxd_dev->fastpath) {
+		printk("device %llu ioswitch request failed (registered %d, current %d)\n",
+			   pxd_dev->dev_id, pxd_dev->fastpath, fp->fastpath);
 		return -EINVAL;
 	}
-#endif
 
 	switch (code) {
 	case PXD_FAILOVER_TO_USERSPACE:
@@ -935,11 +933,9 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	int i;
 	int rc;
 
-#if 0
-	if (pxd_dev->using_blkque) {
+	if (!pxd_dev->fastpath) {
 		return -EINVAL;
 	}
-#endif
 
 	// check if previous sync instance is still active
 	if (!skip_flush && pxd_sync_work_pending(pxd_dev)) {
@@ -1017,11 +1013,9 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 
 int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 {
-#if 0
-	if (pxd_dev->using_blkque) {
+	if (!pxd_dev->fastpath) {
 		return -EINVAL;
 	}
-#endif
 
 	pxd_resume_io(pxd_dev);
 	printk(KERN_NOTICE"device %llu resumed IO from userspace\n", pxd_dev->dev_id);
@@ -1074,8 +1068,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	//if (pxd_dev->using_blkque || !pxd_dev->fp.nfd) {
-	if (!pxd_dev->fp.nfd) {
+	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) {
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
@@ -1163,8 +1156,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int nfd = fp->nfd;
 	int i;
 
-	//if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
-	if (!pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
 		pxd_dev->fp.active_failover = false;
 		pxd_dev->fp.fastpath = false;
 		return;

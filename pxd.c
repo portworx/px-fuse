@@ -454,8 +454,7 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 			req->pxd_rdwr_in.offset);
 
 	// do this only if the request is on a fastpath enabled device
-	// TODO - change using_blkque to fastpath_registered device
-	// if (pxd_dev->fp.) clone_cleanup(&req->fproot);
+	if (req->pxd_dev->fastpath) clone_cleanup(&req->fproot);
 }
 
 static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
@@ -816,11 +815,10 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 {
 	struct fuse_req *req;
 
-#if 0
-	if (pxd_dev->using_blkque) {
+	// only fastpath capable devices can do path switch
+	if (!pxd_dev->fastpath) {
 		return -EINVAL;
 	}
-#endif
 
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
@@ -1079,6 +1077,7 @@ static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 
 	fuse_request_init(req);
+	fp_root_context_init(fproot);
 
 	blk_mq_start_request(rq);
 
@@ -1096,9 +1095,9 @@ static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
 	}
 
 	// route through fastpath
-	fp_root_context_init(fproot);
 	// while in blkmq mode: cannot directly process IO from this thread... involves
 	// recursive BIO submission to the backing devices, causing deadlock.
+	atomic_inc(&pxd_dev->ncount);
 	INIT_WORK(&fproot->work, fp_handle_io);
 	queue_work(pxd_dev->fp.wq, &fproot->work);
 	return BLK_STS_OK;
@@ -1133,13 +1132,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	// only fastpath uses direct block io process bypassing request queuing
 #ifndef __PX_FASTPATH__
-	if (!pxd_dev->using_blkque) {
+	if (pxd_dev->fastpath) {
 		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it\n");
-		pxd_dev->using_blkque = true;
+		pxd_dev->fastpath = false;
 	}
 #else
 	if (!pxd_dev->using_blkque) {
-		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
+		pxd_printk("adding disk for fastpath device %llu in non-blkmq mode\n", pxd_dev->dev_id);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
@@ -1247,8 +1246,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
 #ifdef __PX_BLKMQ__
-		//if (pxd_dev->using_blkque) blk_mq_free_tag_set(&pxd_dev->tag_set);
-		blk_mq_free_tag_set(&pxd_dev->tag_set);
+		if (pxd_dev->using_blkque) blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
 	}
 	put_disk(disk);
@@ -1328,11 +1326,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->connected = true; // fuse slow path connection
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
-#if 0
-	pxd_dev->using_blkque = !add->enable_fp;
-#else
-	pxd_dev->using_blkque = 1; // hardcoded to using blkmq.
-#endif
+	pxd_dev->fastpath = add->enable_fp; // persistent state for this px device
+	pxd_dev->using_blkque = 1; // this is internal state, how px device gets registered with kernel
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -1524,10 +1519,23 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
 		id.fastpath = 0;
-		id.blkmq_device = 0;
+		id.fpdevice = 0;
 		id.suspend = 0;
-		if (pxd_dev->fp.fastpath) id.fastpath = 1;
-		if (pxd_dev->using_blkque) id.blkmq_device = 0; // do not report outside
+		id.blkmq_device = 0; // internal state, give out to satisfy current definition
+		if (pxd_dev->fp.fastpath) {
+			id.fastpath = 1; // current state in fastpath
+		} else {
+			id.fastpath = 0; // current state in nativepath
+			id.blkmq_device = 1; // satisfy current definition
+		}
+		if (pxd_dev->fastpath) {
+			id.fpdevice = 1; // px registration as fastpath capable device.
+			id.blkmq_device = 0; // satisfy current definition
+		} else {
+			id.fpdevice = 0; // px registration as nativepath device
+			id.blkmq_device = 1;
+		}
+
 		if (atomic_read(&pxd_dev->fp.app_suspend)) id.suspend = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
@@ -1552,13 +1560,10 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-#if 0
-	if (pxd_dev->using_blkque) {
+	if (pxd_dev->fastpath) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
-	} else
-#endif
-	if (pxd_dev->fp.fastpath) {
+	} else if (pxd_dev->fp.fastpath) {
 		printk(KERN_ERR"%llu: device already in fast path - cannot update\n", pxd_dev->dev_id);
 		return -EINVAL;
 	}
@@ -1903,8 +1908,8 @@ static ssize_t pxd_debug_show(struct device *dev,
 	int suspend;
 
 	suspend=pxd_suspend_state(pxd_dev);
-	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d,app_suspend:%d\n",
-			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque,
+	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d/%d,mqdevice:%d,app_suspend:%d\n",
+			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->fastpath, pxd_dev->using_blkque,
 			atomic_read(&pxd_dev->fp.app_suspend));
 }
 

@@ -48,7 +48,8 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
-	bool using_blkque; // this is persistent, how the block device registered with kernel
+	bool fastpath; // this is persistent, how px treats this device.
+	bool using_blkque; // internal: how block device registered with kernel
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
