@@ -591,9 +591,9 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 		bio_chain(b, req->bio);
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
 		generic_make_request(b);
-#else		
+#else
 		submit_bio_noacct(b);
-#endif		
+#endif
 		rq_sectors -= max_sectors;
 		*off += (max_sectors << SECTOR_SHIFT);
 	}
@@ -1097,6 +1097,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	  q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
+#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
+        q = blk_alloc_queue_rh(pxd_make_request_fastpath, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
 #endif
@@ -1109,7 +1111,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 #endif
 	} else {
