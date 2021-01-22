@@ -455,16 +455,18 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 			req->pxd_rdwr_in.offset);
 }
 
-static void pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	trace_pxd_reply(req->in.unique, 0u);
 	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
+
+	return true;
 }
 
-static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
@@ -475,29 +477,35 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
 	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req);
+
+	return true;
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static void pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
+	return true;
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(status));
+	return false;
 #endif
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static void pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
+	return true;
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(status));
+	return false;
 #endif
 }
 
@@ -776,7 +784,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 
 static
-void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
+bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
@@ -805,6 +813,8 @@ void pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 
 	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
+
+	return true;
 }
 
 static
