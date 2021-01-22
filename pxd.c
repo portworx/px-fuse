@@ -382,6 +382,9 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+	.submit_io		= pxd_make_request_fastpath,
+#endif
 };
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
@@ -2218,9 +2221,7 @@ static void pxd_abort_context(struct work_struct *work)
 	/* Let other threads see the value of allow_disconnected. */
 	synchronize_rcu();
 
-	spin_lock(&fc->lock);
 	fuse_end_queued_requests(fc);
-	spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
 }
 
