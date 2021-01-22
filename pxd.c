@@ -738,6 +738,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	  q = blk_alloc_queue(NUMA_NO_NODE);	  
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
+#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
+        q = blk_alloc_queue_rh(pxd_make_request_fastpath, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
 #endif
@@ -746,7 +748,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 			goto out_disk;
 		}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 #endif
 	} else {
