@@ -1138,7 +1138,7 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 		up_read(&sb->s_umount);
 	} else if (S_ISBLK(inode->i_mode)) {
 		struct block_device *bdev = I_BDEV(inode);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0) &&  !defined(QUEUE_FLAG_NOWAIT)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
 #else
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL);
