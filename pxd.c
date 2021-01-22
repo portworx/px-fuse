@@ -822,7 +822,11 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 
 	// reissue any failed IOs from local list
-	pxd_reissuefailQ(pxd_dev, &ios, status);
+	if (pxd_dev->using_blkque) {
+		pxd2_reissuefailQ(pxd_dev, &ios, status);
+	} else {
+		pxd_reissuefailQ(pxd_dev, &ios, status);
+	}
 
 	return true;
 }
@@ -1044,6 +1048,22 @@ static void pxd_rq_fn(struct request_queue *q)
 	}
 }
 #else
+
+void pxd2_reroute_slowpath(struct fuse_req *req)
+{
+	struct pxd_device *pxd_dev = req->pxd_dev;
+	struct request *rq = req->rq;
+
+	BUG_ON(pxd_dev->fp.fastpath);
+
+	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
+		blk_mq_end_request(rq, BLK_STS_IOERR);
+		return;
+	}
+
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+}
 
 STATIC
 blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,

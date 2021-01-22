@@ -39,7 +39,6 @@ int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev) { return -1; }
 
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status){}
 void pxd_abortfailQ(struct pxd_device *pxd_dev) { }
-void __pxd_abortfailQ(struct pxd_device *pxd_dev) { }
 
 // blkmq based fastpath stubs
 int fastpath2_init(void) {return 0;}

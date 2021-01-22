@@ -13,6 +13,7 @@
 #endif
 
 static void __pxd_add2failQ(struct pxd_device *pxd_dev, struct pxd_io_tracker *iot);
+static void __pxd_abortfailQ(struct pxd_device *pxd_dev);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,19,0)
 
@@ -646,7 +647,11 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	if (!enable) {
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = false;
-		pxd_abortfailQ(pxd_dev);
+		if (pxd_dev->using_blkque) {
+			pxd2_abortfailQ(pxd_dev);
+		} else {
+			pxd_abortfailQ(pxd_dev);
+		}
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
 		pxd_dev->connected = true;
@@ -1553,6 +1558,7 @@ void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int sta
 	}
 }
 
+static
 void __pxd_abortfailQ(struct pxd_device *pxd_dev)
 {
 	while (!list_empty(&pxd_dev->fp.failQ)) {

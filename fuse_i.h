@@ -95,6 +95,13 @@ struct request* fproot_to_request(struct fp_root_context* fproot)
 
 	return f->rq;
 }
+
+static inline
+struct fuse_req* fproot_to_fuse_request(struct fp_root_context* fproot)
+{
+	return container_of(fproot, struct fuse_req, fproot);
+}
+
 #endif
 
 #define FUSE_MAX_PER_CPU_IDS 256
