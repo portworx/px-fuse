@@ -10,6 +10,7 @@
 #include "pxd2_fastpath.h"
 #include "pxd_compat.h"
 #include "pxd_core.h"
+#include "kiolib.h"
 
 inline bool rq_is_special(struct request *rq) {
   return (req_op(rq) == REQ_OP_DISCARD) || (req_op(rq) == REQ_OP_FLUSH);
@@ -137,10 +138,6 @@ static void pxd_failover_initiate(struct fp_root_context *fproot) {
   queue_work(pxd_dev->fp.wq, &fproot->work);
 }
 
-static void end_clone_bio_stub(struct bio *bio) {
-  BUG_ON("end_clone_bio_stub unexpected call");
-}
-
 static int reconcile_status(struct fp_root_context *fproot) {
   struct fp_clone_context *cc;
   int status = 0;
@@ -258,7 +255,13 @@ static void end_clone_bio(struct bio *bio) {
 }
 
 static void pxd_process_fileio(struct work_struct *work) {
-  BUG_ON("not ready to handle file io yet");
+  struct fp_clone_context *cc =
+      container_of(work, struct fp_clone_context, work);
+  struct bio *clone = &cc->clone;
+  struct fp_root_context *fproot = clone->bi_private;
+  struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+
+  __do_bio_filebacked(pxd_dev, clone, cc->file);
 }
 
 static struct bio *clone_root(struct fp_root_context *fproot,
@@ -290,11 +293,7 @@ static struct bio *clone_root(struct fp_root_context *fproot,
 
   BIO_SET_DEV(clone_bio, bdev);
   clone_bio->bi_private = fproot;
-  if (S_ISBLK(get_mode(cc->file))) {
-    clone_bio->bi_end_io = end_clone_bio;
-  } else {
-    clone_bio->bi_end_io = end_clone_bio_stub;
-  }
+  clone_bio->bi_end_io = end_clone_bio;
 
   atomic_inc(&nclones);
   return clone_bio;
