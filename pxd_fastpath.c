@@ -1310,10 +1310,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #endif
 	int rw = bio_data_dir(bio);
 	struct pxd_io_tracker *head;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
-#endif
-	
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 	if (!pxd_dev) {
 #else
