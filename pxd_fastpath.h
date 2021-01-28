@@ -105,12 +105,6 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
 void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
 
-// congestion
-int pxd_device_congested(void *, int);
-
-// return the io count processed by a thread
-int get_thread_count(int id);
-
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque);
 int pxd_suspend_state(struct pxd_device *pxd_dev);
 int pxd_debug_switch_fastpath(struct pxd_device*);
