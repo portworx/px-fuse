@@ -12,8 +12,10 @@
 #include <linux/printk.h>
 
 // global flag to control fastpath IO processing path.
-// #define PXD_FP_USEBLKMQ (0) // enable make_request registration for fastpath
-#define PXD_FP_USEBLKMQ (1) // enable blkmq registration for fastpath
+#define PXD_FP_MAKEREQ (0) // enable make_request registration for fastpath
+#define PXD_FP_BLKMQ (1) // enable blkmq registration for fastpath
+
+#define PXD_FP_REGISTER_TYPE PXD_FP_BLKMQ
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -996,6 +998,27 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 }
 
 #if !defined(__PX_BLKMQ__)
+void pxd2_reroute_slowpath(struct fuse_req *req)
+{
+	struct pxd_device *pxd_dev = req->pxd_dev;
+	struct request *rq = req->rq;
+
+	BUG_ON(pxd_dev->fp.fastpath);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
+	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+                  pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
+#else
+	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+                  pxd_dev->minor, rq->cmd_flags)) {
+#endif
+		fuse_request_free(req);
+		blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+		return;
+	}
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+}
+
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
@@ -1342,7 +1365,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->fastpath = add->enable_fp; // persistent state for this px device
-	pxd_dev->using_blkque = PXD_FP_USEBLKMQ; // this is internal state, how px device gets registered with kernel
+	pxd_dev->using_blkque = PXD_FP_REGISTER_TYPE; // this is internal state, how px device gets registered with kernel
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);

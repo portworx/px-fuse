@@ -5,12 +5,12 @@
 #include <linux/workqueue.h>
 
 #include "fuse_i.h"
+#include "kiolib.h"
 #include "linux/blk-mq.h"
 #include "pxd.h"
 #include "pxd2_fastpath.h"
 #include "pxd_compat.h"
 #include "pxd_core.h"
-#include "kiolib.h"
 
 inline bool rq_is_special(struct request *rq) {
   return (req_op(rq) == REQ_OP_DISCARD) || (req_op(rq) == REQ_OP_FLUSH);
@@ -77,10 +77,16 @@ static void __pxd_abortfailQ(struct pxd_device *pxd_dev) {
   while (!list_empty(&pxd_dev->fp.failQ)) {
     struct fp_root_context *fproot =
         list_first_entry(&pxd_dev->fp.failQ, struct fp_root_context, wait);
+    struct fuse_req *req = fproot_to_fuse_request(fproot);
     BUG_ON(fproot->magic != FP_ROOT_MAGIC);
     list_del(&fproot->wait);
-    blk_mq_end_request(fproot_to_request(fproot), BLK_STS_IOERR);
     clone_cleanup(fproot);
+#ifndef __PX_BLKMQ__
+    blk_end_request(req->rq, BLK_STS_IOERR, blk_rq_bytes(req->rq));
+    fuse_request_free(req);
+#else
+    blk_mq_end_request(req->rq, BLK_STS_IOERR);
+#endif
   }
 }
 
@@ -125,6 +131,7 @@ static void pxd_io_failover(struct work_struct *work) {
     printk_ratelimited(KERN_ERR "%s: pxd%llu: resuming IO in native path.\n",
                        __func__, pxd_dev->dev_id);
     atomic_inc(&pxd_dev->fp.nslowPath);
+    clone_cleanup(fproot);
     pxd2_reroute_slowpath(fproot_to_fuse_request(fproot));
   }
 }
@@ -248,7 +255,12 @@ static void end_clone_bio(struct bio *bio) {
   clone_cleanup(fproot);
   // CAREFUL NOW - fproot will be lost once end_request below gets called
   // finish the original request
+#ifndef __PX_BLKMQ__
+  blk_end_request(rq, errno_to_blk_status(blkrc), blk_rq_bytes(rq));
+  fuse_request_free(fproot_to_fuse_request(fproot));
+#else
   blk_mq_end_request(rq, errno_to_blk_status(blkrc));
+#endif
 
   atomic_inc(&pxd_dev->fp.ncomplete);
   atomic_dec(&pxd_dev->ncount);
@@ -349,7 +361,12 @@ static void fp_handle_specialops(struct fp_root_context *fproot) {
 err:
   atomic_dec(&pxd_dev->ncount);
   atomic_inc(&pxd_dev->fp.ncomplete);
+#ifndef __PX_BLKMQ__
+  blk_end_request(rq, r, blk_rq_bytes(rq));
+  fuse_request_free(fproot_to_fuse_request(fproot));
+#else
   blk_mq_end_request(rq, r);
+#endif
 }
 
 static void stub_endio(struct bio *bio) { BUG_ON("stub_endio called"); }
@@ -512,7 +529,12 @@ void fp_handle_io(struct work_struct *work) {
 
   r = clone_and_map(fproot);
   if (r != BLK_STS_OK) {
+#ifndef __PX_BLKMQ__
+    blk_end_request(rq, r, blk_rq_bytes(rq));
+    fuse_request_free(fproot_to_fuse_request(fproot));
+#else
     blk_mq_end_request(rq, r);
+#endif
   }
 }
 
@@ -528,19 +550,24 @@ void pxd2_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
   while (!list_empty(ios)) {
     struct fp_root_context *fproot =
         list_first_entry(&pxd_dev->fp.failQ, struct fp_root_context, wait);
+    struct fuse_req *req = fproot_to_fuse_request(fproot);
     BUG_ON(fproot->magic != FP_ROOT_MAGIC);
     list_del(&fproot->wait);
+    clone_cleanup(fproot);
     if (!status) {
       // switch to native path, if px is down, then abort IO timer will cleanup
       printk_ratelimited(KERN_ERR "%s: pxd%llu: resuming IO in native path.\n",
                          __func__, pxd_dev->dev_id);
       atomic_inc(&pxd_dev->fp.nslowPath);
-      pxd2_reroute_slowpath(fproot_to_fuse_request(fproot));
-    } else {
-      // If failover request failed, then route IO fail to user application as
-      // is.
-      blk_mq_end_request(fproot_to_request(fproot), BLK_STS_IOERR);
+      pxd2_reroute_slowpath(req);
+      continue;
     }
-    clone_cleanup(fproot);
+    // If failover request failed, then route IO fail to user application as is.
+#ifndef __PX_BLKMQ__
+    blk_end_request(req->rq, BLK_STS_IOERR, blk_rq_bytes(req->rq));
+    fuse_request_free(req);
+#else
+    blk_mq_end_request(req->rq, BLK_STS_IOERR);
+#endif
   }
 }
