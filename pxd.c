@@ -11,7 +11,9 @@
 #include <linux/bio.h>
 #include <linux/printk.h>
 
-#define STATIC 
+// global flag to control fastpath IO processing path.
+// #define PXD_FP_USEBLKMQ (0) // enable make_request registration for fastpath
+#define PXD_FP_USEBLKMQ (1) // enable blkmq registration for fastpath
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -998,6 +1000,7 @@ static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
+	struct fp_root_context *fproot;
 
 	for (;;) {
 		struct request *rq;
@@ -1030,20 +1033,30 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->pxd_dev = pxd_dev;
 		req->rq = rq;
 		req->queue = q;
+		fproot = &req->fproot;
+		fp_root_context_init(fproot);
+
+		if (!pxd_dev->fp.fastpath) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+			if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 #else
-		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+			if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, rq->cmd_flags)) {
 #endif
-			fuse_request_free(req);
-			spin_lock_irq(&pxd_dev->qlock);
-			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
-			continue;
+				fuse_request_free(req);
+				spin_lock_irq(&pxd_dev->qlock);
+				__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+				continue;
+			}
+			fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+		} else {
+			// route through fastpath
+			// while in blkmq mode: cannot directly process IO from this thread... involves
+			// recursive BIO submission to the backing devices, causing deadlock.
+			INIT_WORK(&fproot->work, fp_handle_io);
+			queue_work(pxd_dev->fp.wq, &fproot->work);
 		}
-
-		fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -1065,44 +1078,8 @@ void pxd2_reroute_slowpath(struct fuse_req *req)
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 }
 
-STATIC
-blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
-		const struct blk_mq_queue_data *bd)
-{
-	struct request *rq = bd->rq;
-	struct pxd_device *pxd_dev = rq->q->queuedata;
-	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
-	struct fp_root_context *fproot = &req->fproot;
-
-	if (BLK_RQ_IS_PASSTHROUGH(rq))
-		return BLK_STS_IOERR;
-
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-		   "flags  %x\n", __func__,
-		pxd_dev->minor, pxd_dev->dev_id,
-		rq_data_dir(rq) == WRITE ? "wr" : "rd",
-		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
-		rq->nr_phys_segments, rq->cmd_flags);
-
-	fuse_request_init(req);
-	fp_root_context_init(fproot);
-
-	blk_mq_start_request(rq);
-
-	req->pxd_dev = pxd_dev;
-	req->rq = rq;
-	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
-		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
-		return BLK_STS_IOERR;
-	}
-
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
-
-	return BLK_STS_OK;
-}
-
 // that understands fastpath routing
-static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
+static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
 	struct request *rq = bd->rq;
@@ -1140,7 +1117,7 @@ static blk_status_t pxd_queue_rq2(struct blk_mq_hw_ctx *hctx,
 }
 
 static const struct blk_mq_ops pxd_mq_ops = {
-	.queue_rq       = pxd_queue_rq2,
+	.queue_rq       = pxd_queue_rq,
 };
 #endif
 
@@ -1365,7 +1342,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->fastpath = add->enable_fp; // persistent state for this px device
-	pxd_dev->using_blkque = 1; // this is internal state, how px device gets registered with kernel
+	pxd_dev->using_blkque = PXD_FP_USEBLKMQ; // this is internal state, how px device gets registered with kernel
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
