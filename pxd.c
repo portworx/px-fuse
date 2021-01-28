@@ -2144,6 +2144,34 @@ static void pxd_sysfs_exit(void)
 	device_unregister(&pxd_root_dev);
 }
 
+static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
+{
+	if (!enable) {
+		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
+		pxd_dev->connected = false;
+		if (pxd_dev->using_blkque) {
+			pxd2_abortfailQ(pxd_dev);
+		} else {
+			pxd_abortfailQ(pxd_dev);
+		}
+	} else {
+		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
+		pxd_dev->connected = true;
+	}
+}
+
+static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
+{
+	struct list_head *cur;
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+
+		_pxd_setup(pxd_dev, enable);
+	}
+	spin_unlock(&ctx->lock);
+}
+
 static int pxd_control_open(struct inode *inode, struct file *file)
 {
 	struct pxd_context *ctx;

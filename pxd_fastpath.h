@@ -91,8 +91,6 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 int pxd_fastpath_init(struct pxd_device *pxd_dev);
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
 
-void pxdctx_set_connected(struct pxd_context *ctx, bool enable);
-
 // IO entry point
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 blk_qc_t pxd_make_request_fastpath(struct bio *bio);
