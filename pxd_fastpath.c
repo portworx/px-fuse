@@ -1348,8 +1348,10 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	BUG_ON(!tc);
 	pxd_add_io(tc, head, rw);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	bio_start_io_acct(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+	head->start = bio_start_io_acct(bio);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
+     defined(bvec_iter_sectors))
 	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
 	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
