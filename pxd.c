@@ -597,7 +597,7 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 		}
 
 		bio_chain(b, req->bio);
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,9,0)
 		generic_make_request(b);
 #else
 		submit_bio_noacct(b);
