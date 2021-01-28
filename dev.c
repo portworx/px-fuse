@@ -212,9 +212,9 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 	u64 uid = req->in.unique;
 	bool shouldfree = false;
 
-	// if 'req' gets used, always req->end is set
-	// if processing path has a failure, then explicit free of 'req' is taken
-	// care in error handling path at call site.
+	/* 'req->end' is always set if the context gets used.
+	 * if error happens during processing, error path handling does free request.
+	 */
 	if (req->end)
 		shouldfree = req->end(fc, req, status);
 	fuse_put_unique(fc, uid);

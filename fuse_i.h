@@ -64,7 +64,7 @@ struct fuse_req {
 	};
 
 	/** Request completion callback */
-	/** return true if request need to be freed */
+	/** return: 'true' to free the request, 'false' otherwise */
 	bool (*end)(struct fuse_conn *, struct fuse_req *, int status);
 
 	/** Associate request queue */
