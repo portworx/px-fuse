@@ -38,6 +38,10 @@ struct pxd_io_tracker {
 	struct bio clone;    // cloned bio [ALL]
 };
 
+// helper functions
+struct block_device* get_bdev(struct file *fileh);
+unsigned get_mode(struct file *fileh);
+
 struct pxd_sync_ws {
 	struct work_struct ws;
 	struct pxd_device *pxd_dev;
