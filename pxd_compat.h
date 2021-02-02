@@ -44,9 +44,8 @@
 #define BIO_OP(bio)   bio_op(bio)
 #define SUBMIT_BIO(bio) submit_bio(bio)
 #else
-// only supports read or write
-#define BIO_OP(bio)   ((bio)->bi_rw & 1)
-#define SUBMIT_BIO(bio)  submit_bio(BIO_OP(bio), bio)
+#define BIO_OP(bio)   ((bio)->bi_rw)
+#define SUBMIT_BIO(bio)  submit_bio(((bio)->bi_rw & 1), bio)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
