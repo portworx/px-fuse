@@ -891,7 +891,7 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 		// submit all replicas linked from head, if not read
 		list_for_each_entry(curr, &head->replicas, item) {
 			if (S_ISBLK(curr->file->f_inode->i_mode)) {
-				if (special_op(bio_op(&curr->clone))) {
+				if (special_op(BIO_OP(&curr->clone))) {
 					INIT_WORK(&curr->wi, fp_handle_special);
 					queue_work(pxd_dev->fp.wq, &curr->wi);
 				} else {
@@ -908,7 +908,7 @@ static void pxd_process_io(struct pxd_io_tracker *head)
 
 	// submit head bio the last
 	if (S_ISBLK(head->file->f_inode->i_mode)) {
-		if (special_op(bio_op(&head->clone))) {
+		if (special_op(BIO_OP(&head->clone))) {
 			INIT_WORK(&head->wi, fp_handle_special);
 			queue_work(pxd_dev->fp.wq, &head->wi);
 		} else {
