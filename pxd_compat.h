@@ -49,9 +49,13 @@
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#include <linux/bio.h>
+#ifndef BIOSET_NEED_BVECS
+#define BIOSET_NEED_BVECS (1)
+#endif
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad)
 #endif
 
 #if defined(bio_set_dev)
@@ -127,8 +131,21 @@ static inline unsigned int get_op_flags(struct bio *bio)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 #define BDEVNAME(bio, b)   bio_devname(bio, b)
+#define BIO_COPY_DEV(dst, src) bio_copy_dev(dst, src)
 #else
 #define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+#define BIO_COPY_DEV(dst, src) do {			\
+	(dst)->bi_bdev = (src)->bi_bdev;		\
+} while (0)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#define BIO_SET_OP_ATTRS(b, op, flags) bio_set_op_attrs(b, op, flags)
+#else
+// no 'op_flags' present, hence ignored
+#define BIO_SET_OP_ATTRS(b, op, flags) do {		\
+	(b)->bi_rw = op; \
+} while (0)
 #endif
 
 #endif //GDFS_PXD_COMPAT_H

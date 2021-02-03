@@ -787,6 +787,7 @@ out_free:
 	return ret;
 }
 
+#ifdef __PXD_BIO_BLKMQ__
 // return nr_bytes in iovec if successful
 //   < 0 for failure
 static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
@@ -871,7 +872,8 @@ static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
 	return len;
 }
 
-static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
+#else 
+static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
 		struct bio_vec **iovec, struct iov_iter *iter)
 {
 	struct bio *bio = req->bio;
@@ -944,6 +946,8 @@ static int build_bvec2(struct fuse_req *req, int *rw, size_t off, size_t len,
 	return len;
 }
 
+#endif
+
 static int io_import_bvec(struct io_kiocb *req, int *rw,
 			   const struct sqe_submit *s, struct bio_vec **iovec,
 			   struct iov_iter *iter)
@@ -962,10 +966,6 @@ static int io_import_bvec(struct io_kiocb *req, int *rw,
 	if (!freq) {
 		printk(KERN_ERR "%s: request %u:%lld not found\n", __func__, conn_id, unique_id);
 		return -ENOENT;
-	}
-
-	if (!freq->pxd_dev->using_blkque) {
-		return build_bvec2(freq, rw, sqe_off, sqe_len, iovec, iter);
 	}
 
 	return build_bvec(freq, rw, sqe_off, sqe_len, iovec, iter);

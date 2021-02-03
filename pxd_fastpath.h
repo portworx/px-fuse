@@ -13,34 +13,11 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
+#include "pxd_bio.h"
+
 struct pxd_device;
 struct pxd_context;
 struct fuse_conn;
-
-// Added metadata for each bio
-struct pxd_io_tracker {
-#define PXD_IOT_MAGIC (0xbeefcafe)
-	unsigned int magic;
-	struct pxd_device *pxd_dev; // back pointer to pxd device
-	struct pxd_io_tracker *head; // back pointer to head copy [ALL]
-	struct list_head replicas; // only replica needs this
-	struct list_head item; // only HEAD needs this
-	atomic_t active; // only HEAD has refs to all active IO
-	struct file* file;
-
-	unsigned long start; // start time [HEAD]
-	struct bio *orig;    // original request bio [HEAD]
-	int status; // should be zero, non-zero indicates consolidated fail status
-
-	struct work_struct wi; // work item
-
-	// THIS SHOULD BE LAST ITEM
-	struct bio clone;    // cloned bio [ALL]
-};
-
-// helper functions
-struct block_device* get_bdev(struct file *fileh);
-unsigned get_mode(struct file *fileh);
 
 struct pxd_sync_ws {
 	struct work_struct ws;
@@ -97,32 +74,11 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
 
 void pxdctx_set_connected(struct pxd_context *ctx, bool enable);
 
-// IO entry point
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-blk_qc_t pxd_make_request_fastpath(struct bio *bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
-#define BLK_QC_RETVAL BLK_QC_T_NONE
-#else
-void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
-#define BLK_QC_RETVAL
-#endif
-
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
 void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
 
-// congestion
-int pxd_device_congested(void *, int);
-
-// return the io count processed by a thread
-int get_thread_count(int id);
-
 void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque);
 int pxd_suspend_state(struct pxd_device *pxd_dev);
-int pxd_debug_switch_fastpath(struct pxd_device*);
-int pxd_debug_switch_nativepath(struct pxd_device*);
-void pxd_suspend_io(struct pxd_device*);
-void pxd_resume_io(struct pxd_device*);
 int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev);
 
 // external request from userspace to control io path
@@ -132,9 +88,36 @@ int pxd_request_resume(struct pxd_device *pxd_dev);
 int pxd_request_resume_internal(struct pxd_device *pxd_dev);
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
 
-// handle IO reroutes and switch events
-void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
-void pxd_abortfailQ(struct pxd_device *pxd_dev);
-void __pxd_abortfailQ(struct pxd_device *pxd_dev);
+static inline
+int remap_io_status(int status)
+{
+	switch (status) {
+	case 0: // success
+	case -EOPNOTSUPP: // op not supported - no failover
+	case -ENOSPC: // no space on device - no failover
+	case -ENOMEM: // no memory - no failover
+		return status;
+	}
+
+	return -EIO;
+}
+
+
+// helper functions
+static inline struct block_device *get_bdev(struct file *fileh) {
+  struct address_space *mapping = fileh->f_mapping;
+  struct inode *inode = mapping->host;
+  struct block_device *bdev = I_BDEV(inode);
+
+  BUG_ON(!bdev);
+  return bdev;
+}
+
+static inline unsigned get_mode(struct file *fileh) {
+  struct address_space *mapping = fileh->f_mapping;
+  struct inode *inode = mapping->host;
+
+  return inode->i_mode;
+}
 
 #endif /* _PXD_FASTPATH_H_ */

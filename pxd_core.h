@@ -48,7 +48,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
-	bool using_blkque; // this is persistent, how the block device registered with kernel
+	bool fastpath; // 'fastpath' enabled device -- persistent once registered
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
@@ -59,8 +59,8 @@ struct pxd_device {
 	unsigned int nr_congestion_off;
 
 	wait_queue_head_t suspend_wq;
-#ifdef __PX_BLKMQ__
-        struct blk_mq_tag_set tag_set;
+#if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
+    struct blk_mq_tag_set tag_set;
 #endif
 };
 
@@ -85,16 +85,12 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 
 #define SEGMENT_SIZE (1024 * 1024)
 
-// slow path make request io entry point
-struct request_queue;
-struct bio;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
+#ifdef __PXD_BIO_MAKE_REQ__
+void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
 #else
-void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
+void pxdmq_reroute_slowpath(struct fuse_req *req);
 #endif
 
-void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
 int pxd_initiate_fallback(struct pxd_device *pxd_dev);
 int pxd_initiate_failover(struct pxd_device *pxd_dev);
 

@@ -5,10 +5,12 @@
 #include <linux/crc32.h>
 #include <linux/ctype.h>
 #include <linux/sched.h>
-#include "fuse_i.h"
-#include "pxd.h"
 #include <linux/uio.h>
 #include <linux/bio.h>
+
+#include "fuse_i.h"
+#include "pxd.h"
+#include "pxd_bio.h"
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -379,26 +381,10 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-	.submit_io		= pxd_make_request_fastpath,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0) && defined(__PXD_BIO_MAKE_REQ__)
+	.submit_io		= pxd_bio_make_request_entryfn,
 #endif
 };
-
-static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
-{
-		struct pxd_device *pxd_dev = req->queue->queuedata;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
-		part_stat_lock();
-		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
-#else
-		int cpu = part_stat_lock();
-		part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
-		part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
-#endif
-		part_stat_unlock();
-}
 
 static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 {
@@ -455,6 +441,23 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 			req->pxd_rdwr_in.offset);
 }
 
+#ifdef __PXD_BIO_MAKE_REQ__
+static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
+{
+		struct pxd_device *pxd_dev = req->queue->queuedata;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
+		part_stat_lock();
+		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
+#else
+		int cpu = part_stat_lock();
+		part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
+#endif
+		part_stat_unlock();
+}
+
 static bool pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
@@ -481,8 +484,10 @@ static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	return true;
 }
 
+#else
+
 /* only used by the USE_REQUESTQ_MODEL definition */
-static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	pxd_request_complete(fc, req);
@@ -496,7 +501,7 @@ static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 }
 
 /* only used by the USE_REQUESTQ_MODEL definition */
-static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req,
+static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
 {
 	pxd_request_complete(fc, req);
@@ -508,6 +513,8 @@ static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	return false;
 #endif
 }
+
+#endif
 
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 {
@@ -558,16 +565,13 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
  * when block device is registered in non blk mq mode, device limits are not
  * honoured. Handle it appropriately.
  */
+#ifdef __PXD_BIO_MAKE_REQ__
 static
 int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
 		unsigned int op)
 {
 	struct request_queue *q = req->pxd_dev->disk->queue;
 	sector_t max_sectors, rq_sectors;
-
-	if (req->pxd_dev->using_blkque) {
-		return 0;
-	}
 
 	rq_sectors = *size >> SECTOR_SHIFT;
 	BUG_ON(rq_sectors != bio_sectors(req->bio));
@@ -609,6 +613,14 @@ int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off
 	*size = rq_sectors << SECTOR_SHIFT;
 	return 0;
 }
+#else
+static inline
+int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
+		unsigned int op)
+{
+	return 0;
+}
+#endif
 
 static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
@@ -625,11 +637,7 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 
 	req->in.opcode = PXD_READ;
-	if (!req->pxd_dev->using_blkque) {
-		req->end = pxd_process_read_reply;
-	} else {
-		req->end = pxd_process_read_reply_q;
-	}
+	req->end = pxd_process_read_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
@@ -650,11 +658,7 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 
 	req->in.opcode = PXD_WRITE;
-	if (!req->pxd_dev->using_blkque) {
-		req->end = pxd_process_write_reply;
-	} else {
-		req->end = pxd_process_write_reply_q;
-	}
+	req->end = pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 
@@ -679,11 +683,7 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 	}
 
 	req->in.opcode = PXD_DISCARD;
-	if (!req->pxd_dev->using_blkque) {
-		req->end = pxd_process_write_reply;
-	} else {
-		req->end = pxd_process_write_reply_q;
-	}
+	req->end = pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
@@ -704,11 +704,7 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 	}
 
 	req->in.opcode = PXD_WRITE_SAME;
-	if (!req->pxd_dev->using_blkque) {
-		req->end = pxd_process_write_reply;
-	} else {
-		req->end = pxd_process_write_reply_q;
-	}
+	req->end = pxd_process_write_reply;
 
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
@@ -822,7 +818,7 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 {
 	struct fuse_req *req;
 
-	if (pxd_dev->using_blkque) {
+	if (!pxd_dev->fastpath) {
 		return -EINVAL;
 	}
 
@@ -910,6 +906,13 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
 
+	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+			"flags 0x%x op_flags 0x%x\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
+			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
+
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
 		bio_io_error(bio);
@@ -934,55 +937,35 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, true);
 }
 
-// fastpath uses this path to punt requests to slowpath
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL BLK_QC_T_NONE
-#else
-void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL
-#endif
+#ifdef __PXD_BIO_BLKMQ__
+#if !defined(__PX_BLKMQ__)
+void pxdmq_reroute_slowpath(struct fuse_req *req)
 {
-	struct pxd_device *pxd_dev = q->queuedata;
-	struct fuse_req *req;
+    struct pxd_device *pxd_dev = req->pxd_dev;
+    struct request *rq = req->rq;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%x op_flags 0x%x\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
+    BUG_ON(pxd_dev->fp.fastpath);
 
-	req = pxd_fuse_req(pxd_dev);
-	if (IS_ERR_OR_NULL(req)) {
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
-
-	req->pxd_dev = pxd_dev;
-	req->bio = bio;
-	req->queue = q;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
+    if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+                  pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 #else
-	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw)) {
+    if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+                  pxd_dev->minor, rq->cmd_flags)) {
 #endif
-		fuse_request_free(req);
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
-
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
-	return BLK_QC_RETVAL;
+        fuse_request_free(req);
+        blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+        return;
+    }
+    fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
 }
 
-#if !defined(__PX_BLKMQ__)
+
 static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
+	struct fp_root_context *fproot;
 
 	for (;;) {
 		struct request *rq;
@@ -1015,6 +998,17 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->pxd_dev = pxd_dev;
 		req->rq = rq;
 		req->queue = q;
+		fproot = &req->fproot;
+		fp_root_context_init(fproot);
+
+		if (pxd_dev->fp.fastpath) {
+			// route through fastpath
+			INIT_WORK(&fproot->work, fp_handle_io);
+			queue_work(pxd_dev->fp.wq, &fproot->work);
+			spin_lock_irq(&pxd_dev->qlock);
+			continue;
+		}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
@@ -1034,12 +1028,30 @@ static void pxd_rq_fn(struct request_queue *q)
 }
 #else
 
+void pxdmq_reroute_slowpath(struct fuse_req *req)
+{
+    struct pxd_device *pxd_dev = req->pxd_dev;
+    struct request *rq = req->rq;
+
+    BUG_ON(pxd_dev->fp.fastpath);
+
+    if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
+        pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
+        blk_mq_end_request(rq, BLK_STS_IOERR);
+        return;
+    }
+
+    fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+}
+
+
 static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
+	struct fp_root_context *fproot;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
@@ -1052,11 +1064,23 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		rq->nr_phys_segments, rq->cmd_flags);
 
 	fuse_request_init(req);
+	fproot = &req->fproot;
+	fp_root_context_init(fproot);
 
 	blk_mq_start_request(rq);
 
 	req->pxd_dev = pxd_dev;
 	req->rq = rq;
+
+	if (pxd_dev->fp.fastpath) {
+		// route through fastpath
+		// while in blkmq mode: cannot directly process IO from this thread... involves
+		// recursive BIO submission to the backing devices, causing deadlock.
+		INIT_WORK(&fproot->work, fp_handle_io);
+		queue_work(pxd_dev->fp.wq, &fproot->work);
+		return BLK_STS_OK;
+	}
+
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
 		return BLK_STS_IOERR;
@@ -1070,6 +1094,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 static const struct blk_mq_ops pxd_mq_ops = {
 	.queue_rq       = pxd_queue_rq,
 };
+#endif
 #endif
 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
@@ -1095,37 +1120,31 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->private_data = pxd_dev;
 
 	// only fastpath uses direct block io process bypassing request queuing
-#ifndef __PX_FASTPATH__
-	if (!pxd_dev->using_blkque) {
-		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it\n");
-		pxd_dev->using_blkque = true;
-	}
-#else
-	if (!pxd_dev->using_blkque) {
-		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
+#ifdef __PXD_BIO_MAKE_REQ__
+	pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-	  q = blk_alloc_queue(NUMA_NO_NODE);
+	q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
-		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
+	q = blk_alloc_queue(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
-        q = blk_alloc_queue_rh(pxd_make_request_fastpath, NUMA_NO_NODE);
+	q = blk_alloc_queue_rh(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #else
-		q = blk_alloc_queue(GFP_KERNEL);
+	q = blk_alloc_queue(GFP_KERNEL);
 #endif
-		if (!q) {
-			err = -ENOMEM;
-			goto out_disk;
-		}
+	if (!q) {
+		err = -ENOMEM;
+		goto out_disk;
+	}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
-		// add hooks to control congestion only while using fastpath
-		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
+	// add hooks to control congestion only while using fastpath
+	PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
-		blk_queue_make_request(q, pxd_make_request_fastpath);
+	blk_queue_make_request(q, pxd_bio_make_request_entryfn);
 #endif
-	} else {
-#endif
+
+#else // __PXD_BIO_BLKMQ__
 
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
@@ -1154,10 +1173,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	  	goto out_disk;
 	  }
 #endif
-
-#ifdef __PX_FASTPATH__
-	}
 #endif
+
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
@@ -1185,7 +1202,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	BLK_QUEUE_FLUSH(q);
 
 	/* adjust queue limits to be compatible with backing device */
-	if (!pxd_dev->using_blkque) {
+	if (pxd_dev->fastpath) {
 		pxd_fastpath_adjust_limits(pxd_dev, q);
 	}
 
@@ -1211,8 +1228,8 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
-#ifdef __PX_BLKMQ__
-		if (pxd_dev->using_blkque) blk_mq_free_tag_set(&pxd_dev->tag_set);
+#if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
+		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
 	}
 	put_disk(disk);
@@ -1292,7 +1309,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->connected = true; // fuse slow path connection
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
-	pxd_dev->using_blkque = !add->enable_fp;
+	pxd_dev->fastpath = add->enable_fp;
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -1484,10 +1501,13 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
 		id.fastpath = 0;
+#ifdef __PXD_BIO_MAKE_REQ__
 		id.blkmq_device = 0;
+#else
+		id.blkmq_device = 1;
+#endif
 		id.suspend = 0;
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
-		if (pxd_dev->using_blkque) id.blkmq_device = 1;
 		if (atomic_read(&pxd_dev->fp.app_suspend)) id.suspend = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
@@ -1512,7 +1532,7 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-	if (pxd_dev->using_blkque) {
+	if (!pxd_dev->fastpath) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
 	} else if (pxd_dev->fp.fastpath) {
@@ -1860,8 +1880,8 @@ static ssize_t pxd_debug_show(struct device *dev,
 	int suspend;
 
 	suspend=pxd_suspend_state(pxd_dev);
-	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,mqdevice:%d,app_suspend:%d\n",
-			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->using_blkque,
+	return sprintf(buf, "nfd:%d,suspend:%d,fastpath:%d,regtype:%d,app_suspend:%d\n",
+			pxd_dev->fp.nfd, suspend, pxd_dev->fp.fastpath, pxd_dev->fastpath,
 			atomic_read(&pxd_dev->fp.app_suspend));
 }
 
@@ -1875,10 +1895,6 @@ static ssize_t pxd_debug_store(struct device *dev,
 		printk("dev:%llu - IO native path switch - IO failover\n", pxd_dev->dev_id);
 		pxd_dev->fp.force_fail = true;
 		break;
-	case 'X': /* switch native path */
-		printk("dev:%llu - IO native path switch - ctrl failover\n", pxd_dev->dev_id);
-		pxd_debug_switch_nativepath(pxd_dev);
-		break;
 	case 's': /* suspend */
 		printk("dev:%llu - IO suspend\n", pxd_dev->dev_id);
 		pxd_suspend_io(pxd_dev);
@@ -1886,10 +1902,6 @@ static ssize_t pxd_debug_store(struct device *dev,
 	case 'r': /* resume */
 		printk("dev:%llu - IO resume\n", pxd_dev->dev_id);
 		pxd_resume_io(pxd_dev);
-		break;
-	case 'x': /* switch fastpath*/
-		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
-		pxd_debug_switch_fastpath(pxd_dev);
 		break;
 	case 'S': /* app suspend */
 		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);
