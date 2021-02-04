@@ -374,7 +374,7 @@ clone_and_map(struct fp_root_context *fproot) {
       BUG_ON("not expected here");
       break;
     default:
-      printk("blkmq fastpath: request %p: received unsupported request %#lx\n",
+      printk("blkmq fastpath: request %p: received unsupported request %#x\n",
              rq, req_op(rq));
 #ifndef __PX_BLKMQ__
       return -ENOTSUPP;
