@@ -144,7 +144,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #else
 // no 'op_flags' present, hence ignored, but pet the compiler for unused var
 #define BIO_SET_OP_ATTRS(b, op, flags) do {		\
-	(flags); \
+	(void)(flags); \
 	(b)->bi_rw = op; \
 } while (0)
 #endif
