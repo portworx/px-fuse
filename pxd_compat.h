@@ -124,7 +124,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
 	op_flags = bio_flags(bio);
 #else
-	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
+	op_flags = (bio->bi_opf & ~REQ_OP_MASK);
 #endif
 	return op_flags;
 }

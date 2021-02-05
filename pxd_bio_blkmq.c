@@ -145,8 +145,11 @@ void pxd_suspend_io(struct pxd_device *pxd_dev)
 {
     int curr = atomic_inc_return(&pxd_dev->fp.suspend);
     if (curr == 1) {
-        BUG_ON(!pxd_dev->disk || !pxd_dev->disk->queue);
-        blk_mq_freeze_queue(pxd_dev->disk->queue);
+        // it is possible to call suspend during initial creation with no disk,
+        // ignore as in any case, no IO can flow through.
+        if (pxd_dev->disk && pxd_dev->disk->queue) {
+            blk_mq_freeze_queue(pxd_dev->disk->queue);
+        }
         printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
     } else {
         printk("For pxd device %llu IO already suspended(%d)\n", pxd_dev->dev_id, curr);
@@ -161,9 +164,12 @@ void pxd_resume_io(struct pxd_device *pxd_dev)
 
     wakeup = (curr == 0);
     if (wakeup) {
+        // it is possible to call resume during initial creation with no disk,
+        // ignore as in any case, no IO can flow through.
+        if (pxd_dev->disk && pxd_dev->disk->queue) {
+            blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+        }
         printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
-        BUG_ON(!pxd_dev->disk || !pxd_dev->disk->queue);
-        blk_mq_unfreeze_queue(pxd_dev->disk->queue);
     } else {
         printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, curr);
     }
@@ -225,7 +231,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
   struct req_iterator rq_iter;
   struct bio *bio;
   int nr_bvec = 0;
-  unsigned op_flags = get_op_flags(rq->bio);
+  unsigned int op_flags = get_op_flags(rq->bio);
 
   BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
@@ -238,7 +244,6 @@ static int prep_root_bio(struct fp_root_context *fproot) {
   }
 
   rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
-
   bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
   if (!bio) {
     dump_allocs();
@@ -258,12 +263,13 @@ static int prep_root_bio(struct fp_root_context *fproot) {
   BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
   bio->bi_private = fproot;
 
-  BUG_ON((BIO_OP(rq->bio) | op_flags) != rq->cmd_flags);
+  pxd_printk("%s: rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
+			  __func__, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio), op_flags);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-  if (BIO_OP(rq->bio) != REQ_OP_FLUSH && BIO_OP(rq->bio) != REQ_OP_DISCARD) {
+  if ((BIO_OP(rq->bio) != REQ_OP_FLUSH) && (BIO_OP(rq->bio) != REQ_OP_DISCARD)) {
 #else
-  if (BIO_OP(rq->bio) & (REQ_FLUSH|REQ_DISCARD)) {
+  if (!(BIO_OP(rq->bio) & (REQ_FLUSH|REQ_DISCARD))) {
 #endif
     rq_for_each_segment(bv, rq, rq_iter) {
       unsigned len = bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len, BVEC(bv).bv_offset);
