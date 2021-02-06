@@ -391,7 +391,7 @@ clone_and_map(struct fp_root_context *fproot) {
 #else
   if (BIO_OP(rq->bio) & REQ_DISCARD) {
      BUG_ON("not expected here");
-  } else if (BIO_OP(rq->bio) & ~(REQ_WRITE|REQ_FLUSH|REQ_FUA)) {
+  } else if (BIO_OP(rq->bio) & (REQ_WRITE_SAME|REQ_SECURE)) {
      printk("blkmq fastpath: request %p: received unsupported request %#lx\n",
              rq, BIO_OP(rq->bio));
 #ifndef __PX_BLKMQ__
