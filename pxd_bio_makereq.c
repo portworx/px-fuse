@@ -176,7 +176,7 @@ int __fastpath_init(void)
     }
     ppxd_bio_set = &pxd_bio_set;
 #else
-    ppxd_bio_set = BIOSET_CREATE(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone));
+    ppxd_bio_set = BIOSET_CREATE(PXD_MIN_POOL_PAGES, offsetof(struct pxd_io_tracker, clone), BIOSET_NEED_BVECS);
 #endif
 
     if (!ppxd_bio_set) {
