@@ -278,17 +278,24 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 
 		fp->file[i] = f;
 
-		inode = f->f_inode;
+		inode = file_inode(f);
 		printk(KERN_INFO"device %lld:%d, inode %lu mode %#x\n", pxd_dev->dev_id, i, inode->i_ino, mode);
 		if (S_ISREG(inode->i_mode)) {
 			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
 					pxd_dev->dev_id, i, inode->i_ino);
+			// ensure block device is init'd, if not force it.
+                        if (!inode->i_sb->s_bdev) {
+				inode->i_sb->s_bdev  = bdget(inode->i_sb->s_dev);
+			} else {
+				bdgrab(inode->i_sb->s_bdev);
+			}
 		} else if (S_ISBLK(inode->i_mode)) {
 			printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
 				pxd_dev->dev_id, i, inode->i_ino);
 		} else {
 			printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
 				pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+			goto out_file_failed;
 		}
 	}
 
@@ -304,7 +311,12 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 out_file_failed:
 	fp->nfd = 0;
 	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) filp_close(fp->file[i], NULL);
+		if (fp->file[i] > 0) {
+			if (S_ISREG(file_inode(fp->file[i])->i_mode)) {
+				bdput(file_inode(fp->file[i])->i_sb->s_bdev);
+			}
+			filp_close(fp->file[i], NULL);
+		}
 	}
 	memset(fp->file, 0, sizeof(fp->file));
 	memset(fp->device_path, 0, sizeof(fp->device_path));

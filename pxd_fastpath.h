@@ -107,7 +107,13 @@ int remap_io_status(int status)
 static inline struct block_device *get_bdev(struct file *fileh) {
   struct address_space *mapping = fileh->f_mapping;
   struct inode *inode = mapping->host;
-  struct block_device *bdev = I_BDEV(inode);
+  struct block_device *bdev;
+
+  if (S_ISBLK(inode->i_mode)) {
+	bdev = I_BDEV(inode);
+  } else {
+	bdev = inode->i_sb->s_bdev;
+  }
 
   BUG_ON(!bdev);
   return bdev;
