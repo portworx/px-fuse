@@ -43,9 +43,11 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 #define BIO_OP(bio)   bio_op(bio)
 #define SUBMIT_BIO(bio) submit_bio(bio)
+#define REQ_OP(rq)  req_op(rq)
 #else
 #define BIO_OP(bio)   ((bio)->bi_rw)
 #define SUBMIT_BIO(bio)  submit_bio(((bio)->bi_rw & 1), bio)
+#define REQ_OP(rq)  rq->cmd_flags
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)

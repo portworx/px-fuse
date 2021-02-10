@@ -23,7 +23,7 @@ inline bool rq_is_special(struct request *rq) {
 }
 #else
 inline bool rq_is_special(struct request *rq) {
-  return (BIO_OP(rq->bio) & (REQ_DISCARD | REQ_FLUSH));
+  return (REQ_OP(rq) & REQ_DISCARD) || ((REQ_OP(rq) & WRITE_FLUSH) == WRITE_FLUSH);
 }
 #endif
 
@@ -523,11 +523,7 @@ static void fp_handle_specialops(struct fp_root_context *fproot) {
   struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
   struct request *rq = fproot_to_request(fproot);  // orig request
   struct page *pg = ZERO_PAGE(0);                  // global shared zero page
-#ifndef __PX_BLKMQ__
   int r = 0;
-#else
-  blk_status_t r = BLK_STS_OK;
-#endif
   int i;
   bool isflush = false;
 
@@ -542,61 +538,53 @@ static void fp_handle_specialops(struct fp_root_context *fproot) {
     atomic_inc(&pxd_dev->fp.nio_discard);
   }
 #else
-  if (BIO_OP(rq->bio) & REQ_FLUSH) {
+  if (REQ_OP(rq) & REQ_DISCARD) {
+    atomic_inc(&pxd_dev->fp.nio_discard);
+  } else if ((REQ_OP(rq) & WRITE_FLUSH) == WRITE_FLUSH) {
     atomic_inc(&pxd_dev->fp.nio_flush);
     isflush = true;
   } else {
-    atomic_inc(&pxd_dev->fp.nio_discard);
+    BUG_ON("unexpected condition");
   }
 #endif
 
   // submit flush/discard inline to each replica one at a time.
   for (i = 0; i < pxd_dev->fp.nfd; i++) {
-    int rc;
     struct file *file = pxd_dev->fp.file[i];
     struct block_device *bdev = get_bdev(file);
     struct request_queue *q = bdev_get_queue(bdev);
 
     if (isflush) {
-      rc = blkdev_issue_flush(bdev, 0, NULL);
+      r = blkdev_issue_flush(bdev, 0, NULL);
     } else if (blk_queue_discard(q)) {  // discard supported
-      rc = blkdev_issue_discard(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
+      r = blkdev_issue_discard(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
                                 GFP_NOIO, 0);
     } else if (bdev_write_same(bdev)) {
       // convert discard to write same
-      rc = blkdev_issue_write_same(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
+      r = blkdev_issue_write_same(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
                                    GFP_NOIO, pg);
     } else { // zero-out
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
-      rc = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
+      r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
                                 GFP_NOIO, 0);
 #else
-      rc = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
+      r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
                                 GFP_NOIO);
 #endif
     }
 
-    if (rc) {
-#ifndef __PX_BLKMQ__
-      r = rc;
-#else
-      r = BLK_STS_IOERR;
-#endif
+    if (r) {
       goto err;
     }
   }
 
   // all replicas completed good.
-#ifndef __PX_BLKMQ__
   r = 0;
-#else
-  r = BLK_STS_OK;
-#endif
 err:
   atomic_dec(&pxd_dev->ncount);
   atomic_inc(&pxd_dev->fp.ncomplete);
 #ifndef __PX_BLKMQ__
-  blk_end_request(rq, r, blk_rq_bytes(rq));
+  blk_end_request_all(rq, r);
   fuse_request_free(fproot_to_fuse_request(fproot));
 #else
   blk_mq_end_request(rq, errno_to_blk_status(r));
@@ -698,6 +686,7 @@ void fp_handle_io(struct work_struct *work) {
     return;
   }
 
+  BUG_ON(rq->bio == NULL);
   r = clone_and_map(fproot);
 #ifndef __PX_BLKMQ__
   if (r != 0) {

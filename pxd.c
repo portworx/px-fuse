@@ -991,7 +991,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		req = pxd_fuse_req(pxd_dev);
 		if (IS_ERR_OR_NULL(req)) {
 			spin_lock_irq(&pxd_dev->qlock);
-			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+			__blk_end_request_all(rq, -EIO);
 			continue;
 		}
 
@@ -1018,7 +1018,7 @@ static void pxd_rq_fn(struct request_queue *q)
 #endif
 			fuse_request_free(req);
 			spin_lock_irq(&pxd_dev->qlock);
-			__blk_end_request(rq, -EIO, blk_rq_bytes(rq));
+			__blk_end_request_all(rq, -EIO);
 			continue;
 		}
 
