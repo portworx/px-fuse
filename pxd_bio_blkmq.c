@@ -17,25 +17,25 @@
 #include "pxd_compat.h"
 #include "pxd_bio.h"
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
 inline bool rq_is_special(struct request *rq) {
-  return (req_op(rq) == REQ_OP_DISCARD) || (req_op(rq) == REQ_OP_FLUSH);
+  return (req_op(rq) == REQ_OP_DISCARD);
 }
 #else
 inline bool rq_is_special(struct request *rq) {
-  return (REQ_OP(rq) & REQ_DISCARD) || ((REQ_OP(rq) & WRITE_FLUSH) == WRITE_FLUSH);
+  return (REQ_OP(rq) & REQ_DISCARD);
 }
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
 static void end_clone_bio(struct bio *bio);
-static void stub_endio(struct bio* bio)
+static void stub_endio(struct bio *bio)
 #else
 static void end_clone_bio(struct bio *bio, int error);
-static void stub_endio(struct bio* bio, int error)
+static void stub_endio(struct bio *bio, int error)
 #endif
 {
-	BUG_ON("stub_endio called");
+  BUG_ON("stub_endio called");
 }
 static void clone_cleanup(struct fp_root_context *fproot);
 
@@ -99,9 +99,7 @@ static struct bio_set *ppxd_bio_set;
 #endif
 #define PXD_MIN_POOL_PAGES (128)
 
-
-int __fastpath_init(void)
-{
+int __fastpath_init(void) {
   printk(KERN_INFO "blkmq fastpath: inited\n");
 
   atomic_set(&nclones, 0);
@@ -130,8 +128,7 @@ int __fastpath_init(void)
   return 0;
 }
 
-void __fastpath_cleanup(void)
-{
+void __fastpath_cleanup(void) {
   printk(KERN_INFO "blkmq fastpath: cleaned up\n");
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
   bioset_exit(get_fpbioset());
@@ -140,39 +137,37 @@ void __fastpath_cleanup(void)
 #endif
 }
 
-
-void pxd_suspend_io(struct pxd_device *pxd_dev)
-{
-    int curr = atomic_inc_return(&pxd_dev->fp.suspend);
-    if (curr == 1) {
-        // it is possible to call suspend during initial creation with no disk,
-        // ignore as in any case, no IO can flow through.
-        if (pxd_dev->disk && pxd_dev->disk->queue) {
-            blk_mq_freeze_queue(pxd_dev->disk->queue);
-        }
-        printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
-    } else {
-        printk("For pxd device %llu IO already suspended(%d)\n", pxd_dev->dev_id, curr);
+void pxd_suspend_io(struct pxd_device *pxd_dev) {
+  int curr = atomic_inc_return(&pxd_dev->fp.suspend);
+  if (curr == 1) {
+    // it is possible to call suspend during initial creation with no disk,
+    // ignore as in any case, no IO can flow through.
+    if (pxd_dev->disk && pxd_dev->disk->queue) {
+      blk_mq_freeze_queue(pxd_dev->disk->queue);
     }
+    printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
+  } else {
+    printk("For pxd device %llu IO already suspended(%d)\n", pxd_dev->dev_id,
+           curr);
+  }
 }
 
+void pxd_resume_io(struct pxd_device *pxd_dev) {
+  bool wakeup;
+  int curr = atomic_dec_return(&pxd_dev->fp.suspend);
 
-void pxd_resume_io(struct pxd_device *pxd_dev)
-{
-    bool wakeup;
-    int curr = atomic_dec_return(&pxd_dev->fp.suspend);
-
-    wakeup = (curr == 0);
-    if (wakeup) {
-        // it is possible to call resume during initial creation with no disk,
-        // ignore as in any case, no IO can flow through.
-        if (pxd_dev->disk && pxd_dev->disk->queue) {
-            blk_mq_unfreeze_queue(pxd_dev->disk->queue);
-        }
-        printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
-    } else {
-        printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id, curr);
+  wakeup = (curr == 0);
+  if (wakeup) {
+    // it is possible to call resume during initial creation with no disk,
+    // ignore as in any case, no IO can flow through.
+    if (pxd_dev->disk && pxd_dev->disk->queue) {
+      blk_mq_unfreeze_queue(pxd_dev->disk->queue);
     }
+    printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
+  } else {
+    printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id,
+           curr);
+  }
 }
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev) {
@@ -194,7 +189,7 @@ void __pxd_abortfailQ(struct pxd_device *pxd_dev) {
 
 // no locking needed, @ios is a local list of IO to be reissued.
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
-                       int status) {
+                      int status) {
   while (!list_empty(ios)) {
     struct fp_root_context *fproot =
         list_first_entry(&pxd_dev->fp.failQ, struct fp_root_context, wait);
@@ -210,7 +205,7 @@ void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
       pxdmq_reroute_slowpath(req);
       continue;
     }
-    // If failover request failed, then route IO fail to user application as is.
+// If failover request failed, then route IO fail to user application as is.
 #ifndef __PX_BLKMQ__
     blk_end_request(req->rq, -EIO, blk_rq_bytes(req->rq));
     fuse_request_free(req);
@@ -235,6 +230,9 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 
   BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
+  // it is possible for sync request to carry no bio
+  if (!rq->bio) return 0;
+
   // single bio request
   if (rq->bio == rq->biotail) {
     fproot->bio = rq->bio;
@@ -251,7 +249,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
   }
 
   atomic_inc(&nrootbios);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
   bio->bi_iter.bi_sector = blk_rq_pos(rq);
   bio->bi_iter.bi_size = 0;
 #else
@@ -264,15 +262,17 @@ static int prep_root_bio(struct fp_root_context *fproot) {
   bio->bi_private = fproot;
 
   pxd_printk("%s: rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
-			  __func__, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio), op_flags);
+             __func__, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio), op_flags);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-  if ((BIO_OP(rq->bio) != REQ_OP_FLUSH) && (BIO_OP(rq->bio) != REQ_OP_DISCARD)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
+  if ((BIO_OP(rq->bio) != REQ_OP_FLUSH) &&
+      (BIO_OP(rq->bio) != REQ_OP_DISCARD)) {
 #else
-  if (!(BIO_OP(rq->bio) & (REQ_FLUSH|REQ_DISCARD))) {
+  if (!(BIO_OP(rq->bio) & (REQ_FLUSH | REQ_DISCARD))) {
 #endif
     rq_for_each_segment(bv, rq, rq_iter) {
-      unsigned len = bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len, BVEC(bv).bv_offset);
+      unsigned len = bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
+                                  BVEC(bv).bv_offset);
       BUG_ON(len != BVEC(bv).bv_len);
     }
   }
@@ -310,22 +310,32 @@ static void clone_cleanup(struct fp_root_context *fproot) {
   fproot->magic = ~FP_ROOT_MAGIC;
 }
 
-
-static struct bio *clone_root(struct fp_root_context *fproot,
-                              struct file *fileh) {
-  struct block_device *bdev = get_bdev(fileh);
+static struct bio *clone_root(struct fp_root_context *fproot, int i) {
   struct bio *clone_bio;
   struct fp_clone_context *cc;
+  struct request *rq = fproot_to_request(fproot);  // orig request
+  struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+  struct file *fileh = pxd_dev->fp.file[i];
+  struct block_device *bdev = get_bdev(fileh);
 
   BUG_ON(fproot->magic != FP_ROOT_MAGIC);
-  BUG_ON(!bdev);
-  BUG_ON(!fproot->bio);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
-  clone_bio = bio_clone_fast(fproot->bio, GFP_KERNEL, get_fpbioset());
+  if (!fproot->bio) {  // can only be flush request
+    clone_bio = bio_alloc_bioset(GFP_KERNEL, 0, get_fpbioset());
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
+    BUG_ON((REQ_OP(rq) & REQ_OP_FLUSH) != REQ_OP_FLUSH);
+    BIO_SET_OP_ATTRS(clone_bio, REQ_OP_FLUSH, REQ_FUA);
 #else
-  clone_bio = bio_clone_bioset(fproot->bio, GFP_KERNEL, get_fpbioset());
+    BUG_ON((REQ_OP(rq) & REQ_FLUSH) != REQ_FLUSH);
+    BIO_SET_OP_ATTRS(clone_bio, REQ_FLUSH, REQ_FUA);
 #endif
+  } else {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+    clone_bio = bio_clone_fast(fproot->bio, GFP_KERNEL, get_fpbioset());
+#else
+    clone_bio = bio_clone_bioset(fproot->bio, GFP_KERNEL, get_fpbioset());
+#endif
+  }
   if (!clone_bio) {
     printk(KERN_ERR "blkmq fastpath: No memory for clone context");
     return NULL;
@@ -338,14 +348,13 @@ static struct bio *clone_root(struct fp_root_context *fproot,
   fproot->clones = cc;
   BUG_ON(!cc->file);
 
-  BIO_SET_DEV(clone_bio, bdev);
+  if (S_ISBLK(get_mode(fileh))) BIO_SET_DEV(clone_bio, bdev);
   clone_bio->bi_private = fproot;
   clone_bio->bi_end_io = end_clone_bio;
 
   atomic_inc(&nclones);
   return clone_bio;
 }
-
 
 #ifndef __PX_BLKMQ__
 static int
@@ -368,16 +377,13 @@ clone_and_map(struct fp_root_context *fproot) {
   BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
   BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
-  // filter out only supported requests
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+// filter out only supported requests
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
   switch (req_op(rq)) {
     case REQ_OP_READ:
     case REQ_OP_WRITE:
-      break;
     case REQ_OP_FLUSH:
     case REQ_OP_DISCARD:
-      // all special requests are filtered before in entry point
-      BUG_ON("not expected here");
       break;
     default:
       printk("blkmq fastpath: request %p: received unsupported request %#x\n",
@@ -389,15 +395,13 @@ clone_and_map(struct fp_root_context *fproot) {
 #endif
   }
 #else
-  if (BIO_OP(rq->bio) & REQ_DISCARD) {
-     BUG_ON("not expected here");
-  } else if (BIO_OP(rq->bio) & (REQ_WRITE_SAME|REQ_SECURE)) {
-     printk("blkmq fastpath: request %p: received unsupported request %#lx\n",
-             rq, BIO_OP(rq->bio));
+  if (REQ_OP(rq) & (REQ_WRITE_SAME | REQ_SECURE)) {
+    printk("blkmq fastpath: request %p: received unsupported request %#lx\n",
+           rq, BIO_OP(rq->bio));
 #ifndef __PX_BLKMQ__
-     return -ENOTSUPP;
+    return -ENOTSUPP;
 #else
-     return BLK_STS_NOTSUPP;  // not supported
+    return BLK_STS_NOTSUPP;  // not supported
 #endif
   }
 #endif
@@ -406,22 +410,19 @@ clone_and_map(struct fp_root_context *fproot) {
   if (rc) {
     printk("blkmq fastpath: prep_root_bio failing %d\n", rc);
 #ifndef __PX_BLKMQ__
-	r = rc;
+    r = rc;
 #else
     r = BLK_STS_RESOURCE;
 #endif
     goto err;
   }
 
-  BUG_ON(fproot->bio == NULL);
   // prepare clone contexts
   for (i = 0; i < pxd_dev->fp.nfd; i++) {
-    struct file *file = pxd_dev->fp.file[i];
-
-    clone = clone_root(fproot, file);
+    clone = clone_root(fproot, i);
     if (!clone) {
 #ifndef __PX_BLKMQ__
-	  r = -ENOMEM;
+      r = -ENOMEM;
 #else
       r = BLK_STS_RESOURCE;
 #endif
@@ -429,8 +430,12 @@ clone_and_map(struct fp_root_context *fproot) {
     }
 
     clonerq[i] = clone;
-    // if this is read op, then request to one replica is sufficient.
-    if (req_op(rq) == REQ_OP_READ) {
+// if this is read op, then request to one replica is sufficient.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
+    if (REQ_OP(rq) == REQ_OP_READ) {
+#else
+    if (!(REQ_OP(rq) & REQ_WRITE)) {
+#endif
       i = 1;
       break;
     }
@@ -530,7 +535,7 @@ static void fp_handle_specialops(struct fp_root_context *fproot) {
   BUG_ON(fproot->magic != FP_ROOT_MAGIC);
   BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
   if (req_op(rq) == REQ_OP_FLUSH) {
     atomic_inc(&pxd_dev->fp.nio_flush);
     isflush = true;
@@ -554,22 +559,24 @@ static void fp_handle_specialops(struct fp_root_context *fproot) {
     struct block_device *bdev = get_bdev(file);
     struct request_queue *q = bdev_get_queue(bdev);
 
+    BUG_ON(!S_ISBLK(get_mode(file)));
+
     if (isflush) {
       r = blkdev_issue_flush(bdev, 0, NULL);
     } else if (blk_queue_discard(q)) {  // discard supported
       r = blkdev_issue_discard(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
-                                GFP_NOIO, 0);
+                               GFP_NOIO, 0);
     } else if (bdev_write_same(bdev)) {
       // convert discard to write same
       r = blkdev_issue_write_same(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
-                                   GFP_NOIO, pg);
-    } else { // zero-out
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
+                                  GFP_NOIO, pg);
+    } else {  // zero-out
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
       r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
-                                GFP_NOIO, 0);
+                               GFP_NOIO, 0);
 #else
       r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq), blk_rq_sectors(rq),
-                                GFP_NOIO);
+                               GFP_NOIO);
 #endif
     }
 
@@ -591,10 +598,10 @@ err:
 #endif
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-static void end_clone_bio(struct bio* bio)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+static void end_clone_bio(struct bio *bio)
 #else
-static void end_clone_bio(struct bio* bio, int error)
+static void end_clone_bio(struct bio *bio, int error)
 #endif
 {
   struct fp_clone_context *cc =
@@ -651,8 +658,8 @@ static void end_clone_bio(struct bio* bio, int error)
 
   // complete cleanup of all clones
   clone_cleanup(fproot);
-  // CAREFUL NOW - fproot will be lost once end_request below gets called
-  // finish the original request
+// CAREFUL NOW - fproot will be lost once end_request below gets called
+// finish the original request
 #ifndef __PX_BLKMQ__
   blk_end_request(rq, blkrc, blk_rq_bytes(rq));
   fuse_request_free(fproot_to_fuse_request(fproot));
@@ -663,7 +670,6 @@ static void end_clone_bio(struct bio* bio, int error)
   atomic_inc(&pxd_dev->fp.ncomplete);
   atomic_dec(&pxd_dev->ncount);
 }
-
 
 // entry point to handle IO
 void fp_handle_io(struct work_struct *work) {
@@ -681,12 +687,11 @@ void fp_handle_io(struct work_struct *work) {
   BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
   atomic_inc(&pxd_dev->ncount);
-  if (rq_is_special(rq)) {
+  if (pxd_dev->fp.blockio && rq_is_special(rq)) {
     fp_handle_specialops(fproot);
     return;
   }
 
-  BUG_ON(rq->bio == NULL);
   r = clone_and_map(fproot);
 #ifndef __PX_BLKMQ__
   if (r != 0) {
@@ -699,6 +704,5 @@ void fp_handle_io(struct work_struct *work) {
   }
 #endif
 }
-
 
 #endif

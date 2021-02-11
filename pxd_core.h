@@ -132,4 +132,19 @@ int write_allowed(mode_t curr) {
 	return ((curr & (O_RDWR | O_WRONLY)));
 }
 
+// are all replicas in block io
+static inline
+bool blockio(struct pxd_device *pxd_dev)
+{
+    int blockio = 0, i;
+
+    for (i=0; i<pxd_dev->fp.nfd; i++) {
+        if (S_ISBLK(get_mode(pxd_dev->fp.file[i]))) {
+            blockio++;
+        }
+    }
+
+    return (pxd_dev->fp.nfd != 0) && (blockio == pxd_dev->fp.nfd);
+}
+
 #endif /* _PXD_CORE_H_ */

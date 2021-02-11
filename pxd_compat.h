@@ -63,8 +63,7 @@
 #if defined(bio_set_dev)
 #define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
 #else
-#define BIO_SET_DEV(bio, bdev)  \
-	do { \
+#define BIO_SET_DEV(bio, bdev)  do { \
 		(bio)->bi_bdev = (bdev); \
 	} while (0)
 #endif
@@ -119,6 +118,8 @@
 static inline unsigned int get_op_flags(struct bio *bio)
 {
 	unsigned int op_flags;
+        if (!bio) return 0;
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
 	op_flags = 0; // Not present in older kernels
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)

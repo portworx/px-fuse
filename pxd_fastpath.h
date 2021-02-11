@@ -33,6 +33,7 @@ struct pxd_fastpath_extension {
 	atomic_t app_suspend; // userspace suspended IO
 	rwlock_t suspend_lock;
 	bool fastpath;
+        bool blockio; // all replicas in block io
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	struct workqueue_struct *wq;
@@ -107,15 +108,12 @@ int remap_io_status(int status)
 static inline struct block_device *get_bdev(struct file *fileh) {
   struct address_space *mapping = fileh->f_mapping;
   struct inode *inode = mapping->host;
-  struct block_device *bdev;
+  struct block_device *bdev = NULL;
 
   if (S_ISBLK(inode->i_mode)) {
 	bdev = I_BDEV(inode);
-  } else {
-	bdev = inode->i_sb->s_bdev;
   }
 
-  BUG_ON(!bdev);
   return bdev;
 }
 
