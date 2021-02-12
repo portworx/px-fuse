@@ -1008,7 +1008,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
-
+		atomic_inc(&pxd_dev->fp.nslowPath);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 			    pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
@@ -1080,6 +1080,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		queue_work(pxd_dev->fp.wq, &fproot->work);
 		return BLK_STS_OK;
 	}
+	atomic_inc(&pxd_dev->fp.nslowPath);
 
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
 		pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
