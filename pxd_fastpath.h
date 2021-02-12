@@ -33,7 +33,6 @@ struct pxd_fastpath_extension {
 	atomic_t app_suspend; // userspace suspended IO
 	rwlock_t suspend_lock;
 	bool fastpath;
-        bool blockio; // all replicas in block io
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	struct workqueue_struct *wq;

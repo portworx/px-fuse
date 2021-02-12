@@ -294,7 +294,6 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	}
 
 	pxd_dev->fp.fastpath = true;
-        pxd_dev->fp.blockio = blockio(pxd_dev);
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
