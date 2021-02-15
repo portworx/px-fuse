@@ -762,8 +762,13 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	 * we return to userspace.
 	 */
 	if (S_ISREG(file_inode(file)->i_mode)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+		__sb_start_write(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE);
+#else
 		__sb_start_write(file_inode(file)->i_sb,
 			SB_FREEZE_WRITE, true);
+#endif
 		__sb_writers_release(file_inode(file)->i_sb,
 			SB_FREEZE_WRITE);
 	}
@@ -1027,8 +1032,13 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		 * we return to userspace.
 		 */
 		if (S_ISREG(file_inode(file)->i_mode)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+			__sb_start_write(file_inode(file)->i_sb,
+				SB_FREEZE_WRITE);
+#else
 			__sb_start_write(file_inode(file)->i_sb,
 				SB_FREEZE_WRITE, true);
+#endif
 			__sb_writers_release(file_inode(file)->i_sb,
 				SB_FREEZE_WRITE);
 		}
