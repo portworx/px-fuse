@@ -65,7 +65,7 @@
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 #define BIO_ENDIO(bio, err) do {                \
-    bio->bi_status = err;                       \
+    (bio)->bi_status = err;                       \
     bio_endio(bio);                             \
 } while (0)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
