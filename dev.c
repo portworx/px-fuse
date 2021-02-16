@@ -477,6 +477,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 
 	memset(&add_ext, 0, sizeof(add_ext));
 	memcpy(&add_ext, &add, sizeof(add));
+	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
 	return pxd_add(conn, &add_ext);
 }
 

@@ -53,10 +53,10 @@ static
 int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff_t *pos)
 {
 	ssize_t bw;
-	mm_segment_t old_fs = get_fs();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct iov_iter i;
 #else
+	mm_segment_t old_fs = get_fs();
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
 #endif
 
@@ -66,7 +66,6 @@ int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff_t 
 	if (unlikely(bvec->bv_len != PXD_LBS)) {
 		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
 	}
-	set_fs(KERNEL_DS);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	iov_iter_bvec(&i, WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
@@ -83,10 +82,11 @@ int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff_t 
 	bw = vfs_iter_write(file, &i, pos);
 	file_end_write(file);
 #else
+	set_fs(KERNEL_DS);
 	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
 	kunmap(bvec->bv_page);
-#endif
 	set_fs(old_fs);
+#endif
 
 	if (likely(bw == bvec->bv_len)) {
 		return 0;

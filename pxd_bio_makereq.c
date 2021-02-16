@@ -509,7 +509,7 @@ static void pxd_complete_io(struct bio *bio, int error)
   // debug condition for force fail
   if (pxd_dev->fp.force_fail) blkrc = -EIO;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 1)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
   bio_end_io_acct(bio, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) &&  \
@@ -613,6 +613,7 @@ static void pxd_process_io(struct pxd_io_tracker *head) {
 
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
 blk_qc_t pxd_bio_make_request_entryfn(struct bio *bio) {
   struct request_queue *q = bio->bi_disk->queue;
   struct pxd_device *pxd_dev = bio->bi_disk->private_data;
@@ -649,6 +650,7 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio)
     return BLK_QC_RETVAL;
   }
 
+  // is a fastpath device
   if (rw != READ && !write_allowed(pxd_dev->mode)) {
     printk_ratelimited(KERN_ERR "px device %llu is read only, failing IO.\n",
                        pxd_dev->dev_id);
@@ -736,7 +738,7 @@ blk_queue_split(q, &bio, q->bio_split);
     return BLK_QC_RETVAL;
   }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 1)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
   head->start = bio_start_io_acct(bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) &&  \
