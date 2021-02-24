@@ -1040,8 +1040,10 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq))
+	if (BLK_RQ_IS_PASSTHROUGH(rq) ||
+		(!fc->allow_disconnected && !fc->connected))
 		return BLK_STS_IOERR;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
@@ -1062,7 +1064,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+	fuse_request_send_nowait(fc, req, false);
 
 	return BLK_STS_OK;
 }
