@@ -2101,6 +2101,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	file->private_data = fc;
 
 	pxdctx_set_connected(ctx, true);
+	wmb();
 
 	++ctx->open_seq;
 
@@ -2124,6 +2125,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		pxd_printk("%s: not opened\n", __func__);
 	} else {
 		ctx->fc.connected = 0;
+		wmb();
 	}
 
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
