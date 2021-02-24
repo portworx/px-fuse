@@ -2155,6 +2155,7 @@ static void pxd_abort_context(struct work_struct *work)
 		ctx->name, ctx->id);
 
 	fc->allow_disconnected = 0;
+	wmb();
 
 	/* Let other threads see the value of allow_disconnected. */
 	synchronize_rcu();
