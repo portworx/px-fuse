@@ -107,20 +107,19 @@ static u64 fuse_get_unique(struct fuse_conn *fc)
 	struct fuse_per_cpu_ids *my_ids;
 	u64 uid;
 	int num_alloc;
-	unsigned long flags;
 
 	int cpu = get_cpu();
 
 	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 
 	if (unlikely(my_ids->num_free_ids == 0)) {
-		spin_lock_irqsave(&fc->lock, flags);
+		spin_lock(&fc->lock);
 		BUG_ON(fc->num_free_ids == 0);
 		num_alloc = min(fc->num_free_ids, (u32)FUSE_MAX_PER_CPU_IDS / 2);
 		memcpy(my_ids->free_ids, &fc->free_ids[fc->num_free_ids - num_alloc],
 			num_alloc * sizeof(u64));
 		fc->num_free_ids -= num_alloc;
-		spin_unlock_irqrestore(&fc->lock, flags);
+		spin_unlock(&fc->lock);
 
 		my_ids->num_free_ids = num_alloc;
 	}
@@ -143,19 +142,18 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 	struct fuse_per_cpu_ids *my_ids;
 	int num_free;
 	int cpu = get_cpu();
-	unsigned long flags;
 
 	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 
 	if (unlikely(my_ids->num_free_ids == FUSE_MAX_PER_CPU_IDS)) {
 		num_free = FUSE_MAX_PER_CPU_IDS / 2;
-		spin_lock_irqsave(&fc->lock, flags);
+		spin_lock(&fc->lock);
 		BUG_ON(fc->num_free_ids + num_free > FUSE_MAX_REQUEST_IDS);
 		memcpy(&fc->free_ids[fc->num_free_ids],
 			&my_ids->free_ids[my_ids->num_free_ids - num_free],
 			num_free * sizeof(u64));
 		fc->num_free_ids += num_free;
-		spin_unlock_irqrestore(&fc->lock, flags);
+		spin_unlock(&fc->lock);
 
 		my_ids->num_free_ids -= num_free;
 	}
@@ -255,7 +253,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool f
 static bool request_pending(struct fuse_conn *fc)
 {
 	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
-	return smp_load_acquire(&cb->r.read) != smp_load_acquire(&cb->r.write);
+	return cb->r.read != cb->r.write;
 }
 
 /* Wait until a request is available on the pending list */
@@ -386,7 +384,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	}
 
 retry:
-	read = smp_load_acquire(&cb->r.read);
+	read = cb->r.read;
 	write = smp_load_acquire(&cb->r.write);
 
 	while (read != write && remain >= sizeof(struct rdwr_in)) {
@@ -1316,7 +1314,7 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	struct fuse_req **resend_reqs;
 	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
 
-	u32 read = smp_load_acquire(&cb->r.read);	/* ok to access read part since user space is
+	u32 read = cb->r.read;	/* ok to access read part since user space is
  				* inactive */
 	u32 write;
 	u64 sequence;
@@ -1370,7 +1368,7 @@ int fuse_restart_requests(struct fuse_conn *fc)
 		}
 	}
 	/* Update write index if it changed because of removing completion entries. */
-	smp_store_release(&cb->r.write, write);
+	cb->r.write = write;
 	cb->w.write = write;
 	spin_unlock(&cb->w.lock);
 
@@ -1402,7 +1400,7 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	spin_lock(&cb->w.lock);
 	/* update the reader part */
 	cb->w.read = read;
-	smp_store_release(&cb->r.read, read);
+	cb->r.read = read;
 	spin_unlock(&cb->w.lock);
 
 	spin_lock(&fc->lock);

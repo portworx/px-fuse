@@ -233,7 +233,7 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 
 	struct fuse_user_request *req;
 
-	uint32_t read = smp_load_acquire(&cb->r.read);
+	uint32_t read = cb->r.read;
 	uint32_t write = smp_load_acquire(&cb->r.write);
 
 	while (read != write) {
@@ -1040,10 +1040,8 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
-	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq) ||
-		(!fc->allow_disconnected && !fc->connected)) 
+	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
