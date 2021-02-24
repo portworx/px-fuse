@@ -983,6 +983,7 @@ static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
 	for (;;) {
 		struct request *rq;
@@ -993,7 +994,8 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (BLK_RQ_IS_PASSTHROUGH(rq)) {
+		if (BLK_RQ_IS_PASSTHROUGH(rq) ||
+				(!fc->allow_disconnected && !fc->connected)) {
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
@@ -1028,7 +1030,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+		fuse_request_send_nowait(fc, req, false);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }

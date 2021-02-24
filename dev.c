@@ -227,25 +227,16 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool f
 	req->in.unique = fuse_get_unique(fc);
 	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
-	/*
-	 * Ensures checking the value of allow_disconnected and adding request to
-	 * queue is done atomically.
-	 */
-	rcu_read_lock();
-
 	if (force) {
 		queue_request(fc, req);
 		if (fc->connected || fc->allow_disconnected) {
 			fuse_conn_wakeup(fc);
 		}
-		rcu_read_unlock();
 	} else if (fc->connected || fc->allow_disconnected) {
 		queue_request(fc, req);
-		rcu_read_unlock();
 
 		fuse_conn_wakeup(fc);
 	} else {
-		rcu_read_unlock();
 		request_end(fc, req, -ENOTCONN);
 	}
 }
