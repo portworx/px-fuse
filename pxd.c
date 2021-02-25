@@ -761,11 +761,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
-	  pxd_dev->tag_set.queue_depth = PXD_MAX_QDEPTH;
+	  pxd_dev->tag_set.queue_depth = add->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	  pxd_dev->tag_set.nr_hw_queues = 8;
-	  pxd_dev->tag_set.queue_depth = 128;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
