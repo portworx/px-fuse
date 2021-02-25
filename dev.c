@@ -141,7 +141,13 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 {
 	struct fuse_per_cpu_ids *my_ids;
 	int num_free;
-	int cpu = get_cpu();
+	int cpu;
+
+	if (uid == 0) {
+		return;
+	}
+
+	cpu = get_cpu();
 
 	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 
@@ -175,6 +181,9 @@ static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 	u32 write;
 	struct rdwr_in *rdwr;
 	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
+
+	req->in.unique = fuse_get_unique(fc);
+	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	spin_lock(&cb->w.lock);
 	write = cb->w.write;
@@ -222,24 +231,16 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 	if (shouldfree) fuse_request_free(req);
 }
 
-void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req, bool force)
+void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
-	req->in.unique = fuse_get_unique(fc);
-	fc->request_map[req->in.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
-
 	/*
 	 * Ensures checking the value of allow_disconnected and adding request to
 	 * queue is done atomically.
 	 */
 	rcu_read_lock();
 
-	if (force) {
-		queue_request(fc, req);
-		if (fc->connected || fc->allow_disconnected) {
-			fuse_conn_wakeup(fc);
-		}
-		rcu_read_unlock();
-	} else if (fc->connected || fc->allow_disconnected) {
+	// 'allow_disconnected' check subsumes 'connected' as well
+	if (READ_ONCE(fc->allow_disconnected)) {
 		queue_request(fc, req);
 		rcu_read_unlock();
 
@@ -1267,8 +1268,8 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc)
 void fuse_abort_conn(struct fuse_conn *fc)
 {
 	spin_lock(&fc->lock);
-	if (fc->connected) {
-		fc->connected = 0;
+	if (READ_ONCE(fc->connected)) {
+		WRITE_ONCE(fc->connected, 0);
 		fuse_end_queued_requests(fc);
 		wake_up_all(&fc->waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
@@ -1281,7 +1282,7 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 	struct fuse_conn *fc = fuse_get_conn(file);
 	if (fc) {
 		spin_lock(&fc->lock);
-		fc->connected = 0;
+		WRITE_ONCE(fc->connected, 0);
 		fuse_end_queued_requests(fc);
 		spin_unlock(&fc->lock);
 		fuse_conn_put(fc);
