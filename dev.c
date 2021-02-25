@@ -239,7 +239,8 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	 */
 	rcu_read_lock();
 
-	if (READ_ONCE(fc->connected) || READ_ONCE(fc->allow_disconnected)) {
+	// 'allow_disconnected' check subsumes 'connected' as well
+	if (READ_ONCE(fc->allow_disconnected)) {
 		queue_request(fc, req);
 		rcu_read_unlock();
 
