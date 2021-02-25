@@ -994,8 +994,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (BLK_RQ_IS_PASSTHROUGH(rq) ||
-				(!READ_ONCE(fc->allow_disconnected) && !READ_ONCE(fc->connected))) {
+		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
@@ -1044,8 +1043,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq) ||
-		(!READ_ONCE(fc->allow_disconnected) && !READ_ONCE(fc->connected)))
+	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
 		return BLK_STS_IOERR;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
@@ -2097,7 +2095,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	WRITE_ONCE(fc->connected, 1);
 	spin_unlock(&ctx->lock);
 
-	fc->allow_disconnected = 1;
+	WRITE_ONCE(fc->allow_disconnected, 1);
 	file->private_data = fc;
 
 	pxdctx_set_connected(ctx, true);
