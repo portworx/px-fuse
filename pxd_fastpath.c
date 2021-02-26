@@ -201,10 +201,10 @@ static int _pxd_bio_discard(struct pxd_device *pxd_dev, struct file *file, struc
 static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, loff_t *pos)
 {
 	ssize_t bw;
-	mm_segment_t old_fs = get_fs();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,0,0)
 	struct iov_iter i;
 #else
+	mm_segment_t old_fs = get_fs();
 	void *kaddr = kmap(bvec->bv_page) + bvec->bv_offset;
 #endif
 
@@ -214,7 +214,6 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	if (unlikely(bvec->bv_len != PXD_LBS)) {
 		printk(KERN_ERR"Unaligned block writes %d bytes\n", bvec->bv_len);
 	}
-	set_fs(KERNEL_DS);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
 	iov_iter_bvec(&i, WRITE, bvec, 1, bvec->bv_len);
 	file_start_write(file);
@@ -231,10 +230,11 @@ static int _pxd_write(uint64_t dev_id, struct file *file, struct bio_vec *bvec, 
 	bw = vfs_iter_write(file, &i, pos);
 	file_end_write(file);
 #else
+	set_fs(KERNEL_DS);
 	bw = vfs_write(file, kaddr, bvec->bv_len, pos);
 	kunmap(bvec->bv_page);
-#endif
 	set_fs(old_fs);
+#endif
 
 	if (likely(bw == bvec->bv_len)) {
 		return 0;
@@ -514,7 +514,7 @@ static void pxd_complete_io(struct bio* bio, int error)
 	// debug condition for force fail
 	if (pxd_dev->fp.force_fail) blkrc = -EIO;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
 	bio_end_io_acct(bio, iot->start);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) &&  \
@@ -1293,6 +1293,7 @@ out_file_failed:
 
 /* fast path make request function, io entry point */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
 blk_qc_t pxd_make_request_fastpath(struct bio *bio)
 {
 	struct request_queue *q = bio->bi_disk->queue;
@@ -1433,7 +1434,7 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	iot->start = bio_start_io_acct(bio);
+	head->start = bio_start_io_acct(bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))

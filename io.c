@@ -790,8 +790,13 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	 * we return to userspace.
 	 */
 	if (S_ISREG(file_inode(file)->i_mode)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+		__sb_start_write(file_inode(file)->i_sb,
+			SB_FREEZE_WRITE);
+#else
 		__sb_start_write(file_inode(file)->i_sb,
 			SB_FREEZE_WRITE, true);
+#endif
 		__sb_writers_release(file_inode(file)->i_sb,
 			SB_FREEZE_WRITE);
 	}
@@ -1055,8 +1060,13 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 		 * we return to userspace.
 		 */
 		if (S_ISREG(file_inode(file)->i_mode)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+			__sb_start_write(file_inode(file)->i_sb,
+				SB_FREEZE_WRITE);
+#else
 			__sb_start_write(file_inode(file)->i_sb,
 				SB_FREEZE_WRITE, true);
+#endif
 			__sb_writers_release(file_inode(file)->i_sb,
 				SB_FREEZE_WRITE);
 		}
@@ -1585,8 +1595,12 @@ restart:
 #else
 				kthread_use_mm(cur_mm);
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+				old_fs = force_uaccess_begin();
+#else
 				old_fs = get_fs();
 				set_fs(USER_DS);
+#endif
 			}
 		}
 
@@ -1666,7 +1680,11 @@ restart:
 	}
 
 	if (cur_mm) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+		force_uaccess_end(old_fs);
+#else
 		set_fs(old_fs);
+#endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		unuse_mm(cur_mm);
 #else
@@ -1928,8 +1946,13 @@ static int io_sq_thread(void *data)
 	unsigned inflight;
 	unsigned long timeout;
 
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	old_fs = force_uaccess_begin();
+#else
 	old_fs = get_fs();
 	set_fs(USER_DS);
+#endif
 
 	pr_info("%s: started to %d", __func__, ctx->sq_thread_idle);
 
@@ -2031,7 +2054,11 @@ static int io_sq_thread(void *data)
 		io_commit_sqring(ctx);
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	force_uaccess_end(old_fs);
+#else
 	set_fs(old_fs);
+#endif
 	if (cur_mm) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		unuse_mm(cur_mm);
