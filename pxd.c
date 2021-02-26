@@ -295,6 +295,9 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+	.submit_bio		= pxd_make_request_fastpath,
+#endif
 };
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
@@ -1028,8 +1031,12 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 	spin_unlock(&pxd_dev->lock);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	revalidate_disk_size(pxd_dev->disk, true);
+#else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
+#endif
 	put_device(&pxd_dev->dev);
 
 	return 0;
