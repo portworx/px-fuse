@@ -286,10 +286,6 @@ ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_siz
 ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 
-// fastpath extension
-ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path);
-int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
-
 void fuse_request_init(struct fuse_req *req);
 
 void fuse_convert_zero_writes(struct fuse_req *req);
