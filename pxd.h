@@ -61,8 +61,8 @@ enum pxd_opcode {
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
 	PXD_ADD_EXT,		/**< add device with extended info to kernel */
-	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
-	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
+	PXD_DEPRECATE_1,    /**< deprecated */
+	PXD_DEPRECATE_0,   /**< deprecated */
 	PXD_GET_FEATURES,   /**< get features */
 	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_SUSPEND,		/**< IO suspend */

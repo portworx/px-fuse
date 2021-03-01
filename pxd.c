@@ -789,6 +789,7 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
 	struct list_head ios;
+	unsigned long flags;
 
 	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
@@ -798,11 +799,13 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	if (req->in.opcode == PXD_FAILOVER_TO_USERSPACE) {
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
-		spin_lock(&pxd_dev->fp.fail_lock);
+		disableFastPath(pxd_dev, true);
+
+		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
 		list_splice(&pxd_dev->fp.failQ, &ios);
 		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
 		pxd_dev->fp.active_failover = false;
-		spin_unlock(&pxd_dev->fp.fail_lock);
+		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 	}
 
 	// reopen the suspended device
@@ -857,7 +860,7 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 	}
 
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
-		return -EBUSY;
+		return 0; // already initiated, skip it.
 	}
 
 	rc = pxd_request_suspend_internal(pxd_dev, false, true);
@@ -1525,65 +1528,6 @@ static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_
 		return -EINVAL;
 	}
 	return pxd_init_fastpath_target(pxd_dev, update_path);
-}
-
-ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path)
-{
-	bool found = false;
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	int err;
-	struct pxd_device *pxd_dev;
-
-	spin_lock(&ctx->lock);
-	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if ((pxd_dev->dev_id == update_path->dev_id) && !pxd_dev->removing) {
-			spin_lock(&pxd_dev->lock);
-			found = true;
-			break;
-		}
-	}
-	spin_unlock(&ctx->lock);
-
-	if (!found) {
-		return -ENOENT;
-	}
-
-	err = __pxd_update_path(pxd_dev, update_path);
-	spin_unlock(&pxd_dev->lock);
-	return err;
-}
-
-
-int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out *fp)
-{
-	bool found = false;
-	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	struct pxd_device *pxd_dev;
-
-	printk(KERN_WARNING"device %llu, set fastpath enable %d, cleanup %d\n",
-			fp->dev_id, fp->enable, fp->cleanup);
-	spin_lock(&ctx->lock);
-	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if ((pxd_dev->dev_id == fp->dev_id) && !pxd_dev->removing) {
-			spin_lock(&pxd_dev->lock);
-			found = true;
-			break;
-		}
-	}
-	spin_unlock(&ctx->lock);
-
-	if (!found) {
-		return -ENOENT;
-	}
-
-	if (fp->enable) {
-		enableFastPath(pxd_dev, fp->cleanup);
-	} else {
-		disableFastPath(pxd_dev, false);
-	}
-
-	spin_unlock(&pxd_dev->lock);
-	return 0;
 }
 
 static struct bus_type pxd_bus_type = {
