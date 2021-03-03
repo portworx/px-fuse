@@ -789,7 +789,6 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 {
 	struct pxd_device *pxd_dev = req->pxd_dev;
 	struct list_head ios;
-	unsigned long flags;
 
 	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
@@ -799,13 +798,11 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	if (req->in.opcode == PXD_FAILOVER_TO_USERSPACE) {
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
-		disableFastPath(pxd_dev, true);
-
-		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		spin_lock(&pxd_dev->fp.fail_lock);
 		list_splice(&pxd_dev->fp.failQ, &ios);
 		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
 		pxd_dev->fp.active_failover = false;
-		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+		spin_unlock(&pxd_dev->fp.fail_lock);
 	}
 
 	// reopen the suspended device
@@ -860,7 +857,7 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 	}
 
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
-		return 0; // already initiated, skip it.
+		return -EBUSY;
 	}
 
 	rc = pxd_request_suspend_internal(pxd_dev, false, true);
