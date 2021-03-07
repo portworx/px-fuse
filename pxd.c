@@ -379,6 +379,12 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
+};
+
+static const struct block_device_operations pxd_bd_fp_ops = {
+	.owner			= THIS_MODULE,
+	.open			= pxd_open,
+	.release		= pxd_release,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	.submit_io		= pxd_make_request_fastpath,
 #endif
@@ -388,7 +394,11 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
+		part_stat_lock();
+		part_stat_inc(pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(pxd_dev->disk->part0, sectors[rw], count);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
 		part_stat_lock();
 		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
 		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
@@ -1041,11 +1051,11 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	pxd_printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
 		   "flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
-		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		(unsigned long long)(blk_rq_pos(rq) * SECTOR_SIZE), blk_rq_bytes(rq),
 		rq->nr_phys_segments, rq->cmd_flags);
 
 	fuse_request_init(req);
@@ -1100,6 +1110,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #else
 	if (!pxd_dev->using_blkque) {
 		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
+		disk->fops = &pxd_bd_fp_ops;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
@@ -1447,8 +1458,32 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 	spin_unlock(&pxd_dev->lock);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+{
+	// open code here, as interface unexported
+	loff_t disk_size, bdev_size;
+	struct block_device *bdev = pxd_dev->disk->part0;
+
+	if (!bdev) goto skipout;
+	spin_lock(&bdev->bd_size_lock);
+	disk_size = (loff_t) get_capacity(pxd_dev->disk) << 9;
+	bdev_size = i_size_read(bdev->bd_inode);
+	// we never allow shrinking
+	if (disk_size != bdev_size) {
+		printk(KERN_INFO
+		       "%s: detected capacity change from %lld to %lld\n",
+		       pxd_dev->disk->disk_name, bdev_size, disk_size);
+		i_size_write(bdev->bd_inode, disk_size);
+	}
+	spin_unlock(&bdev->bd_size_lock);
+}
+skipout:
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	revalidate_disk_size(pxd_dev->disk, true);
+#else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
+#endif
 	put_device(&pxd_dev->dev);
 
 	return 0;
