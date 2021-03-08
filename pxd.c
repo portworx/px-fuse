@@ -386,7 +386,7 @@ static const struct block_device_operations pxd_bd_fp_ops = {
 	.open			= pxd_open,
 	.release		= pxd_release,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-	.submit_io		= pxd_make_request_fastpath,
+	.submit_bio		= pxd_make_request_fastpath,
 #endif
 };
 
