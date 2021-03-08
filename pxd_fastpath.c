@@ -492,8 +492,8 @@ static void pxd_complete_io(struct bio* bio, int error)
 		blkrc = error;
 #endif
 
-	if (blkrc != 0) {
-		printk_ratelimited("FAILED IO %s (err=%d): dev m %d g %lld %s at %lld len %d bytes %d pages "
+	if (1) {// if (blkrc != 0) {
+		printk_ratelimited("COMPLETE IO %s (err=%d): dev m %d g %lld %s at %lld len %d bytes %d pages "
 				"flags 0x%lx\n", BDEVNAME(bio, b), blkrc,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
@@ -1327,6 +1327,13 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 		bio_io_error(bio);
 		return BLK_QC_RETVAL;
 	}
+
+	printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+			"flags 0x%x op_flags 0x%x\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			(unsigned long long)(BIO_SECTOR(bio) * SECTOR_SIZE), BIO_SIZE(bio),
+			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
 
 	/*
 	 * Use blk_queue_split() to ensure queue limits are always honoured.

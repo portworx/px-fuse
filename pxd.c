@@ -447,7 +447,7 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req)
 {
 	atomic_dec(&req->pxd_dev->ncount);
 	pxd_check_q_decongested(req->pxd_dev);
-	pxd_printk("%s: receive reply to %px(%lld) at %lld\n",
+	printk("%s: receive reply to %px(%lld) at %lld\n",
 			__func__, req, req->in.unique,
 			req->pxd_rdwr_in.offset);
 }
@@ -933,11 +933,11 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	printk("%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
 			"flags 0x%x op_flags 0x%x\n", __func__,
 			pxd_dev->minor, pxd_dev->dev_id,
 			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
+			(unsigned long long)(BIO_SECTOR(bio) * SECTOR_SIZE), BIO_SIZE(bio),
 			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
 
 	req = pxd_fuse_req(pxd_dev);
@@ -962,6 +962,13 @@ void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
 	}
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req, false);
+	printk("submitted IO %s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+			"flags 0x%x op_flags 0x%x\n", __func__,
+			pxd_dev->minor, pxd_dev->dev_id,
+			bio_data_dir(bio) == WRITE ? "wr" : "rd",
+			(unsigned long long)(BIO_SECTOR(bio) * SECTOR_SIZE), BIO_SIZE(bio),
+			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
+
 	return BLK_QC_RETVAL;
 }
 
