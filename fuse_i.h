@@ -46,7 +46,8 @@ struct fuse_conn;
 struct pxd_device;
 struct fuse_req {
 	/** Need to fetch state of device and keep counters updated */
-	struct pxd_device *pxd_dev;
+	bool fastpath;
+	// struct pxd_device *pxd_dev;
 
 	/** The request input header */
 	struct fuse_in_header in;

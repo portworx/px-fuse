@@ -352,7 +352,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 
 void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (!req->pxd_dev->using_blkque) {
+	if (req->fastpath) {
 		__fuse_convert_zero_writes_fastpath(req);
 	} else {
 		__fuse_convert_zero_writes_slowpath(req);
@@ -700,7 +700,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (!req->pxd_dev->using_blkque) {
+	if (req->fastpath) {
 		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
@@ -971,7 +971,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return -ENOENT;
 	}
 
-	if (!req->pxd_dev->using_blkque) {
+	if (req->fastpath) {
 		err = __fuse_dev_do_write_fastpath(fc, req, iter);
 	} else {
 		err = __fuse_dev_do_write_slowpath(fc, req, iter);
@@ -1061,7 +1061,7 @@ void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *u
 		iov_iter_init(&iter, READ, data_iov, ureq->len,
 			iov_length(data_iov, ureq->len));
 
-		ret = !req->pxd_dev->using_blkque ?
+		ret = req->fastpath ?
 		      __fuse_dev_do_write_fastpath(fc, req, &iter) :
 		      __fuse_dev_do_write_slowpath(fc, req, &iter);
 

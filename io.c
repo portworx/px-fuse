@@ -969,7 +969,7 @@ static int io_import_bvec(struct io_kiocb *req, int *rw,
 		return -ENOENT;
 	}
 
-	if (!freq->pxd_dev->using_blkque) {
+	if (freq->fastpath) {
 		return build_bvec2(freq, rw, sqe_off, sqe_len, iovec, iter);
 	}
 
