@@ -29,6 +29,12 @@
 #define PXD_IOC_GET_VERSION		_IO(PXD_IOCTL_MAGIC, 2)		/* 0x505802 */
 #define PXD_IOC_INIT		_IO(PXD_IOCTL_MAGIC, 3)		/* 0x505803 */
 #define PXD_IOC_RESIZE			_IO(PXD_IOCTL_MAGIC, 4)		/* 0x505804 */
+#define PXD_IOC_RUN_USER_QUEUE	_IO(PXD_IOCTL_MAGIC, 5)		/* 0x505805 */
+#define PXD_IOC_RUN_IO_QUEUE	_IO(PXD_IOCTL_MAGIC, 6)		/* 0x505806 */
+#define PXD_IOC_REGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 7)		/* 0x505807 */
+#define PXD_IOC_UNREGISTER_FILE	_IO(PXD_IOCTL_MAGIC, 8)		/* 0x505808 */
+#define PXD_IOC_FPCLEANUP		_IO(PXD_IOCTL_MAGIC, 9)		/* 0x505809 */
+#define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
@@ -57,6 +63,13 @@ enum pxd_opcode {
 	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
 	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
 	PXD_GET_FEATURES,   /**< get features */
+	PXD_COMPLETE,		/**< complete kernel operation */
+	PXD_SUSPEND,		/**< IO suspend */
+	PXD_RESUME,			/**< IO resume */
+	PXD_FAILOVER_TO_USERSPACE,   /**< Failover requests suspend IO and send in a marker req
+						  from kernel on a suspended device */
+	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
+						  from kernel on a suspended device */
 	PXD_LAST,
 };
 
@@ -72,7 +85,8 @@ enum pxd_opcode {
 /** Device identification passed from kernel on initialization */
 struct pxd_dev_id {
 	uint32_t local_minor; 	/**< minor number assigned by kernel */
-	uint32_t pad;
+	uint8_t pad[3];
+	uint8_t fastpath:1, blkmq_device:1, suspend:1, unused:5;
 	uint64_t dev_id;	/**< global device id */
 	uint64_t size;		/**< device size known by kernel in bytes */
 };
@@ -100,7 +114,8 @@ struct pxd_init_out {
  */
 struct pxd_update_path_out {
 	uint64_t dev_id;
-	size_t size; // count of paths below.
+	bool   can_failover; /***< switch IO to userspace on any error */
+	size_t count; // count of paths below.
 	char devpath[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 };
 
@@ -165,6 +180,29 @@ struct pxd_fastpath_out {
 };
 
 /**
+ * PXD_SUSPEND/PXD_RESUME request from user space
+ */
+struct pxd_suspend {
+	uint64_t dev_id;
+	bool skip_flush;
+	bool coe; // continue to be in suspend state, even on error
+};
+
+struct pxd_resume {
+	uint64_t dev_id;
+};
+
+/**
+ * PXD_FALLBACK|FAILOVER request from user space
+ */
+struct pxd_ioswitch {
+	uint64_t dev_id;
+};
+
+struct pxd_context;
+struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
+
+/**
  * PXD_GET_FEATURES request from user space
  * response contains feature set
  */
@@ -180,17 +218,32 @@ struct pxd_rdwr_in {
 	pxd_rdwr_in(uint32_t i_minor, uint32_t i_size, uint64_t i_offset,
 		uint64_t i_chksum, uint32_t i_flags) : size(i_size),
 			flags(i_flags), chksum(i_chksum), offset(i_offset) {
-		minor = i_minor;
+		dev_minor = i_minor;
 	}
 
 	pxd_rdwr_in() = default;
 #endif
-	uint32_t minor;		/**< minor device number */
+	uint32_t dev_minor;		/**< minor device number */
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
 	uint64_t chksum;	/**< buffer checksum */
 	uint32_t pad;
 	uint64_t offset;	/**< device offset in bytes */
+};
+
+struct pxd_rdwr_in_v1 {
+	uint32_t dev_minor;		/**< minor device number */
+	uint32_t size;		/**< read/write/discard size in bytes */
+	uint32_t flags;		/**< bio flags */
+	uint64_t chksum;	/**< buffer checksum */
+	uint32_t pad;
+	uint64_t offset;	/**< device offset in bytes */
+};
+
+/** completion of user operation */
+struct pxd_completion {
+	uint64_t user_data;	/**< user data passed in request */
+	int32_t res;		/**< result code */
 };
 
 /**
@@ -213,7 +266,15 @@ struct rdwr_in {
 	rdwr_in() = default;
 #endif
 	struct fuse_in_header in;	/**< fuse header */
-	struct pxd_rdwr_in rdwr;	/**< read/write request */
+	union {
+		struct pxd_rdwr_in rdwr;	/**< read/write request */
+		struct pxd_completion completion; /**< user request completion */
+	};
+};
+
+struct rdwr_in_v1 {
+	struct fuse_in_header_v1 in;	/**< fuse header */
+	struct pxd_rdwr_in_v1 rdwr;	/**< read/write request */
 };
 
 static inline uint64_t pxd_aligned_offset(uint64_t offset)
@@ -252,6 +313,19 @@ struct pxd_ioctl_init_args {
 
 	/** list of devices */
 	struct pxd_dev_id devices[PXD_MAX_DEVICES];
+};
+
+/** sub-actions for PXD_IOC_IO_FLUSHER ioctl */
+enum pxd_io_flusher_action {
+	PXD_IO_FLUSHER_GET = 0,	/**<  check IO FLUSHER state of the process */
+	PXD_IO_FLUSHER_SET = 1,	/**< set IO FLUSHER state of the process */
+	PXD_IO_FLUSHER_CLEAR = 2,	/**< clear IO FLUSHER state of the process */
+};
+
+struct pxd_ioctl_io_flusher_args {
+	pid_t pid; /**< pid of the process which is examined, 0 for current process */
+	uint32_t io_flusher_action; /**< one of pxd_io_flusher_action */
+	int is_io_flusher_set; /**< output argument, will be updated by driver */
 };
 
 #endif /* PXD_H_ */

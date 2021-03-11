@@ -1203,7 +1203,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	struct file* f;
 
 	mode = open_mode(pxd_dev->mode);
-	for (i = 0; i < update_path->size; i++) {
+	for (i = 0; i < update_path->count; i++) {
 		if (!strcmp(pxd_dev->fp.device_path[i], update_path->devpath[i])) {
 			// if previous paths are same.. then skip anymore config
 			printk(KERN_INFO"pxd%llu already configured for path %s\n",
@@ -1223,7 +1223,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
 	}
-	pxd_dev->fp.nfd = update_path->size;
+	pxd_dev->fp.nfd = update_path->count;
 
 	/* setup whether access is block or file access */
 	enableFastPath(pxd_dev, false);
