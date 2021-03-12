@@ -1,5 +1,4 @@
 /* Enable stub action if fastpath is not enabled */
-#ifndef __PX_FASTPATH__
 
 #include "pxd.h"
 #include "pxd_core.h"
@@ -15,6 +14,7 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev) {}
 void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {}
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force) {}
+void disableFastPath(struct pxd_device *pxd_dev) {}
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
 	// unsupported
@@ -29,4 +29,14 @@ void pxd_suspend_io(struct pxd_device* pxd_dev) { }
 void pxd_resume_io(struct pxd_device* pxd_dev) { }
 int pxd_switch_fastpath(struct pxd_device* pxd_dev) {return -1;}
 int pxd_switch_nativepath(struct pxd_device* pxd_dev) {return -1;}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+{
+	return BLK_QC_RETVAL;
+}
+#else
+void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio) {}
+#define BLK_QC_RETVAL
 #endif
