@@ -15,7 +15,6 @@ void pxd_fastpath_cleanup(struct pxd_device *pxd_dev) {}
 void pxdctx_set_connected(struct pxd_context *ctx, bool enable) {}
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force) {}
-void disableFastPath(struct pxd_device *pxd_dev, bool force) {}
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
 	// unsupported
