@@ -1061,9 +1061,10 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	copied += sizeof(pxd_init);
 
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		struct pxd_dev_id id;
+		struct pxd_dev_id id = {0}; // initialize all fields to zero
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
+		id.blkmq_device = 1; // all devices are blkmq registered devices
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
