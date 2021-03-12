@@ -88,7 +88,8 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 	struct fuse_req *req;
 	int err;
 
-	if (!fc->connected && !fc->allow_disconnected) {
+	// 'allow_disconnected' check subsumes 'connected' as well
+	if (!READ_ONCE(fc->allow_disconnected)) {
 		 err = -ENOTCONN;
 		goto out;
 	}
@@ -284,7 +285,7 @@ __acquires(fc->lock)
 	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue_exclusive(&fc->waitq, &wait);
-	while (fc->connected && !request_pending(fc)) {
+	while (READ_ONCE(fc->connected) && !request_pending(fc)) {
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (signal_pending(current))
 			break;
@@ -425,11 +426,11 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
 		err = -EAGAIN;
-		if ((file->f_flags & O_NONBLOCK) && fc->connected)
+		if ((file->f_flags & O_NONBLOCK) && READ_ONCE(fc->connected))
 			goto err_unlock;
 		request_wait(fc);
 		err = -ENODEV;
-		if (!fc->connected)
+		if (!READ_ONCE(fc->connected))
 			goto err_unlock;
 		err = -ERESTARTSYS;
 		if (!request_pending(fc))
@@ -996,7 +997,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	}
 
 	spin_lock(&fc->lock);
-	if (!fc->connected) {
+	if (!READ_ONCE(fc->connected)) {
 		spin_unlock(&fc->lock);
 		return err;
 	}
@@ -1057,7 +1058,7 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
 	poll_wait(file, &fc->waitq, wait);
 
 	spin_lock(&fc->lock);
-	if (!fc->connected)
+	if (!READ_ONCE(fc->connected))
 		mask = POLLERR;
 	else if (request_pending(fc))
 		mask |= POLLIN | POLLRDNORM;
