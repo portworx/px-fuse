@@ -30,7 +30,13 @@ void pxd_resume_io(struct pxd_device* pxd_dev) { }
 int pxd_switch_fastpath(struct pxd_device* pxd_dev) {return -1;}
 int pxd_switch_nativepath(struct pxd_device* pxd_dev) {return -1;}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+blk_qc_t pxd_make_request_fastpath(struct bio *bio)
+{
+	return BLK_QC_RETVAL;
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 {
