@@ -231,15 +231,6 @@ struct pxd_rdwr_in {
 	uint64_t offset;	/**< device offset in bytes */
 };
 
-struct pxd_rdwr_in_v1 {
-	uint32_t dev_minor;		/**< minor device number */
-	uint32_t size;		/**< read/write/discard size in bytes */
-	uint32_t flags;		/**< bio flags */
-	uint64_t chksum;	/**< buffer checksum */
-	uint32_t pad;
-	uint64_t offset;	/**< device offset in bytes */
-};
-
 /** completion of user operation */
 struct pxd_completion {
 	uint64_t user_data;	/**< user data passed in request */
@@ -274,7 +265,7 @@ struct rdwr_in {
 
 struct rdwr_in_v1 {
 	struct fuse_in_header_v1 in;	/**< fuse header */
-	struct pxd_rdwr_in_v1 rdwr;	/**< read/write request */
+	struct pxd_rdwr_in rdwr;	/**< read/write request */
 };
 
 static inline uint64_t pxd_aligned_offset(uint64_t offset)
