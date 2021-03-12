@@ -530,179 +530,6 @@ static void __pxd_cleanup_block_io(struct pxd_io_tracker *head)
 
 static void pxd_complete_io(struct bio* bio)
 {
-	struct pxd_io_tracker *iot = container_of(bio, struct pxd_io_tracker, clone);
-	struct pxd_device *pxd_dev = bio->bi_private;
-	struct pxd_io_tracker *head = iot->head;
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
-
-	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d\n",
-			bio, pxd_dev, head, atomic_read(&head->active));
-
-	if (!atomic_dec_and_test(&head->active)) {
-		// not all responses have come back
-		// but update head status if this is a failure
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(bvec_iter_sectors))
-		if (bio->bi_status) {
-			atomic_inc(&head->fails);
-		}
-#else
-		if (bio->bi_error) {
-			atomic_inc(&head->fails);
-		}
-#endif
-		pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d error %d early return\n",
-			bio, pxd_dev, head, atomic_read(&head->active), atomic_read(&head->fails));
-
-		return;
-	}
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%lx\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	bio_end_io_acct(bio, iot->start);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-	generic_end_io_acct(pxd_dev->disk->queue, bio_op(bio), &pxd_dev->disk->part0, iot->start);
-#else
-	generic_end_io_acct(bio_data_dir(bio), &pxd_dev->disk->part0, iot->start);
-#endif
-
-	pxd_printk("pxd_complete_io for bio %p (pxd %p) with head %p active %d - completing orig %p\n",
-			bio, pxd_dev, head, atomic_read(&head->active), iot->orig);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0) ||  \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(bvec_iter_sectors))
-{
-	iot->orig->bi_status = bio->bi_status;
-	if (atomic_read(&head->fails)) {
-		iot->orig->bi_status = -EIO; // mark failure
-	}
-	bio_endio(iot->orig);
-}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-{
-	int status = bio->bi_error;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	if (status) {
-		bio_io_error(iot->orig);
-	} else {
-		bio_endio(iot->orig);
-	}
-}
-#else
-{
-	int status = bio->bi_error;
-	if (atomic_read(&head->fails)) {
-		status = -EIO; // mark failure
-	}
-	bio_endio(iot->orig, status);
-}
-#endif
-
-	__pxd_cleanup_block_io(head);
-
-	atomic_dec(&pxd_dev->fp.ncount);
-	atomic_inc(&pxd_dev->fp.ncomplete);
-}
-
-static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_dev,
-		struct bio *bio, struct file *fileh) {
-	struct bio* clone_bio;
-	struct pxd_io_tracker* iot;
-	struct address_space *mapping = fileh->f_mapping;
-	struct inode *inode = mapping->host;
-	struct block_device *bdi = I_BDEV(inode);
-
-	pxd_printk("pxd %p:__pxd_init_block_replica entering with bio %p, fileh %p with blkg %p\n",
-			pxd_dev, bio, fileh, bio->bi_blkg);
-
-	clone_bio = bio_clone_fast(bio, GFP_KERNEL, ppxd_bio_set);
-	if (!clone_bio) {
-		pxd_printk(KERN_ERR"No memory for io context");
-		return NULL;
-	}
-
-	iot = container_of(clone_bio, struct pxd_io_tracker, clone);
-
-	iot->pxd_dev = pxd_dev;
-	iot->head = iot;
-	INIT_LIST_HEAD(&iot->replicas);
-	INIT_LIST_HEAD(&iot->item);
-	iot->orig = bio;
-	iot->start = jiffies;
-	atomic_set(&iot->active, 0);
-	atomic_set(&iot->fails, 0);
-	iot->file = fileh;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	iot->read = (bio_op(bio) == REQ_OP_READ);
-#else
-	iot->read = (bio_data_dir(bio) == READ);
-#endif
-
-	pxd_printk("pxd %p:__pxd_init_block_replica clone bio %p (blkg %p), resetting backing block dev to %p\n",
-			pxd_dev, clone_bio, clone_bio->bi_blkg, bdi);
-
-	if (S_ISBLK(inode->i_mode)) {
-		BIO_SET_DEV(clone_bio, bdi);
-	}
-	clone_bio->bi_private = pxd_dev;
-	clone_bio->bi_end_io = pxd_complete_io;
-
-	pxd_printk("pxd %p:__pxd_init_block_replica allocated repl %p for orig bio %p\n",
-			pxd_dev, iot, bio);
-
-	return iot;
-}
-
-static
-struct pxd_io_tracker* __pxd_init_block_head(struct pxd_device *pxd_dev, struct bio* bio) {
-	struct pxd_io_tracker* head;
-	struct pxd_io_tracker *repl;
-	int index;
-
-	pxd_printk("pxd %p:__pxd_init_block_replica to allocate iotracker for bio %p\n",
-			pxd_dev, bio);
-
-	head = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[0]);
-	if (!head) {
-		return NULL;
-	}
-	// initialize the replicas only if the request is non-read
-	if (!head->read) {
-		for (index=1; index<pxd_dev->fp.nfd; index++) {
-			repl = __pxd_init_block_replica(pxd_dev, bio, pxd_dev->fp.file[index]);
-			if (!repl) {
-				goto repl_cleanup;
-			}
-
-			repl->head = head;
-			list_add(&repl->item, &head->replicas);
-		}
-	}
-
-	pxd_printk("pxd %p:__pxd_init_block_head allocated head %p for orig bio %p nfd %d\n",
-			pxd_dev, head, bio, pxd_dev->fp.nfd);
-	return head;
-
-repl_cleanup:
-	__pxd_cleanup_block_io(head);
-	return NULL;
 }
 
 static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
@@ -742,16 +569,6 @@ static int __do_bio_filebacked(struct pxd_device *pxd_dev, struct pxd_io_tracker
 	loff_t pos;
 	unsigned int op = bio_op(bio);
 	int ret;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	bio_start_io_acct(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
-  (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) &&  \
-   defined(bvec_iter_sectors))
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
-	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#endif
 
 	pxd_printk("do_bio_filebacked for new bio (pending %u)\n",
 				atomic_read(&pxd_dev->fp.ncount));
@@ -894,16 +711,6 @@ static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker
 		return -ENXIO;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	bio_start_io_acct(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)|| \
-  (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-   defined(bvec_iter_sectors))
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
-	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#endif
-
 	// initialize active io to configured replicas
 	if (!head->read) {
 		atomic_set(&head->active, pxd_dev->fp.nfd);
@@ -929,23 +736,6 @@ static inline int pxd_handle_io(struct thread_context *tc, struct pxd_io_tracker
 	}
 
 	return 0; // all good
-}
-
-static void pxd_add_io(struct thread_context *tc, struct pxd_io_tracker *head, int rw)
-{
-	if (rw != READ) {
-		spin_lock_irq(&tc->write_lock);
-		list_add(&head->item, &tc->iot_writers);
-		spin_unlock_irq(&tc->write_lock);
-		wake_up(&tc->write_event);
-	} else {
-		spin_lock_irq(&tc->read_lock);
-		list_add(&head->item, &tc->iot_readers);
-		spin_unlock_irq(&tc->read_lock);
-
-		wake_up(&tc->read_event);
-	}
-	atomic_inc(&head->pxd_dev->fp.ncount);
 }
 
 static struct pxd_io_tracker* pxd_get_io(struct thread_context *tc, int rw)
@@ -1260,105 +1050,14 @@ out_file_failed:
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 blk_qc_t pxd_make_request_fastpath(struct bio *bio)
 {
-	struct request_queue *q = bio->bi_disk->queue;
-	struct pxd_device *pxd_dev = bio->bi_disk->private_data;
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+{
 #else
 void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
-#endif
 {
-	struct pxd_device *pxd_dev = q->queuedata;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	unsigned int rw = bio_op(bio);
-#else
-	unsigned int rw = bio_rw(bio);
+#define BLK_QC_RETVAL
 #endif
-	int cpu = smp_processor_id();
-	int thread = cpu % __px_ncpus;
-
-	struct pxd_io_tracker *head;
-	struct thread_context *tc;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
-	if (!pxd_dev) {
-#else
-	if (rw == READA) rw = READ;
-	if (!pxd_dev || (rw != READ && rw != WRITE)) {
-#endif
-		printk(KERN_ERR"pxd basic sanity fail, pxd_device %p (%llu), rw %#x\n",
-				pxd_dev, (pxd_dev? pxd_dev->dev_id: (uint64_t)0), rw);
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
-
-	if (!pxd_dev->connected) {
-		printk(KERN_ERR"px is disconnected, failing IO.\n");
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
-
-	// If IO suspended, then hang IO onto the suspend wait queue
-	{
-		spin_lock_irq(&pxd_dev->fp.suspend_lock);
-		if (pxd_dev->fp.suspend) {
-			printk("pxd device %llu is suspended, IO blocked until device activated[bio %p, wr %d]\n",
-				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
-			wait_event_lock_irq(pxd_dev->fp.suspend_wait, !pxd_dev->fp.suspend, pxd_dev->fp.suspend_lock);
-			printk("pxd device %llu re-activated, IO resumed[bio %p, wr %d]\n",
-				pxd_dev->dev_id, bio, (bio_data_dir(bio) == WRITE));
-		}
-		spin_unlock_irq(&pxd_dev->fp.suspend_lock);
-	}
-
-	if (!pxd_dev->fp.nfd) {
-		pxd_printk("px has no backing path yet, should take slow path IO.\n");
-		atomic_inc(&pxd_dev->fp.nslowPath);
-		return pxd_make_request_slowpath(q, bio);
-	}
-
-	pxd_printk("pxd_make_fastpath_request for device %llu queueing with thread %d\n", pxd_dev->dev_id, thread);
-
-	pxd_io_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%x op %#x op_flags 0x%x\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags,
-			(bio->bi_opf & REQ_OP_MASK),
-			((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS));
-
-#if 0
-	/* keep writes on same cpu, but allow reads to spread but within same numa node */
-	if (rw == READ) {
-		int node = cpu_to_node(cpu);
-		thread = getnextcpu(node, atomic_add_return(1, &pxd_dev->fp.index[node]));
-	}
-#endif
-
-	head = __pxd_init_block_head(pxd_dev, bio);
-	if (!head) {
-		BIO_ENDIO(bio, -ENOMEM);
-
-		// trivial high memory pressure failing IO
-		return BLK_QC_RETVAL;
-	}
-
-	tc = &g_tc[thread];
-	BUG_ON(!tc);
-	pxd_add_io(tc, head, rw);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,1)
-	head->start = bio_start_io_acct(bio);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(bvec_iter_sectors))
-	generic_start_io_acct(pxd_dev->disk->queue, bio_op(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
-	generic_start_io_acct(bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#else
-	_generic_start_io_acct(pxd_dev->disk->queue, bio_data_dir(bio), REQUEST_GET_SECTORS(bio), &pxd_dev->disk->part0);
-#endif
-
-	pxd_printk("pxd_make_request for device %llu done\n", pxd_dev->dev_id);
 	return BLK_QC_RETVAL;
 }
