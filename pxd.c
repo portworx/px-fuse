@@ -1770,7 +1770,7 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 #ifdef __PX_BLKMQ__
-	printk(KERN_INFO "pxd: blk-mq driver (based on 2.6) loaded version %s\n", gitversion);
+	printk(KERN_INFO "pxd: blk-mq driver loaded version %s\n", gitversion);
 #else
 	printk(KERN_INFO "pxd: driver loaded version %s\n", gitversion);
 #endif
