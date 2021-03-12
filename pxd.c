@@ -671,6 +671,9 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
+	if (!fc->connected && !fc->allow_disconnected)
+		return BLK_STS_IOERR;
+
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 		   "flags  %llx\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
