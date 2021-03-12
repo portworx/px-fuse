@@ -70,7 +70,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	int err = 0;
 
 	spin_lock(&fc->lock);
-	if (!READ_ONCE(fc->connected)) {
+	if (!fc->connected) {
 		err = -ENXIO;
 	} else {
 		spin_lock(&pxd_dev->lock);
@@ -606,7 +606,6 @@ static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
-	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
 	for (;;) {
 		struct request *rq;
@@ -617,7 +616,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
+		if (BLK_RQ_IS_PASSTHROUGH(rq)) {
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
@@ -654,7 +653,7 @@ static void pxd_rq_fn(struct request_queue *q)
 
 		req->rq = rq;
 		req->queue = q;
-		fuse_request_send_nowait(fc, req);
+		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -668,7 +667,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
+	if (BLK_RQ_IS_PASSTHROUGH(rq))
 		return BLK_STS_IOERR;
 
 	if (!fc->connected && !fc->allow_disconnected)
@@ -695,7 +694,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	req->pxd_rdwr_in.chksum = 0;
 	req->pxd_rdwr_in.pad = 0;
 	req->rq = rq;
-	fuse_request_send_nowait(fc, req);
+	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 
 	return BLK_STS_OK;
 }
@@ -1229,12 +1228,12 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 		return -EINVAL;
 	}
 
-	if (!READ_ONCE(ctx->fc.connected)) {
+	if (!ctx->fc.connected) {
 		cancel_delayed_work_sync(&ctx->abort_work);
 	}
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = new_timeout_secs;
-	if (!READ_ONCE(ctx->fc.connected)) {
+	if (!ctx->fc.connected) {
 		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	}
 	spin_unlock(&ctx->lock);
@@ -1590,7 +1589,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	}
 
 	fc = &ctx->fc;
-	if (READ_ONCE(fc->connected) == 1) {
+	if (fc->connected == 1) {
 		printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
 			ctx->id, ctx->open_seq);
 		return -EINVAL;
@@ -1599,10 +1598,10 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	cancel_delayed_work_sync(&ctx->abort_work);
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
-	WRITE_ONCE(fc->connected, 1);
+	fc->connected = 1;
 	spin_unlock(&ctx->lock);
 
-	WRITE_ONCE(fc->allow_disconnected, 1);
+	fc->allow_disconnected = 1;
 	file->private_data = fc;
 
 	pxdctx_set_connected(ctx, true);
@@ -1626,10 +1625,10 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	}
 
 	spin_lock(&ctx->lock);
-	if (READ_ONCE(ctx->fc.connected) == 0) {
+	if (ctx->fc.connected == 0) {
 		pxd_printk("%s: not opened\n", __func__);
 	} else {
-		WRITE_ONCE(ctx->fc.connected, 0);
+		ctx->fc.connected = 0;
 	}
 
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
@@ -1657,12 +1656,12 @@ static void pxd_abort_context(struct work_struct *work)
 		abort_work);
 	struct fuse_conn *fc = &ctx->fc;
 
-	BUG_ON(READ_ONCE(fc->connected));
+	BUG_ON(fc->connected);
 
 	printk(KERN_ERR "PXD_TIMEOUT (%s:%u): Aborting all requests...",
 		ctx->name, ctx->id);
 
-	WRITE_ONCE(fc->allow_disconnected, 0);
+	fc->allow_disconnected = 0;
 
 	/* Let other threads see the value of allow_disconnected. */
 	synchronize_rcu();
@@ -1804,7 +1803,7 @@ void pxd_exit(void)
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		/* force cleanup @@@ */
-		WRITE_ONCE(pxd_contexts[i].fc.connected, 1);
+		pxd_contexts[i].fc.connected = true;
 		pxd_context_destroy(&pxd_contexts[i]);
 	}
 
