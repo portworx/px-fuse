@@ -5,7 +5,6 @@
 #include "pxd_core.h"
 #include "pxd_fastpath.h"
 
-int pxd_device_congested(void *data, int cond) { return 0; }
 int fastpath_init(void) { return 0; }
 void fastpath_cleanup(void) {}
 
@@ -24,4 +23,28 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	return 0; // cannot fail
 }
 
+void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque) {}
+int pxd_suspend_state(struct pxd_device *pxd_dev) {return 0;}
+
+void pxd_suspend_io(struct pxd_device* pxd_dev) { }
+void pxd_resume_io(struct pxd_device* pxd_dev) { }
+int pxd_switch_fastpath(struct pxd_device* pxd_dev) {return -1;}
+int pxd_switch_nativepath(struct pxd_device* pxd_dev) {return -1;}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+blk_qc_t pxd_make_request_fastpath(struct bio *bio)
+{
+	return BLK_QC_RETVAL;
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
+#define BLK_QC_RETVAL BLK_QC_T_NONE
+blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+{
+	return BLK_QC_RETVAL;
+}
+#else
+void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio) {}
+#define BLK_QC_RETVAL
+#endif
 #endif

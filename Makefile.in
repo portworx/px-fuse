@@ -1,4 +1,4 @@
-px-objs = pxd.o dev.o iov_iter.o px_version.o
+px-objs = pxd.o dev.o iov_iter.o px_version.o pxd_fastpath_stub.o
 obj-m = px.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__
@@ -80,28 +80,6 @@ endif
 ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
 endif
-
-## fastpath specific checks
-ifeq ($(call verlater,${kmajor},${fp_major}),0)
-PXDEFINES += -D__PX_FASTPATH__
-px-objs += pxd_fastpath.o
-$(info Kernel fast path enabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
-else
-ifeq ($(call versame,${kmajor},${fp_major}),0)
-ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
-PXDEFINES += -D__PX_FASTPATH__
-px-objs += pxd_fastpath.o
-$(info Kernel fast path enabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
-else
-px-objs += pxd_fastpath_stub.o
-$(info Kernel fast path disabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
-endif
-else
-px-objs += pxd_fastpath_stub.o
-$(info Kernel fast path disabled, current kernel version $(CHK_KVER) need minimum $(FPATH_MINKVER))
-endif
-endif
-
 
 ifdef KERNELOTHER
 KERNELOTHEROPT=O=$(KERNELOTHER)

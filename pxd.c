@@ -3,6 +3,7 @@
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
 #include <linux/ctype.h>
+#include <linux/sched.h>
 #include "fuse_i.h"
 #include "pxd.h"
 #include <linux/uio.h>
@@ -30,7 +31,18 @@
 #endif
 
 #define PXD_TIMER_SECS_MIN 30
-#define PXD_TIMER_SECS_MAX 600
+#define PXD_TIMER_SECS_DEFAULT 600
+#define PXD_TIMER_SECS_MAX (U32_MAX)
+
+#if defined(PF_LESS_THROTTLE)
+#define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LESS_THROTTLE)
+#elif defined(PF_LOCAL_THROTTLE)
+#define PF_IO_FLUSHER (PF_MEMALLOC_NOIO | PF_LOCAL_THROTTLE)
+#endif
+#define IS_SET_IO_FLUSHER_FLAG(flg) ((flg & PF_IO_FLUSHER) == PF_IO_FLUSHER)
+#define IS_SET_IO_FLUSHER(task) (IS_SET_IO_FLUSHER_FLAG((task->flags)))
+#define SET_IO_FLUSHER(task) (task->flags |= PF_IO_FLUSHER)
+#define CLEAR_IO_FLUSHER(task) (task->flags &= ~(PF_IO_FLUSHER))
 
 #define TOSTRING_(x) #x
 #define VERTOSTR(x) TOSTRING_(x)
@@ -42,7 +54,7 @@ static DEFINE_IDA(pxd_minor_ida);
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
-uint32_t pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
@@ -123,6 +135,109 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 	return ret;
 }
 
+static void print_io_flusher_state(unsigned int new_flags,
+				   pid_t pid, pid_t ppid, char *comm)
+{
+	if (IS_SET_IO_FLUSHER_FLAG(new_flags)) {
+		printk("Process %s pid %d parent pid %d IO_FLUSHER is set\n",
+			       comm, pid, ppid);
+	} else {
+		printk("Process %s pid %d parent pid %d IO_FLUSHER not set\n", comm, pid,
+				ppid);
+	}
+}
+
+static int is_io_flusher_supported(void)
+{
+  	#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0) && defined(PF_MEMALLOC_NOIO)
+                #if defined(PF_LESS_THROTTLE) || defined(PF_LOCAL_THROTTLE)
+			return 1;
+		#else
+			return 0;
+		#endif
+	#else
+		return 0;
+	#endif
+}
+
+static long pxd_ioflusher_state(void __user *argp)
+{
+	struct pxd_ioctl_io_flusher_args io_flusher_args;
+	struct task_struct *task = NULL;
+	struct pid_namespace *ns = NULL;
+	pid_t ppid = -1;
+	pid_t pid = -1;
+	char *comm = NULL;
+	unsigned int old_flags = 0;
+	unsigned int new_flags = 0;
+	char command[TASK_COMM_LEN] = {0};
+	int is_io_flusher_set = 0;
+
+	if (!is_io_flusher_supported()) {
+		return -EOPNOTSUPP;
+	}
+
+	if (argp == NULL) {
+		return -EINVAL;
+	}
+
+	if (copy_from_user(&io_flusher_args, argp, sizeof(io_flusher_args))) {
+		return -EFAULT;
+	}
+	rcu_read_lock();
+	task = current;
+	ns = task_active_pid_ns(task);
+	if (io_flusher_args.pid == 0) {
+		get_task_struct(task);
+	} else {
+		struct task_struct *temp_task;
+		struct pid *pid = NULL;
+		pid = find_pid_ns(io_flusher_args.pid, ns);
+		if (pid == NULL) {
+			rcu_read_unlock();
+			printk("Input pid %d does not exist", io_flusher_args.pid);
+			return -ENOENT;
+		}
+		temp_task = pid_task(pid, PIDTYPE_PID);
+		if (temp_task == NULL) {
+			rcu_read_unlock();
+			printk("Input pid %d does not exist", io_flusher_args.pid);
+			return -ENOENT;
+		}
+		task = temp_task;
+		get_task_struct(task);
+	}
+	rcu_read_unlock();
+	ppid = task_pgrp_nr(task);
+	pid = task_pid_nr(task);
+	comm = get_task_comm(command, task);
+	old_flags = task->flags;
+	switch (io_flusher_args.io_flusher_action) {
+	case PXD_IO_FLUSHER_GET:
+		break;
+	case PXD_IO_FLUSHER_SET:
+		SET_IO_FLUSHER(task);
+		break;
+	case PXD_IO_FLUSHER_CLEAR:
+		CLEAR_IO_FLUSHER(task);
+		break;
+	}
+	new_flags = task->flags;
+	put_task_struct(task);
+
+	is_io_flusher_set = IS_SET_IO_FLUSHER_FLAG(new_flags);
+
+	print_io_flusher_state(new_flags, pid, ppid, comm);
+
+	if (copy_to_user(argp + offsetof(struct pxd_ioctl_io_flusher_args, is_io_flusher_set),
+			&is_io_flusher_set, sizeof(is_io_flusher_set))) {
+		return -EFAULT;
+	}
+
+	return 0;
+}
+
+
 static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
@@ -168,6 +283,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		break;
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
+	case PXD_IOC_IO_FLUSHER:
+		return pxd_ioflusher_state((void __user *)arg);
 	default:
 		break;
 	}
@@ -182,18 +299,18 @@ static const struct block_device_operations pxd_bd_ops = {
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
-        struct pxd_device *pxd_dev = req->queue->queuedata;
+		struct pxd_device *pxd_dev = req->queue->queuedata;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
-        part_stat_lock();
-        part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-        part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
+		part_stat_lock();
+		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
 #else
-        int cpu = part_stat_lock();
-        part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
-        part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
+		int cpu = part_stat_lock();
+		part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
+		part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
 #endif
-        part_stat_unlock();
+		part_stat_unlock();
 }
 
 /*
@@ -287,7 +404,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->in.args[0].size = sizeof(struct pxd_rdwr_in);
 	req->in.args[0].value = &req->pxd_rdwr_in;
 	req->in.h.pid = current->pid;
-	req->pxd_rdwr_in.minor = minor;
+	req->pxd_rdwr_in.dev_minor = minor;
 	req->pxd_rdwr_in.offset = off;
 	req->pxd_rdwr_in.size = size;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
@@ -297,8 +414,8 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #else
 	req->pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
-				      ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
-				      ((flags & REQ_META) ? PXD_FLAGS_META : 0);
+					  ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+					  ((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #endif
 }
 
@@ -616,10 +733,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	}
 #else
 	if (pxd_dev->fastpath) {
+		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);	  
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
+#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
+        q = blk_alloc_queue_rh(pxd_make_request_fastpath, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
 #endif
@@ -627,13 +747,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 			err = -ENOMEM;
 			goto out_disk;
 		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
-		// add hooks to control congestion only while using fastpath
-		q->backing_dev_info->congested_fn = pxd_device_congested;
-		q->backing_dev_info->congested_data = pxd_dev;
-#endif
-		
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0)
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
 		blk_queue_make_request(q, pxd_make_request_fastpath);
 #endif
 	} else {
@@ -642,16 +757,15 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
-	  pxd_dev->tag_set.queue_depth = PXD_MAX_QDEPTH;
+	  pxd_dev->tag_set.queue_depth = add->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	  pxd_dev->tag_set.nr_hw_queues = 8;
-	  pxd_dev->tag_set.queue_depth = 128;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
 	  if (err)
-	    goto out_disk;
+		goto out_disk;
 
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
@@ -753,8 +867,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_lock_init(&pxd_dev->qlock);
 
 	new_minor = ida_simple_get(&pxd_minor_ida,
-				    1, 1 << MINORBITS,
-				    GFP_KERNEL);
+					1, 1 << MINORBITS,
+					GFP_KERNEL);
 	if (new_minor < 0) {
 		err = new_minor;
 		goto out_module;
@@ -770,7 +884,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->fastpath = add->enable_fp;
 
 	printk(KERN_INFO"Device %llu added with mode %#x fastpath %d npath %lu\n",
-			add->dev_id, add->open_mode, add->enable_fp, add->paths.size);
+			add->dev_id, add->open_mode, add->enable_fp, add->paths.count);
 
 	// initializes fastpath context part of pxd_dev, enables it only
 	// if pxd_dev->fastpath is true, and backing dev paths are available.
@@ -914,8 +1028,12 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 	spin_unlock(&pxd_dev->lock);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	revalidate_disk_size(pxd_dev->disk, true);
+#else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
+#endif
 	put_device(&pxd_dev->dev);
 
 	return 0;
@@ -942,9 +1060,10 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	copied += sizeof(pxd_init);
 
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		struct pxd_dev_id id;
+		struct pxd_dev_id id = {0}; // initialize all fields to zero
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
+		id.blkmq_device = 1; // all devices are blkmq registered devices
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -1062,7 +1181,7 @@ static struct pxd_device *dev_to_pxd_dev(struct device *dev)
 }
 
 static ssize_t pxd_size_show(struct device *dev,
-			     struct device_attribute *attr, char *buf)
+				 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1071,7 +1190,7 @@ static ssize_t pxd_size_show(struct device *dev,
 }
 
 static ssize_t pxd_major_show(struct device *dev,
-		     struct device_attribute *attr, char *buf)
+			 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1080,7 +1199,7 @@ static ssize_t pxd_major_show(struct device *dev,
 }
 
 static ssize_t pxd_minor_show(struct device *dev,
-		     struct device_attribute *attr, char *buf)
+			 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1089,9 +1208,9 @@ static ssize_t pxd_minor_show(struct device *dev,
 }
 
 static ssize_t pxd_timeout_show(struct device *dev,
-		     struct device_attribute *attr, char *buf)
+			 struct device_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d\n", pxd_timeout_secs);
+	return sprintf(buf, "%u\n", pxd_timeout_secs);
 }
 
 ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
@@ -1104,25 +1223,27 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	if (ctx == NULL)
 		return -ENXIO;
 
-	sscanf(buf, "%d", &new_timeout_secs);
+	sscanf(buf, "%u", &new_timeout_secs);
 	if (new_timeout_secs < PXD_TIMER_SECS_MIN ||
 			new_timeout_secs > PXD_TIMER_SECS_MAX) {
 		return -EINVAL;
 	}
 
-	if (!ctx->fc.connected)
+	if (!ctx->fc.connected) {
 		cancel_delayed_work_sync(&ctx->abort_work);
+	}
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = new_timeout_secs;
-	if (!ctx->fc.connected)
+	if (!ctx->fc.connected) {
 		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
+	}
 	spin_unlock(&ctx->lock);
 
 	return count;
 }
 
 static ssize_t pxd_active_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	char *cp = buf;
@@ -1178,7 +1299,7 @@ static ssize_t pxd_sync_store(struct device *dev, struct device_attribute *attr,
 }
 
 static ssize_t pxd_mode_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	char modestr[32];
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
@@ -1212,7 +1333,7 @@ static ssize_t pxd_wrsegment_store(struct device *dev, struct device_attribute *
 }
 
 static ssize_t pxd_congestion_show(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
@@ -1246,7 +1367,7 @@ static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *a
 }
 
 static ssize_t pxd_fastpath_state(struct device *dev,
-                     struct device_attribute *attr, char *buf)
+					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	return sprintf(buf, "%d\n", pxd_dev->fp.nfd);
@@ -1325,7 +1446,7 @@ static void __strip_nl(const char *src, char *dst, int maxlen) {
 }
 
 static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *attr,
-		               const char *buf, size_t count)
+					   const char *buf, size_t count)
 {
 	// format: path,path,path
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
@@ -1353,7 +1474,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 
 		token = __strtok_r(0, delim, &saveptr);
 	}
-	update_out.size = i;
+	update_out.count = i;
 	update_out.dev_id = pxd_dev->dev_id;
 
 	__pxd_update_path(pxd_dev, &update_out);
@@ -1477,7 +1598,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	cancel_delayed_work_sync(&ctx->abort_work);
 	spin_lock(&ctx->lock);
-	pxd_timeout_secs = PXD_TIMER_SECS_MAX;
+	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 	fc->connected = 1;
 	spin_unlock(&ctx->lock);
 
@@ -1505,10 +1626,12 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	}
 
 	spin_lock(&ctx->lock);
-	if (ctx->fc.connected == 0)
+	if (ctx->fc.connected == 0) {
 		pxd_printk("%s: not opened\n", __func__);
-	else
+	} else {
 		ctx->fc.connected = 0;
+	}
+
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
@@ -1536,7 +1659,7 @@ static void pxd_abort_context(struct work_struct *work)
 
 	BUG_ON(fc->connected);
 
-	printk(KERN_INFO "PXD_TIMEOUT (%s:%u): Aborting all requests...",
+	printk(KERN_ERR "PXD_TIMEOUT (%s:%u): Aborting all requests...",
 		ctx->name, ctx->id);
 
 	fc->allow_disconnected = 0;
@@ -1544,9 +1667,7 @@ static void pxd_abort_context(struct work_struct *work)
 	/* Let other threads see the value of allow_disconnected. */
 	synchronize_rcu();
 
-	spin_lock(&fc->lock);
 	fuse_end_queued_requests(fc);
-	spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
 }
 
