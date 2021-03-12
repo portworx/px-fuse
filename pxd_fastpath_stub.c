@@ -1,4 +1,5 @@
 /* Enable stub action if fastpath is not enabled */
+#ifndef __PX_FASTPATH__
 
 #include "pxd.h"
 #include "pxd_core.h"
@@ -45,4 +46,5 @@ blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 #else
 void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio) {}
 #define BLK_QC_RETVAL
+#endif
 #endif
