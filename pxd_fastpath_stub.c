@@ -35,16 +35,21 @@ int pxd_switch_nativepath(struct pxd_device* pxd_dev) {return -1;}
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 blk_qc_t pxd_make_request_fastpath(struct bio *bio)
 {
+	BUG();
 	return BLK_QC_RETVAL;
 }
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 #define BLK_QC_RETVAL BLK_QC_T_NONE
 blk_qc_t pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
 {
+	BUG();
 	return BLK_QC_RETVAL;
 }
 #else
-void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio) {}
+void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio)
+{
+	BUG();
+}
 #define BLK_QC_RETVAL
 #endif
 #endif
