@@ -2212,7 +2212,9 @@ static void pxd_abort_context(struct work_struct *work)
 	/* Let other threads see the value of allow_disconnected. */
 	synchronize_rcu();
 
+	spin_lock(&fc->lock);
 	fuse_end_queued_requests(fc);
+	spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
 }
 
