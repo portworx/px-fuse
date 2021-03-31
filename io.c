@@ -1954,6 +1954,8 @@ static int io_sq_thread(void *data)
 	set_fs(USER_DS);
 #endif
 
+	pr_info("%s: started to %d", __func__, ctx->sq_thread_idle);
+
 	timeout = inflight = 0;
 	while (!kthread_should_park()) {
 		bool all_fixed, mm_fault = false;
