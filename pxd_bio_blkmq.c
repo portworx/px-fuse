@@ -482,11 +482,12 @@ static void pxd_io_failover(struct work_struct *work) {
   bool cleanup = false;
   bool reroute = false;
   int rc;
+  unsigned long flags;
 
   BUG_ON(fproot->magic != FP_ROOT_MAGIC);
   BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
-  spin_lock(&pxd_dev->fp.fail_lock);
+  spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
   if (!pxd_dev->fp.active_failover) {
     if (pxd_dev->fp.fastpath) {
       pxd_dev->fp.active_failover = true;
@@ -498,7 +499,7 @@ static void pxd_io_failover(struct work_struct *work) {
   } else {
     list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
   }
-  spin_unlock(&pxd_dev->fp.fail_lock);
+  spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 
   if (cleanup) {
     rc = pxd_initiate_failover(pxd_dev);
@@ -507,10 +508,10 @@ static void pxd_io_failover(struct work_struct *work) {
       printk_ratelimited(KERN_ERR
                          "%s: pxd%llu: failover failed %d, aborting IO\n",
                          __func__, pxd_dev->dev_id, rc);
-      spin_lock(&pxd_dev->fp.fail_lock);
+      spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
       __pxd_abortfailQ(pxd_dev);
       pxd_dev->fp.active_failover = false;
-      spin_unlock(&pxd_dev->fp.fail_lock);
+      spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
     }
   } else if (reroute) {
     printk_ratelimited(KERN_ERR "%s: pxd%llu: resuming IO in native path.\n",
