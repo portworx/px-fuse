@@ -1543,7 +1543,7 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-	if (pxd_dev->fastpath) {
+	if (!pxd_dev->fastpath) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
 	} else if (pxd_dev->fp.fastpath) {

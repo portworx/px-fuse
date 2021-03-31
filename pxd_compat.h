@@ -55,8 +55,8 @@
 #define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
 #include <linux/bio.h>
-#ifndef BIOSET_NEED_BIOVECS
-#define BIOSET_NEED_BIOVECS (1)
+#ifndef BIOSET_NEED_BVECS
+#define BIOSET_NEED_BVECS (1)
 #endif
 #define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad)
 #endif

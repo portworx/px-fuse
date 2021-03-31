@@ -278,7 +278,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 
 		fp->file[i] = f;
 
-		inode = f->f_inode;
+		inode = file_inode(f);
 		printk(KERN_INFO"device %lld:%d, inode %lu mode %#x\n", pxd_dev->dev_id, i, inode->i_ino, mode);
 		if (S_ISREG(inode->i_mode)) {
 			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
@@ -289,6 +289,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		} else {
 			printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
 				pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+			goto out_file_failed;
 		}
 	}
 
@@ -333,6 +334,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int i;
 
 	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+		pxd_dev->fp.active_failover = false;
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
