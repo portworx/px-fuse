@@ -975,6 +975,7 @@ static void pxd_rq_fn(struct request_queue *q)
 {
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	struct fp_root_context *fproot;
 
 	for (;;) {
@@ -986,7 +987,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (BLK_RQ_IS_PASSTHROUGH(rq)) {
+		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
@@ -1032,7 +1033,7 @@ static void pxd_rq_fn(struct request_queue *q)
 			continue;
 		}
 
-		fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+		fuse_request_send_nowait(fc, req);
 		spin_lock_irq(&pxd_dev->qlock);
 	}
 }
@@ -1061,9 +1062,10 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct request *rq = bd->rq;
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	struct fp_root_context *fproot;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq))
+	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
@@ -1097,7 +1099,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return BLK_STS_IOERR;
 	}
 
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	fuse_request_send_nowait(fc, req);
 
 	return BLK_STS_OK;
 }
