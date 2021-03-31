@@ -48,7 +48,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
-	bool using_blkque; // this is persistent, how the block device registered with kernel
+	bool fastpath; // 'fastpath' enabled device -- persistent once registered with kernel
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
@@ -59,7 +59,7 @@ struct pxd_device {
 	unsigned int nr_congestion_off;
 
 	wait_queue_head_t suspend_wq;
-#ifdef __PX_BLKMQ__
+#if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
         struct blk_mq_tag_set tag_set;
 #endif
 };
