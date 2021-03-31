@@ -379,6 +379,9 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
+#if defined(__PXD_BIO_MAKEREQ__) && LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+	.submit_bio     = pxd_bio_make_request_entryfn,
+#endif
 };
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
