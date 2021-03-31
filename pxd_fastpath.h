@@ -38,10 +38,6 @@ struct pxd_io_tracker {
 	struct bio clone;    // cloned bio [ALL]
 };
 
-// helper functions
-struct block_device* get_bdev(struct file *fileh);
-unsigned get_mode(struct file *fileh);
-
 struct pxd_sync_ws {
 	struct work_struct ws;
 	struct pxd_device *pxd_dev;
@@ -136,5 +132,28 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 void pxd_abortfailQ(struct pxd_device *pxd_dev);
 void __pxd_abortfailQ(struct pxd_device *pxd_dev);
+
+static inline
+struct block_device* get_bdev(struct file *fileh)
+{
+    struct address_space *mapping = fileh->f_mapping;
+    struct inode *inode = mapping->host;
+    struct block_device *bdev = NULL;
+
+
+	if (S_ISBLK(inode->i_mode))
+		bdev = I_BDEV(inode);
+
+    return bdev;
+}
+
+static inline
+unsigned get_mode(struct file *fileh)
+{
+    struct address_space *mapping = fileh->f_mapping;
+    struct inode *inode = mapping->host;
+
+    return inode->i_mode;
+}
 
 #endif /* _PXD_FASTPATH_H_ */
