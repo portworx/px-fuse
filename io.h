@@ -75,7 +75,12 @@ struct io_ring_ctx {
 		unsigned		sq_mask;
 		unsigned		sq_thread_idle;
 
-		struct io_ring_queue	*queue;
+		void    *queue;
+
+		struct fuse_queue_cb *requests_cb;
+		struct fuse_queue_cb *responses_cb;
+		struct io_uring_cqe *responses;
+		struct io_uring_sqe *requests;
 
 		struct list_head	defer_list;
 	} ____cacheline_aligned_in_smp;

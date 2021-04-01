@@ -236,20 +236,53 @@ static void io_ring_ctx_ref_free(struct percpu_ref *ref)
 	complete(&ctx->ctx_done);
 }
 
-static int io_ring_ctx_init(struct io_ring_ctx *ctx)
+static size_t queue_size(struct io_ring_ctx *ctx)
+{
+	return sizeof(struct fuse_queue_cb) + sizeof(struct fuse_queue_cb) +
+			ctx->sq_entries * sizeof(struct io_uring_sqe) +
+			ctx->cq_entries * sizeof(struct io_uring_cqe);
+}
+
+static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *params)
 {
 	int i;
 
 	memset(ctx, 0, sizeof(*ctx));
 
-	ctx->queue = vmalloc((sizeof(*ctx->queue) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+	ctx->flags = params->flags;
+	ctx->sq_thread_idle = params->sq_thread_idle;
+
+	params->sq_entries = params->sq_entries == 0 ?
+							FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
+								params->sq_entries);
+	params->cq_entries = params->cq_entries == 0 ?
+							FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
+								params->cq_entries);
+
+	ctx->sq_entries = params->sq_entries;
+	ctx->sq_mask = ctx->sq_entries - 1;
+	ctx->cq_entries = params->cq_entries;
+	ctx->cq_mask = ctx->cq_entries - 1;
+
+	ctx->queue = vmalloc((queue_size(ctx) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
 	if (!ctx->queue) {
 		printk(KERN_ERR "failed to allocate request queue");
 		return -ENOMEM;
 	}
 
-	fuse_queue_init_cb(&ctx->queue->requests_cb);
-	fuse_queue_init_cb(&ctx->queue->responses_cb);
+	ctx->requests_cb = ctx->queue;
+	ctx->requests = (void *)(ctx->requests_cb + 1);
+	ctx->responses_cb = (void *)(ctx->requests + ctx->sq_entries);
+	ctx->responses = (void *)(ctx->responses_cb + 1);
+
+	pr_info("queue size %ld requests_cb %ld requests %ld responses_cb %ld responses %ld",
+			queue_size(ctx), (void *)ctx->requests_cb - ctx->queue,
+			(void *)ctx->requests - ctx->queue,
+			(void *)ctx->responses_cb - ctx->queue,
+			(void *)ctx->responses - ctx->queue);
+
+	fuse_queue_init_cb(ctx->requests_cb);
+	fuse_queue_init_cb(ctx->responses_cb);
 
 	ctx->user_files = kcalloc(IORING_MAX_FIXED_FILES, sizeof(struct file *),
 		GFP_KERNEL);
@@ -265,11 +298,6 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx)
 		return -ENOMEM;
 	}
 
-	ctx->flags = 0;
-	ctx->sq_entries = FUSE_REQUEST_QUEUE_SIZE;
-	ctx->sq_mask = FUSE_REQUEST_QUEUE_SIZE - 1;
-	ctx->cq_entries = FUSE_REQUEST_QUEUE_SIZE;
-	ctx->cq_mask = FUSE_REQUEST_QUEUE_SIZE - 1;
 	init_waitqueue_head(&ctx->wait);
 	init_completion(&ctx->ctx_done);
 	mutex_init(&ctx->uring_lock);
@@ -314,7 +342,7 @@ static struct io_kiocb *io_get_deferred_req(struct io_ring_ctx *ctx)
 
 static void __io_commit_cqring(struct io_ring_ctx *ctx)
 {
-	struct fuse_queue_cb *cb = &ctx->queue->responses_cb;
+	struct fuse_queue_cb *cb = ctx->responses_cb;
 
 	if (ctx->cached_cq_tail != READ_ONCE(cb->r.write)) {
 		/* order cqe stores with ring update */
@@ -341,7 +369,7 @@ static void io_commit_cqring(struct io_ring_ctx *ctx)
 
 static struct io_uring_cqe *io_get_cqring(struct io_ring_ctx *ctx)
 {
-	struct fuse_queue_cb *cb = &ctx->queue->responses_cb;
+	struct fuse_queue_cb *cb = ctx->responses_cb;
 	unsigned tail;
 
 	tail = ctx->cached_cq_tail;
@@ -351,11 +379,11 @@ static struct io_uring_cqe *io_get_cqring(struct io_ring_ctx *ctx)
 	 * control dependency is enough as we're using WRITE_ONCE to
 	 * fill the cq entry
 	 */
-	if (tail - READ_ONCE(cb->r.read) == FUSE_REQUEST_QUEUE_SIZE)
+	if (tail - READ_ONCE(cb->r.read) == ctx->cq_entries)
 		return NULL;
 
 	ctx->cached_cq_tail++;
-	return &ctx->queue->responses[tail & ctx->cq_mask];
+	return &ctx->responses[tail & ctx->cq_mask];
 }
 
 static void io_cqring_fill_event(struct io_ring_ctx *ctx, u64 ki_user_data,
@@ -373,7 +401,7 @@ static void io_cqring_fill_event(struct io_ring_ctx *ctx, u64 ki_user_data,
 static void io_cqring_add_event(struct io_ring_ctx *ctx, u64 user_data,
 				long res)
 {
-	struct fuse_queue_cb *cb = &ctx->queue->responses_cb;
+	struct fuse_queue_cb *cb = ctx->responses_cb;
 
 	unsigned long flags;
 
@@ -1828,7 +1856,7 @@ static void io_submit_state_start(struct io_submit_state *state,
 
 static void io_commit_sqring(struct io_ring_ctx *ctx)
 {
-	struct fuse_queue_cb *cb = &ctx->queue->requests_cb;
+	struct fuse_queue_cb *cb = ctx->requests_cb;
 
 	if (ctx->cached_sq_head != READ_ONCE(cb->r.read)) {
 		/*
@@ -1862,13 +1890,13 @@ static bool io_get_sqring(struct io_ring_ctx *ctx, struct sqe_submit *s)
 	 */
 	head = ctx->cached_sq_head;
 	/* make sure SQ entry isn't read before tail */
-	new_head = smp_load_acquire(&ctx->queue->requests_cb.r.write);
+	new_head = smp_load_acquire(&ctx->requests_cb->r.write);
 
 	if (head == new_head)
 		return false;
 
-	s->index = head & (FUSE_REQUEST_QUEUE_SIZE - 1);
-	s->sqe = &ctx->queue->requests[head & (FUSE_REQUEST_QUEUE_SIZE - 1)];
+	s->index = head & ctx->sq_mask;
+	s->sqe = &ctx->requests[head & ctx->sq_mask];
 	++ctx->cached_sq_head;
 
 	return true;
@@ -1926,6 +1954,8 @@ static int io_sq_thread(void *data)
 	set_fs(USER_DS);
 #endif
 
+	pr_info("%s: started to %d", __func__, ctx->sq_thread_idle);
+
 	timeout = inflight = 0;
 	while (!kthread_should_park()) {
 		bool all_fixed, mm_fault = false;
@@ -1970,7 +2000,7 @@ static int io_sq_thread(void *data)
 						TASK_INTERRUPTIBLE);
 
 			/* Tell userspace we may need a wakeup call */
-			ctx->queue->requests_cb.r.need_wake_up |=
+			ctx->requests_cb->w.need_wake_up =
 				IORING_SQ_NEED_WAKEUP;
 			/* make sure to read SQ tail after writing flags */
 			smp_mb();
@@ -1985,14 +2015,12 @@ static int io_sq_thread(void *data)
 				schedule();
 				finish_wait(&ctx->sqo_wait, &wait);
 
-				ctx->queue->requests_cb.r.need_wake_up &=
-					~IORING_SQ_NEED_WAKEUP;
+				ctx->requests_cb->w.need_wake_up = 0;
 				continue;
 			}
 			finish_wait(&ctx->sqo_wait, &wait);
 
-			ctx->queue->requests_cb.r.need_wake_up &=
-				~IORING_SQ_NEED_WAKEUP;
+			ctx->requests_cb->w.need_wake_up = 0;
 		}
 
 		i = 0;
@@ -2601,8 +2629,8 @@ static void io_ring_submit(struct io_ring_ctx *ctx)
 {
 	struct io_submit_state state, *statep = NULL;
 	int i;
-	uint32_t read = ctx->queue->requests_cb.r.read;
-	uint32_t write = smp_load_acquire(&ctx->queue->requests_cb.r.write);
+	uint32_t read = ctx->requests_cb->r.read;
+	uint32_t write = smp_load_acquire(&ctx->requests_cb->r.write);
 
 	while (read != write) {
 		int to_submit = write - read;
@@ -2634,8 +2662,8 @@ static void io_ring_submit(struct io_ring_ctx *ctx)
 			statep = NULL;
 		}
 
-		read = ctx->queue->requests_cb.r.read;
-		write = smp_load_acquire(&ctx->queue->requests_cb.r.write);
+		read = ctx->requests_cb->r.read;
+		write = smp_load_acquire(&ctx->requests_cb->r.write);
 	}
 }
 
@@ -2653,22 +2681,10 @@ static int io_run_queue(struct io_ring_ctx *ctx)
 static int io_uring_open(struct inode *inode, struct file *file)
 {
 	struct io_ring_ctx *ctx;
-	int ret;
-	struct io_uring_params p = {};
 
 	ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
 	if (ctx == NULL)
 		return -ENOMEM;
-
-	ret = io_ring_ctx_init(ctx);
-	if (ret != 0)
-		return ret;
-
-	ret = io_sq_offload_start(ctx, &p);
-	if (ret != 0) {
-		io_ring_ctx_wait_and_kill(ctx);
-		return ret;
-	}
 
 	file->private_data = ctx;
 
@@ -2685,17 +2701,46 @@ static int io_uring_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static long io_ring_ioctl_init(struct io_ring_ctx *ctx, unsigned long arg)
+{
+	struct io_uring_params params;
+	int ret;
+
+	if (copy_from_user(&params, (void *)arg, sizeof(params)))
+		return -EFAULT;
+
+	ret = io_ring_ctx_init(ctx, &params);
+	if (ret != 0)
+		return ret;
+
+	ret = io_sq_offload_start(ctx, &params);
+	if (ret != 0) {
+		io_ring_ctx_wait_and_kill(ctx);
+		return ret;
+	}
+
+	if (copy_to_user((void *)arg, &params, sizeof(params)))
+		return -EFAULT;
+
+	return 0;
+}
+
 static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct io_ring_ctx *ctx = filp->private_data;
 
 	switch (cmd) {
+	case PXD_IOC_WAKE_UP_SQO:
+		wake_up(&ctx->sqo_wait);
+		return 0;
 	case PXD_IOC_RUN_IO_QUEUE:
 		return io_run_queue(ctx);
 	case PXD_IOC_REGISTER_FILE:
 		return io_sqe_register_file(ctx, arg);
 	case PXD_IOC_UNREGISTER_FILE:
 		return io_sqe_unregister_file(ctx, arg);
+	case PXD_IOC_INIT_IO:
+		return io_ring_ioctl_init(ctx, arg);
 	default:
 		return -ENOTTY;
 	}
@@ -2713,7 +2758,7 @@ static unsigned io_uring_poll(struct file *file, poll_table *wait)
 {
 	unsigned mask = POLLOUT | POLLWRNORM;
 	struct io_ring_ctx *ctx = file->private_data;
-	struct fuse_queue_cb *cb = &ctx->queue->responses_cb;
+	struct fuse_queue_cb *cb = ctx->responses_cb;
 
 	if (!ctx)
 		return POLLERR;
@@ -2747,7 +2792,7 @@ static vm_fault_t io_uring_vm_fault(struct vm_fault *vmf)
 #endif
 	struct io_ring_ctx *ctx = file->private_data;
 	void *map_addr = (void*)ctx->queue + (vmf->pgoff << PAGE_SHIFT);
-	if ((vmf->pgoff << PAGE_SHIFT) > sizeof(struct io_ring_queue)) {
+	if ((vmf->pgoff << PAGE_SHIFT) > queue_size(ctx)) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0)
 		return -EFAULT;
 #else
