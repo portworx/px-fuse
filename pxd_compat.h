@@ -45,6 +45,7 @@
 #define SUBMIT_BIO(bio) submit_bio(bio)
 #else
 #define BIO_OP(bio)   ((bio)->bi_rw)
+// only supports read or write
 #define SUBMIT_BIO(bio)  submit_bio(((bio)->bi_rw & 1), bio)
 #endif
 
