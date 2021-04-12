@@ -1094,6 +1094,8 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
 }
 
 void fuse_end_queued_requests(struct fuse_conn *fc)
+__releases(fc->lock)
+__acquires(fc->lock)
 {
 	int i;
 

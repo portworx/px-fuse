@@ -147,4 +147,14 @@ struct io_uring_params {
 #define IORING_REGISTER_EVENTFD		4
 #define IORING_UNREGISTER_EVENTFD	5
 
+/*
+ * Queue mapped in user space
+ */
+struct io_ring_queue {
+	struct fuse_queue_cb requests_cb;
+	struct io_uring_sqe requests[FUSE_REQUEST_QUEUE_SIZE];
+	struct fuse_queue_cb responses_cb;
+	struct io_uring_cqe responses[FUSE_REQUEST_QUEUE_SIZE];
+};
+
 #endif
