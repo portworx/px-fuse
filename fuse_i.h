@@ -37,6 +37,7 @@
 #endif
 
 #include "pxd.h"
+#include "pxd_bio.h"
 
 struct fuse_conn;
 

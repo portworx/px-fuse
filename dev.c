@@ -300,7 +300,8 @@ static bool __check_zero_page_write(char *base, size_t len) {
 /* Check if the request is writing zeroes and if so, convert it as a discard
  * request.
  */
-static void __fuse_convert_zero_writes_slowpath(struct fuse_req *req)
+#ifndef __PXD_BIO_MAKEREQ__
+static void __fuse_convert_zero_writes(struct fuse_req *req)
 {
 	struct req_iterator breq_iter;
 
@@ -325,7 +326,8 @@ static void __fuse_convert_zero_writes_slowpath(struct fuse_req *req)
 	req->in.opcode = PXD_DISCARD;
 }
 
-static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
+#else
+static void __fuse_convert_zero_writes(struct fuse_req *req)
 {
 #if defined(HAVE_BVEC_ITER)
 	struct bvec_iter bvec_iter;
@@ -349,14 +351,11 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 	}
 	req->in.opcode = PXD_DISCARD;
 }
+#endif
 
 void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (!req->pxd_dev->using_blkque) {
-		__fuse_convert_zero_writes_fastpath(req);
-	} else {
-		__fuse_convert_zero_writes_slowpath(req);
-	}
+	__fuse_convert_zero_writes(req);
 }
 
 /*
@@ -477,6 +476,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 
 	memset(&add_ext, 0, sizeof(add_ext));
 	memcpy(&add_ext, &add, sizeof(add));
+	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
 	return pxd_add(conn, &add_ext);
 }
 
@@ -544,7 +544,8 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 	return 0;
 }
 
-static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
+#ifndef __PXD_BIO_MAKEREQ__
+static int __fuse_notify_read_data(struct fuse_conn *conn,
 		struct fuse_req *req,
 		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
 {
@@ -608,8 +609,8 @@ static int __fuse_notify_read_data_slowpath(struct fuse_conn *conn,
 
 	return 0;
 }
-
-static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
+#else
+static int __fuse_notify_read_data(struct fuse_conn *conn,
 		struct fuse_req *req,
 		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
 {
@@ -674,6 +675,7 @@ static int __fuse_notify_read_data_fastpath(struct fuse_conn *conn,
 
 	return 0;
 }
+#endif
 
 static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 				struct iov_iter *iter)
@@ -700,11 +702,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (!req->pxd_dev->using_blkque) {
-		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
-	}
-
-	return __fuse_notify_read_data_slowpath(conn, req, &read_data, iter);
+	return __fuse_notify_read_data(conn, req, &read_data, iter);
 }
 
 
@@ -838,7 +836,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
  * it from the list and copy the rest of the buffer to the request.
  * The request is finished by calling request_end()
  */
-static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
+#ifndef __PXD_BIO_MAKEREQ__
+static int __fuse_dev_do_write(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
 	if (req->in.opcode == PXD_READ && iter->count > 0) {
@@ -868,8 +867,8 @@ static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 	}
 	return 0;
 }
-
-static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
+#else
+static int __fuse_dev_do_write(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
 #if defined(HAVE_BVEC_ITER)
@@ -902,6 +901,7 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 	}
 	return 0;
 }
+#endif
 
 static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 {
@@ -941,12 +941,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return -ENOENT;
 	}
 
-	if (!req->pxd_dev->using_blkque) {
-		err = __fuse_dev_do_write_fastpath(fc, req, iter);
-	} else {
-		err = __fuse_dev_do_write_slowpath(fc, req, iter);
-	}
-
+	err = __fuse_dev_do_write(fc, req, iter);
 	if (err)
 		return err;
 
@@ -1031,10 +1026,7 @@ void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *u
 		iov_iter_init(&iter, READ, data_iov, ureq->len,
 			iov_length(data_iov, ureq->len));
 
-		ret = !req->pxd_dev->using_blkque ?
-		      __fuse_dev_do_write_fastpath(fc, req, &iter) :
-		      __fuse_dev_do_write_slowpath(fc, req, &iter);
-
+		ret = __fuse_dev_do_write(fc, req, &iter);
 		if (data_iov != data_iov_inline)
 			kfree(data_iov);
 	}

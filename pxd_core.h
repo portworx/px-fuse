@@ -85,16 +85,11 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 
 #define SEGMENT_SIZE (1024 * 1024)
 
-// slow path make request io entry point
-struct request_queue;
-struct bio;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
-#else
-void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio);
-#endif
-
+#ifdef __PXD_BIO_MAKEREQ__
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
+#else
+void pxdmq_reroute_slowpath(struct fuse_req*);
+#endif
 int pxd_initiate_fallback(struct pxd_device *pxd_dev);
 int pxd_initiate_failover(struct pxd_device *pxd_dev);
 

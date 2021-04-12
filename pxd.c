@@ -379,6 +379,9 @@ static const struct block_device_operations pxd_bd_ops = {
 	.owner			= THIS_MODULE,
 	.open			= pxd_open,
 	.release		= pxd_release,
+#if defined(__PXD_BIO_MAKEREQ__) && LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+	.submit_bio     = pxd_bio_make_request_entryfn,
+#endif
 };
 
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
@@ -934,50 +937,6 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }
 
-// fastpath uses this path to punt requests to slowpath
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
-blk_qc_t pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL BLK_QC_T_NONE
-#else
-void pxd_make_request_slowpath(struct request_queue *q, struct bio *bio)
-#define BLK_QC_RETVAL
-#endif
-{
-	struct pxd_device *pxd_dev = q->queuedata;
-	struct fuse_req *req;
-
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-			"flags 0x%x op_flags 0x%x\n", __func__,
-			pxd_dev->minor, pxd_dev->dev_id,
-			bio_data_dir(bio) == WRITE ? "wr" : "rd",
-			BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio),
-			bio->bi_vcnt, bio->bi_flags, get_op_flags(bio));
-
-	req = pxd_fuse_req(pxd_dev);
-	if (IS_ERR_OR_NULL(req)) {
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
-
-	req->pxd_dev = pxd_dev;
-	req->bio = bio;
-	req->queue = q;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
-#else
-	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw)) {
-#endif
-		fuse_request_free(req);
-		bio_io_error(bio);
-		return BLK_QC_RETVAL;
-	}
-
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
-	return BLK_QC_RETVAL;
-}
-
 #if !defined(__PX_BLKMQ__)
 static void pxd_rq_fn(struct request_queue *q)
 {
@@ -1108,9 +1067,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
-		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
+		q = blk_alloc_queue(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
-        q = blk_alloc_queue_rh(pxd_make_request_fastpath, NUMA_NO_NODE);
+        q = blk_alloc_queue_rh(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
 #endif
@@ -1124,7 +1083,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
-		blk_queue_make_request(q, pxd_make_request_fastpath);
+		blk_queue_make_request(q, pxd_bio_make_request_entryfn);
 #endif
 	} else {
 #endif
