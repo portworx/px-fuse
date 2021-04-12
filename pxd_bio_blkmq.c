@@ -141,36 +141,42 @@ void __fastpath_cleanup(void) {
 }
 
 void pxd_suspend_io(struct pxd_device *pxd_dev) {
-  int curr = atomic_inc_return(&pxd_dev->fp.suspend);
-  if (curr == 1) {
-    // it is possible to call suspend during initial creation with no disk,
-    // ignore as in any case, no IO can flow through.
-    if (pxd_dev->disk && pxd_dev->disk->queue) {
-      blk_mq_freeze_queue(pxd_dev->disk->queue);
-    }
-    printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
-  } else {
-    printk("For pxd device %llu IO already suspended(%d)\n", pxd_dev->dev_id,
-           curr);
-  }
+        struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+        int curr = atomic_inc_return(&pxd_dev->fp.suspend);
+        if (curr == 1) {
+                // it is possible to call suspend during initial creation with
+                // no disk, ignore as in any case, no IO can flow through.
+                if (pxd_dev->disk && pxd_dev->disk->queue) {
+                        // inline suspend while IOs are active, blocks until IO
+                        // completes. This stalls px-storage too. So just
+                        // initiate freeze, to stop new IOs.
+                        // blk_mq_freeze_queue(pxd_dev->disk->queue);
+                        blk_freeze_queue_start(pxd_dev->disk->queue);
+                        atomic_set(&fp->blkmq_frozen, 1);
+                }
+                printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
+        } else {
+                printk("For pxd device %llu IO already suspended(%d)\n",
+                       pxd_dev->dev_id, curr);
+        }
 }
 
 void pxd_resume_io(struct pxd_device *pxd_dev) {
-  bool wakeup;
-  int curr = atomic_dec_return(&pxd_dev->fp.suspend);
+        bool wakeup;
+        int curr = atomic_dec_return(&pxd_dev->fp.suspend);
+        struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
-  wakeup = (curr == 0);
-  if (wakeup) {
-    // it is possible to call resume during initial creation with no disk,
-    // ignore as in any case, no IO can flow through.
-    if (pxd_dev->disk && pxd_dev->disk->queue) {
-      blk_mq_unfreeze_queue(pxd_dev->disk->queue);
-    }
-    printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
-  } else {
-    printk("For pxd device %llu IO still suspended(%d)\n", pxd_dev->dev_id,
-           curr);
-  }
+        wakeup = (curr == 0);
+        if (wakeup) {
+                if (atomic_read(&fp->blkmq_frozen)) {
+                        blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+                        atomic_set(&fp->blkmq_frozen, 0);
+                }
+                printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
+        } else {
+                printk("For pxd device %llu IO still suspended(%d)\n",
+                       pxd_dev->dev_id, curr);
+        }
 }
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev) {

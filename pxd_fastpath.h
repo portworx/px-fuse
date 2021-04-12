@@ -31,7 +31,11 @@ struct pxd_fastpath_extension {
 	atomic_t ioswitch_active; // failover or fallback active
 	atomic_t suspend;
 	atomic_t app_suspend; // userspace suspended IO
+#ifdef __PXD_BIO_BLKMQ__
+	atomic_t blkmq_frozen; // state indicating whether actually mq frozen
+#else
 	rwlock_t suspend_lock;
+#endif
 	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];

@@ -372,7 +372,11 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	memset(fp, 0, sizeof(struct pxd_fastpath_extension));
 
 	// device temporary IO suspend
+#ifdef __PXD_BIO_BLKMQ__
+	atomic_set(&fp->blkmq_frozen, 0);
+#else
 	rwlock_init(&fp->suspend_lock);
+#endif
 	atomic_set(&fp->suspend, 0);
 	atomic_set(&fp->app_suspend, 0);
 	atomic_set(&fp->ioswitch_active, 0);

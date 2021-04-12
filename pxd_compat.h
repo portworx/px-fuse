@@ -15,6 +15,8 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 #include <linux/part_stat.h>
 #endif
+#include <linux/bio.h>
+#include <linux/blk_types.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER
