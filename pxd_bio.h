@@ -25,4 +25,29 @@ void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int sta
 void pxd_suspend_io(struct pxd_device *pxd_dev);
 void pxd_resume_io(struct pxd_device *pxd_dev);
 
+#ifdef __PXD_BIO_BLKMQ__
+// structure is exported only so, it can be embedded within fuse_context.
+// Treat it as private outside fastpath
+struct fp_root_context {
+#define FP_ROOT_MAGIC (0xbaadf00du)
+  unsigned int magic;
+  struct work_struct work;  // for discard handling
+  struct bio *bio;          // consolidated bio
+  struct fp_clone_context *clones; // linked clones
+  struct list_head wait;  // wait for resources
+  atomic_t nactive;       // num of clones requests currently active
+};
+
+static inline void fp_root_context_init(struct fp_root_context *fproot) {
+  fproot->magic = FP_ROOT_MAGIC;
+  fproot->bio = NULL;
+  fproot->clones = NULL;
+  atomic_set(&fproot->nactive, 0);
+  // work struct should get initialized right before use
+}
+
+// io entry point
+void fp_handle_io(struct work_struct *work);
+#endif
+
 #endif /* _PXD_BIO_H_ */

@@ -72,7 +72,37 @@ struct fuse_req {
 
 	/** sequence number used for restart */
 	u64 sequence;
+
+#ifdef __PXD_BIO_BLKMQ__
+	// Additional fastpath context
+	struct fp_root_context fproot;
+#endif
 };
+
+#ifdef __PXD_BIO_BLKMQ__
+static inline
+struct pxd_device* fproot_to_pxd(struct fp_root_context *fproot)
+{
+	struct fuse_req *f = container_of(fproot, struct fuse_req, fproot);
+
+	return f->pxd_dev;
+}
+
+static inline
+struct request* fproot_to_request(struct fp_root_context *fproot)
+{
+	struct fuse_req *f = container_of(fproot, struct fuse_req, fproot);
+
+	return f->rq;
+}
+
+static inline
+struct fuse_req* fproot_to_fuse_request(struct fp_root_context *fproot)
+{
+	return container_of(fproot, struct fuse_req, fproot);
+}
+
+#endif
 
 #define FUSE_MAX_PER_CPU_IDS 256
 

@@ -107,9 +107,9 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
 	// incompat device
-	if (pxd_dev->using_blkque) {
-		printk("device %llu ioswitch request failed (blkque %d, fastpath %d)\n",
-			   pxd_dev->dev_id, pxd_dev->using_blkque, fp->fastpath);
+	if (!pxd_dev->fastpath) {
+		printk("device %llu ioswitch request failed (registered %d, fastpath %d)\n",
+			   pxd_dev->dev_id, pxd_dev->fastpath, fp->fastpath);
 		return -EINVAL;
 	}
 
@@ -138,7 +138,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	int i;
 	int rc;
 
-	if (pxd_dev->using_blkque) {
+	if (!pxd_dev->fastpath) {
 		return -EINVAL;
 	}
 
@@ -206,7 +206,7 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 
 int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 {
-	if (pxd_dev->using_blkque) {
+	if (!pxd_dev->fastpath) {
 		return -EINVAL;
 	}
 
@@ -244,7 +244,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd) {
+	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) {
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
@@ -278,7 +278,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 
 		fp->file[i] = f;
 
-		inode = f->f_inode;
+		inode = file_inode(f);
 		printk(KERN_INFO"device %lld:%d, inode %lu mode %#x\n", pxd_dev->dev_id, i, inode->i_ino, mode);
 		if (S_ISREG(inode->i_mode)) {
 			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
@@ -289,6 +289,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		} else {
 			printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
 				pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+			goto out_file_failed;
 		}
 	}
 
@@ -332,7 +333,8 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int nfd = fp->nfd;
 	int i;
 
-	if (pxd_dev->using_blkque || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+		pxd_dev->fp.active_failover = false;
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
