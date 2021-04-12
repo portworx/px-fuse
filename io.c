@@ -249,7 +249,9 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 
 	memset(ctx, 0, sizeof(*ctx));
 
-	ctx->flags = 0;
+	ctx->flags = params->flags;
+	ctx->sq_thread_idle = params->sq_thread_idle;
+
 	params->sq_entries = params->sq_entries == 0 ?
 			     FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
 				     params->sq_entries);
@@ -1952,6 +1954,8 @@ static int io_sq_thread(void *data)
 	set_fs(USER_DS);
 #endif
 
+	pr_info("%s: started to %d", __func__, ctx->sq_thread_idle);
+
 	timeout = inflight = 0;
 	while (!kthread_should_park()) {
 		bool all_fixed, mm_fault = false;
@@ -1991,13 +1995,13 @@ static int io_sq_thread(void *data)
 				mmput(cur_mm);
 				cur_mm = NULL;
 			}
-
 			prepare_to_wait(&ctx->sqo_wait, &wait,
 						TASK_INTERRUPTIBLE);
 
 			/* Tell userspace we may need a wakeup call */
-			ctx->requests_cb->r.need_wake_up |=
+			ctx->requests_cb->w.need_wake_up =
 				IORING_SQ_NEED_WAKEUP;
+
 			/* make sure to read SQ tail after writing flags */
 			smp_mb();
 
@@ -2011,14 +2015,12 @@ static int io_sq_thread(void *data)
 				schedule();
 				finish_wait(&ctx->sqo_wait, &wait);
 
-				ctx->requests_cb->r.need_wake_up &=
-					~IORING_SQ_NEED_WAKEUP;
+				ctx->requests_cb->w.need_wake_up = 0;
 				continue;
 			}
 			finish_wait(&ctx->sqo_wait, &wait);
 
-			ctx->requests_cb->r.need_wake_up &=
-				~IORING_SQ_NEED_WAKEUP;
+			ctx->requests_cb->w.need_wake_up = 0;
 		}
 
 		i = 0;
@@ -2728,6 +2730,9 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	struct io_ring_ctx *ctx = filp->private_data;
 
 	switch (cmd) {
+	case PXD_IOC_WAKE_UP_SQO:
+		wake_up(&ctx->sqo_wait);
+		return 0;
 	case PXD_IOC_RUN_IO_QUEUE:
 		return io_run_queue(ctx);
 	case PXD_IOC_REGISTER_FILE:
