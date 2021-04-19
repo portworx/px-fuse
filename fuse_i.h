@@ -73,13 +73,14 @@ struct fuse_out {
 /**
  * A request to the client
  */
+struct pxd_device;
 struct fuse_req {
 	/** This can be on either pending processing or io lists in
 	    fuse_conn */
 	struct list_head list;
 
-	/** Request to use fastpath */
-	unsigned fastpath:1;
+	/** Need to fetch state of device and keep counters updated */
+	struct pxd_device *pxd_dev;
 
 	/** The request input */
 	struct fuse_in in;
@@ -98,7 +99,8 @@ struct fuse_req {
 	};
 
 	/** Request completion callback */
-	void (*end)(struct fuse_conn *, struct fuse_req *);
+	/** return: 'true' to free the request, 'false' otherwise */
+	bool (*end)(struct fuse_conn *, struct fuse_req *, int status);
 
 	/** Associate request queue */
 	struct request_queue *queue;

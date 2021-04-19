@@ -13,90 +13,75 @@
 #include <linux/falloc.h>
 #include <linux/bio.h>
 
-// atleast 2 per cpu
-// create two pool of PXD_MAX_THREAD_PER_CPU threads on each cpu, dedicated for writes and reads
-// writer threads are pinned on the same cpu.
-// reader threads are pinned on the same numa node
-#define PXD_MAX_THREAD_PER_CPU (4)
-
 struct pxd_device;
 struct pxd_context;
-
-// A one-time built, static lookup table to distribute requests to cpu within
-// same numa node
-struct node_cpu_map {
-	int cpu[NR_CPUS];
-	int ncpu;
-};
+struct fuse_conn;
 
 // Added metadata for each bio
 struct pxd_io_tracker {
+#define PXD_IOT_MAGIC (0xbeefcafe)
+	unsigned int magic;
 	struct pxd_device *pxd_dev; // back pointer to pxd device
 	struct pxd_io_tracker *head; // back pointer to head copy [ALL]
 	struct list_head replicas; // only replica needs this
 	struct list_head item; // only HEAD needs this
 	atomic_t active; // only HEAD has refs to all active IO
-	atomic_t fails; // should be zero, non-zero indicates atleast one path failed
 	struct file* file;
-	int read; // if read is from the first target only
 
 	unsigned long start; // start time [HEAD]
 	struct bio *orig;    // original request bio [HEAD]
+	int status; // should be zero, non-zero indicates consolidated fail status
+
+	struct work_struct wi; // work item
 
 	// THIS SHOULD BE LAST ITEM
 	struct bio clone;    // cloned bio [ALL]
 };
 
-struct pxd_device;
-struct thread_context {
-	spinlock_t  	    read_lock;
-	wait_queue_head_t   read_event;
-	struct list_head iot_readers;
-	struct task_struct *reader[PXD_MAX_THREAD_PER_CPU];
+// helper functions
+struct block_device* get_bdev(struct file *fileh);
+unsigned get_mode(struct file *fileh);
 
-	spinlock_t  	    write_lock;
-	wait_queue_head_t   write_event;
-	struct list_head iot_writers;
-	struct task_struct *writer[PXD_MAX_THREAD_PER_CPU];
+struct pxd_sync_ws {
+	struct work_struct ws;
+	struct pxd_device *pxd_dev;
+	int index; // file index
+	int rc; // result
 };
 
 struct pxd_fastpath_extension {
 	// Extended information
-	int bg_flush_enabled; // dynamically enable bg flush from driver
-	int n_flush_wrsegs; // num of PXD_LBS write segments to force flush
-
-	// Below information has to be set through new PXD_UPDATE_PATH ioctl
+	atomic_t ioswitch_active; // failover or fallback active
+	atomic_t suspend;
+	atomic_t app_suspend; // userspace suspended IO
+	rwlock_t suspend_lock;
+	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
+	struct workqueue_struct *wq;
+	struct pxd_sync_ws syncwi[MAX_PXD_BACKING_DEVS];
+	struct completion sync_complete;
+	atomic_t sync_done;
+
+	// failover work item
+	spinlock_t  fail_lock;
+	bool active_failover; // is failover active
+	bool force_fail; // debug
+	bool can_failover; // can device failover to userspace on any error
+	struct list_head failQ; // protected by fail_lock
+
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
-
-	struct thread_context *tc;
-	unsigned int qdepth;
-	bool congested;
-	unsigned int nr_congestion_on;
-	unsigned int nr_congestion_off;
-
-	// if set, then newer IOs shall block, until reactivated.
-	int suspend;
-	wait_queue_head_t  suspend_wait;
-	spinlock_t suspend_lock;
-
-	wait_queue_head_t   sync_event;
-	spinlock_t   	sync_lock;
-	atomic_t nsync_active; // [global] currently active?
-	atomic_t nsync; // [global] number of forced syncs completed
 	atomic_t nio_discard;
 	atomic_t nio_preflush;
 	atomic_t nio_flush;
 	atomic_t nio_flush_nop;
 	atomic_t nio_fua;
 	atomic_t nio_write;
-	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
+
 	atomic_t nswitch; // [global] total number of requests through bio switch path
 	atomic_t nslowPath; // [global] total requests through slow path
 	atomic_t ncomplete; // [global] total completed requests
-	atomic_t nwrite_counter; // [global] completed writes, gets cleared on a threshold
-	atomic_t index[MAX_NUMNODES]; // [global] read path IO optimization - last cpu
+	atomic_t nerror; // [global] total IO error
 };
 
 // global initialization during module init for fastpath
@@ -124,9 +109,29 @@ void pxd_make_request_fastpath(struct request_queue *q, struct bio *bio);
 #endif
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
-void disableFastPath(struct pxd_device *pxd_dev);
+void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
 
 // congestion
 int pxd_device_congested(void *, int);
+
+void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque);
+int pxd_suspend_state(struct pxd_device *pxd_dev);
+int pxd_debug_switch_fastpath(struct pxd_device*);
+int pxd_debug_switch_nativepath(struct pxd_device*);
+void pxd_suspend_io(struct pxd_device*);
+void pxd_resume_io(struct pxd_device*);
+int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev);
+
+// external request from userspace to control io path
+int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
+int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
+int pxd_request_resume(struct pxd_device *pxd_dev);
+int pxd_request_resume_internal(struct pxd_device *pxd_dev);
+int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
+
+// handle IO reroutes and switch events
+void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
+void pxd_abortfailQ(struct pxd_device *pxd_dev);
+void __pxd_abortfailQ(struct pxd_device *pxd_dev);
 
 #endif /* _PXD_FASTPATH_H_ */

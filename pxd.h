@@ -15,6 +15,7 @@
 
 /// @file px_fuse/pxd.h
 
+#define PXD_POISON (0xdeadbeef)
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
@@ -40,10 +41,10 @@
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 
-// use by fastpath for congestion control
-#define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
 // NOTE: nvme devices can go upto 1023 queue depth
 #define MAX_CONGESTION_THRESHOLD (1024)
+// use by fastpath for congestion control
+#define DEFAULT_CONGESTION_THRESHOLD MAX_CONGESTION_THRESHOLD
 
 #define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
 #define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
@@ -60,8 +61,8 @@ enum pxd_opcode {
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
 	PXD_ADD_EXT,		/**< add device with extended info to kernel */
-	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
-	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
+	PXD_DEPRECATE_1,    /**< deprecated */
+	PXD_DEPRECATE_0,    /**< deprecated */
 	PXD_GET_FEATURES,   /**< get features */
 	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_SUSPEND,		/**< IO suspend */
@@ -78,6 +79,7 @@ enum pxd_opcode {
 #define PXD_FLAGS_FUA	0x2	/**< REQ_FUA set on bio */
 #define PXD_FLAGS_META	0x4	/**< REQ_META set on bio */
 #define PXD_FLAGS_SYNC (PXD_FLAGS_FLUSH | PXD_FLAGS_FUA)
+#define PXD_FLAGS_LAST PXD_FLAGS_META
 
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
 #define PXD_LBS_MASK (PXD_LBS - 1)
@@ -138,7 +140,7 @@ struct pxd_add_ext_out {
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
-	int     enable_fp; /**< enable fast path */
+	bool     enable_fp; /**< enable fast path */
 	struct pxd_update_path_out paths; /**< backing device paths */
 };
 
@@ -177,6 +179,7 @@ struct pxd_fastpath_out {
 	uint64_t dev_id;
 	int enable;
 	int cleanup; // only meaningful while disabling
+	int context_id;
 };
 
 /**
@@ -209,6 +212,17 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
 
+static inline
+int pxd_supported_features(void)
+{
+	int features = 0;
+#ifdef __PX_FASTPATH__
+	features |= PXD_FEATURE_FASTPATH;
+#endif
+
+	return features;
+}
+
 
 /**
  * PXD_READ/PXD_WRITE kernel request structure
@@ -227,7 +241,7 @@ struct pxd_rdwr_in {
 	uint32_t size;		/**< read/write/discard size in bytes */
 	uint32_t flags;		/**< bio flags */
 	uint64_t chksum;	/**< buffer checksum */
-	uint32_t pad;
+	uint32_t pad; 
 	uint64_t offset;	/**< device offset in bytes */
 };
 

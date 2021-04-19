@@ -24,6 +24,7 @@
 #include <linux/version.h>
 #include <linux/blkdev.h>
 #include "pxd_compat.h"
+#include "pxd_core.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -88,7 +89,7 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 	struct fuse_req *req;
 	int err;
 
-	if (!fc->connected && !fc->allow_disconnected) {
+	if (!READ_ONCE(fc->allow_disconnected)) {
 		 err = -ENOTCONN;
 		goto out;
 	}
@@ -166,8 +167,14 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 {
 	struct fuse_per_cpu_ids *my_ids;
 	int num_free;
-	int cpu = get_cpu();
+	int cpu;
 
+	// 'uid' never acquired, so nothing to do.
+	if (uid == 0) {
+		return;
+	}
+
+	cpu = get_cpu();
 	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 
 	if (unlikely(my_ids->num_free_ids == FUSE_MAX_PER_CPU_IDS)) {
@@ -192,6 +199,12 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
+	req->in.h.len = sizeof(struct fuse_in_header) +
+		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
+
+	req->in.h.unique = fuse_get_unique(fc);
+	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
+
 	list_add_tail(&req->list, &fc->pending);
 }
 
@@ -212,10 +225,11 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
  * If called with fc->lock, unlocks it
  */
 static void request_end(struct fuse_conn *fc, struct fuse_req *req,
-                        bool lock)
+                        bool lock, int status)
 __releases(fc->lock)
 {
 	u64 uid;
+	bool shouldfree = false;
 
 	if (likely(lock)) {
 		spin_lock(&fc->lock);
@@ -223,12 +237,13 @@ __releases(fc->lock)
 	list_del(&req->list);
 	spin_unlock(&fc->lock);
 	uid = req->in.h.unique;
+	/* 'req->end' is always set if the context gets used.
+	 * if error happens during processing, error path handling does free request.
+	 */
 	if (req->end)
-		req->end(fc, req);
+		shouldfree = req->end(fc, req, status);
 	fuse_put_unique(fc, uid);
-#ifndef __PX_BLKMQ__
-	fuse_request_free(req);
-#endif
+	if (shouldfree) fuse_request_free(req);
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
@@ -239,19 +254,14 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
-	req->in.h.len = sizeof(struct fuse_in_header) +
-		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
-
-	req->in.h.unique = fuse_get_unique(fc);
-	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
-
 	/*
 	 * Ensures checking the value of allow_disconnected and adding request to
 	 * queue is done atomically.
 	 */
 	rcu_read_lock();
 
-	if (fc->connected || fc->allow_disconnected) {
+	// 'allow_disconnected' check subsumes 'connected' as well
+	if (READ_ONCE(fc->allow_disconnected)) {
 		spin_lock(&fc->lock);
 		fuse_request_send_nowait_locked(fc, req);
 		spin_unlock(&fc->lock);
@@ -263,7 +273,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		rcu_read_unlock();
 
 		req->out.h.error = -ENOTCONN;
-		request_end(fc, req, true);
+		request_end(fc, req, true, -ENOTCONN);
 	}
 }
 
@@ -391,7 +401,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 
 static void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (req->fastpath) {
+	if (!req->pxd_dev->using_blkque) {
 		__fuse_convert_zero_writes_fastpath(req);
 	} else {
 		__fuse_convert_zero_writes_slowpath(req);
@@ -474,7 +484,7 @@ retry:
 		} else {
 			err = copied_this_time;
 			req->out.h.error = -EIO;
-			request_end(fc, req, true);
+			request_end(fc, req, true, -EIO);
 		}
 		if (entry == last)
 			break;
@@ -781,7 +791,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (req->fastpath) {
+	if (!req->pxd_dev->using_blkque) {
 		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
@@ -815,32 +825,6 @@ static int fuse_notify_update_size(struct fuse_conn *conn, unsigned int size,
 	return pxd_update_size(conn, &update_size);
 }
 
-static int fuse_notify_update_path(struct fuse_conn *conn, unsigned int size,
-		struct iov_iter *iter) {
-	struct pxd_update_path_out update_path;
-	size_t len = sizeof(update_path);
-
-	if (copy_from_iter(&update_path, len, iter) != len) {
-		printk(KERN_ERR "%s: can't copy arg\n", __func__);
-		return -EFAULT;
-	}
-
-	return pxd_update_path(conn, &update_path);
-}
-
-static int fuse_notify_set_fastpath(struct fuse_conn *conn, unsigned int size,
-		struct iov_iter *iter) {
-	struct pxd_fastpath_out fp;
-	size_t len = sizeof(fp);
-
-	if (copy_from_iter(&fp, len, iter) != len) {
-		printk(KERN_ERR "%s: can't copy arg\n", __func__);
-		return -EFAULT;
-	}
-
-	return pxd_set_fastpath(conn, &fp);
-}
-
 static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter) {
 	int features = 0;
@@ -850,6 +834,69 @@ static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
 #endif
 
 	return features;
+}
+
+static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+	struct pxd_suspend req;
+	size_t len = sizeof(req);
+	struct pxd_device *pxd_dev;
+
+	if (copy_from_iter(&req, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	pxd_dev = find_pxd_device(ctx, req.dev_id);
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found\n", req.dev_id);
+		return -EINVAL;
+	}
+	return pxd_request_suspend(pxd_dev, req.skip_flush, req.coe);
+}
+
+static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+	struct pxd_resume req;
+	size_t len = sizeof(req);
+	struct pxd_device *pxd_dev;
+
+	if (copy_from_iter(&req, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	pxd_dev = find_pxd_device(ctx, req.dev_id);
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found\n", req.dev_id);
+		return -EINVAL;
+	}
+
+	return pxd_request_resume(pxd_dev);
+}
+
+static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
+               struct iov_iter *iter, bool failover) {
+       struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+       struct pxd_ioswitch req;
+       size_t len = sizeof(req);
+       struct pxd_device *pxd_dev;
+
+       if (copy_from_iter(&req, len, iter) != len) {
+               printk(KERN_ERR "%s: can't copy arg\n", __func__);
+               return -EFAULT;
+       }
+
+       pxd_dev = find_pxd_device(ctx, req.dev_id);
+       if (!pxd_dev) {
+               printk(KERN_ERR "device %llu not found\n", req.dev_id);
+               return -EINVAL;
+       }
+
+       return pxd_request_ioswitch(pxd_dev,
+                failover ? PXD_FAILOVER_TO_USERSPACE : PXD_FALLBACK_TO_KERNEL);
 }
 
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
@@ -866,12 +913,16 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_update_size(fc, size, iter);
 	case PXD_ADD_EXT:
 		return fuse_notify_add_ext(fc, size, iter);
-	case PXD_UPDATE_PATH:
-		return fuse_notify_update_path(fc, size, iter);
-	case PXD_SET_FASTPATH:
-		return fuse_notify_set_fastpath(fc, size, iter);
 	case PXD_GET_FEATURES:
 		return fuse_notify_get_features(fc, size, iter);
+    case PXD_SUSPEND:
+        return fuse_notify_suspend(fc, size, iter);
+    case PXD_RESUME:
+        return fuse_notify_resume(fc, size, iter);
+    case PXD_FAILOVER_TO_USERSPACE:
+        return fuse_notify_ioswitch_event(fc, size, iter, true);
+    case PXD_FALLBACK_TO_KERNEL:
+        return fuse_notify_ioswitch_event(fc, size, iter, false);
 	default:
 		return -EINVAL;
 	}
@@ -912,7 +963,7 @@ static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req, true);
+	request_end(fc, req, true, (req->out.h.error != 0) ? -EIO : 0);
 	return 0;
 }
 
@@ -947,7 +998,7 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req, true);
+	request_end(fc, req, true, (req->out.h.error != 0) ? -EIO : 0);
 	return 0;
 }
 
@@ -992,7 +1043,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	}
 
 	spin_lock(&fc->lock);
-	if (!fc->connected) {
+	if (!READ_ONCE(fc->connected)) {
 		spin_unlock(&fc->lock);
 		return err;
 	}
@@ -1001,12 +1052,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	spin_unlock(&fc->lock);
 
 	req->out.h = oh;
-
-	if (req->fastpath) {
-		err = __fuse_dev_do_write_fastpath(fc, req, iter);
-	} else {
-		err = __fuse_dev_do_write_slowpath(fc, req, iter);
-	}
+	err = !req->pxd_dev->using_blkque ?
+		      __fuse_dev_do_write_fastpath(fc, req, iter) :
+		      __fuse_dev_do_write_slowpath(fc, req, iter);
 
 	if (err) return err;
 	return nbytes;
@@ -1075,7 +1123,7 @@ __acquires(fc->lock)
 		struct fuse_req *req;
 		req = list_entry(head->next, struct fuse_req, list);
 		req->out.h.error = -ECONNABORTED;
-		request_end(fc, req, false);
+		request_end(fc, req, false, -ECONNABORTED);
 		spin_lock(&fc->lock);
 	}
 }

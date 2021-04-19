@@ -95,4 +95,25 @@
 #define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);
 #endif
 
+static inline unsigned int get_op_flags(struct bio *bio)
+{
+	unsigned int op_flags;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
+	op_flags = 0; // Not present in older kernels
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
+	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
+	op_flags = bio_flags(bio);
+#else
+	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
+#endif
+	return op_flags;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#define BDEVNAME(bio, b)   bio_devname(bio, b)
+#else
+#define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+#endif
+
 #endif //GDFS_PXD_COMPAT_H
