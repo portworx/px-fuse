@@ -9,6 +9,7 @@
 #include "pxd.h"
 #include <linux/uio.h>
 #include <linux/bio.h>
+#include <linux/pid_namespace.h>
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
