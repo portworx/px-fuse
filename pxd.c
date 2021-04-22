@@ -7,6 +7,7 @@
 #include "fuse_i.h"
 #include "pxd.h"
 #include <linux/uio.h>
+#include <linux/pid_namespace.h>
 
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
@@ -735,7 +736,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	if (pxd_dev->fastpath) {
 		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-	  q = blk_alloc_queue(NUMA_NO_NODE);	  
+	  q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_make_request_fastpath, NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
