@@ -89,7 +89,7 @@ static struct fuse_req *__fuse_get_req(struct fuse_conn *fc)
 	struct fuse_req *req;
 	int err;
 
-	if (!READ_ONCE(fc->allow_disconnected)) {
+	if (!fc->connected && !fc->allow_disconnected) {
 		 err = -ENOTCONN;
 		goto out;
 	}
@@ -260,11 +260,8 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	 */
 	rcu_read_lock();
 
-	// 'allow_disconnected' check subsumes 'connected' as well
-	if (READ_ONCE(fc->allow_disconnected)) {
-		spin_lock(&fc->lock);
+	if (fc->connected || fc->allow_disconnected) {
 		fuse_request_send_nowait_locked(fc, req);
-		spin_unlock(&fc->lock);
 
 		rcu_read_unlock();
 
@@ -1043,7 +1040,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	}
 
 	spin_lock(&fc->lock);
-	if (!READ_ONCE(fc->connected)) {
+	if (!fc->connected) {
 		spin_unlock(&fc->lock);
 		return err;
 	}
