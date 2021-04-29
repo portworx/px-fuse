@@ -407,7 +407,7 @@ static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req)
 {
 	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
-	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
+	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	return true;
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
@@ -421,7 +421,7 @@ static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 
 	pxd_request_complete(fc, req);
 #ifndef __PX_BLKMQ__
-	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
+	blk_end_request(req->rq, req->out.h.error, blk_rq_bytes(req->rq));
 	return true;
 #else
 	blk_mq_end_request(req->rq, errno_to_blk_status(req->out.h.error));
