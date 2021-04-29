@@ -50,9 +50,13 @@
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#include <linux/bio.h>
+#ifndef BIOSET_NEED_BVECS
+#define BIOSET_NEED_BVECS (1)
+#endif
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad)
 #endif
 
 #if defined(bio_set_dev)
@@ -115,6 +119,8 @@
 static inline unsigned int get_op_flags(struct bio *bio)
 {
 	unsigned int op_flags;
+	if (!bio) return 0;
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
 	op_flags = 0; // Not present in older kernels
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
@@ -122,7 +128,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
 	op_flags = bio_flags(bio);
 #else
-	op_flags = ((bio->bi_opf & ~REQ_OP_MASK) >> REQ_OP_BITS);
+	op_flags = (bio->bi_opf & ~REQ_OP_MASK);
 #endif
 	return op_flags;
 }
