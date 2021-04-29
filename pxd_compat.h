@@ -95,6 +95,23 @@
 #define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);
 #endif
 
+// helper macros for PXD_SETUP_CONGESTION_HOOK
+#define __type_is_ptr(bdev)  __builtin_types_compatible_p(typeof(bdev), struct backing_dev_info*)
+#define __ptr_or_null(bdev) __builtin_choose_expr(__type_is_ptr(bdev), bdev, (struct backing_dev_info*)NULL)
+#define __SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+    ({ \
+        if (bdev) { \
+            (bdev)->congested_fn = cfn;\
+            (bdev)->congested_data = cdata;\
+        } \
+    })
+
+#define PXD_SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+    __builtin_choose_expr(__type_is_ptr(bdev), \
+            __SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
+            __SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
+
+
 static inline unsigned int get_op_flags(struct bio *bio)
 {
 	unsigned int op_flags;

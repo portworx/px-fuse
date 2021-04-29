@@ -199,12 +199,6 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
-	req->in.h.len = sizeof(struct fuse_in_header) +
-		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
-
-	req->in.h.unique = fuse_get_unique(fc);
-	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
-
 	list_add_tail(&req->list, &fc->pending);
 }
 
@@ -225,7 +219,7 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
  * If called with fc->lock, unlocks it
  */
 static void request_end(struct fuse_conn *fc, struct fuse_req *req,
-                        bool lock, int status)
+                        bool lock)
 __releases(fc->lock)
 {
 	u64 uid;
@@ -241,7 +235,7 @@ __releases(fc->lock)
 	 * if error happens during processing, error path handling does free request.
 	 */
 	if (req->end)
-		shouldfree = req->end(fc, req, status);
+		shouldfree = req->end(fc, req);
 	fuse_put_unique(fc, uid);
 	if (shouldfree) fuse_request_free(req);
 }
@@ -254,6 +248,12 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
+	req->in.h.len = sizeof(struct fuse_in_header) +
+		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
+
+	req->in.h.unique = fuse_get_unique(fc);
+	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
+
 	/*
 	 * Ensures checking the value of allow_disconnected and adding request to
 	 * queue is done atomically.
@@ -261,7 +261,9 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	rcu_read_lock();
 
 	if (fc->connected || fc->allow_disconnected) {
+		spin_lock(&fc->lock);
 		fuse_request_send_nowait_locked(fc, req);
+		spin_unlock(&fc->lock);
 
 		rcu_read_unlock();
 
@@ -270,7 +272,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		rcu_read_unlock();
 
 		req->out.h.error = -ENOTCONN;
-		request_end(fc, req, true, -ENOTCONN);
+		request_end(fc, req, true);
 	}
 }
 
@@ -398,7 +400,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 
 static void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (!req->pxd_dev->using_blkque) {
+	if (req->pxd_dev->fastpath) {
 		__fuse_convert_zero_writes_fastpath(req);
 	} else {
 		__fuse_convert_zero_writes_slowpath(req);
@@ -481,7 +483,7 @@ retry:
 		} else {
 			err = copied_this_time;
 			req->out.h.error = -EIO;
-			request_end(fc, req, true, -EIO);
+			request_end(fc, req, true);
 		}
 		if (entry == last)
 			break;
@@ -788,7 +790,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (!req->pxd_dev->using_blkque) {
+	if (req->pxd_dev->fastpath) {
 		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
@@ -960,7 +962,7 @@ static int __fuse_dev_do_write_slowpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req, true, (req->out.h.error != 0) ? -EIO : 0);
+	request_end(fc, req, true);
 	return 0;
 }
 
@@ -970,16 +972,15 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 #if defined(HAVE_BVEC_ITER)
 	struct bio_vec bvec;
 	struct bio *breq = req->bio;
-	int nsegs = bio_segments(breq);
 	struct bvec_iter bvec_iter;
 #else
 	struct bio_vec *bvec = NULL;
 	struct bio *breq = req->bio;
-	int nsegs = bio_segments(breq);
 	int bvec_iter;
 #endif
 
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
+		int nsegs = bio_segments(breq);
 		if (nsegs) {
 			int i = 0;
 			bio_for_each_segment(bvec, breq, bvec_iter) {
@@ -995,7 +996,7 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 			}
 		}
 	}
-	request_end(fc, req, true, (req->out.h.error != 0) ? -EIO : 0);
+	request_end(fc, req, true);
 	return 0;
 }
 
@@ -1049,7 +1050,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	spin_unlock(&fc->lock);
 
 	req->out.h = oh;
-	err = !req->pxd_dev->using_blkque ?
+	err = req->pxd_dev->fastpath ?
 		      __fuse_dev_do_write_fastpath(fc, req, iter) :
 		      __fuse_dev_do_write_slowpath(fc, req, iter);
 
@@ -1120,7 +1121,7 @@ __acquires(fc->lock)
 		struct fuse_req *req;
 		req = list_entry(head->next, struct fuse_req, list);
 		req->out.h.error = -ECONNABORTED;
-		request_end(fc, req, false, -ECONNABORTED);
+		request_end(fc, req, false);
 		spin_lock(&fc->lock);
 	}
 }
