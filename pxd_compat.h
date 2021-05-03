@@ -16,6 +16,8 @@
 #include <linux/part_stat.h>
 #endif
 
+#include <linux/bio.h>
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER
 #endif
@@ -52,7 +54,6 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 #define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#include <linux/bio.h>
 #ifndef BIOSET_NEED_BVECS
 #define BIOSET_NEED_BVECS (1)
 #endif
