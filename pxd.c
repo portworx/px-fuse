@@ -482,7 +482,7 @@ static void pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_READ;
-	if (req->pxd_dev->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		req->end = pxd_process_read_reply;
 	} else {
 		req->end = qfn ? pxd_process_read_reply_q : pxd_process_read_reply;
@@ -495,7 +495,7 @@ static void pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE;
-	if (req->pxd_dev->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		req->end = pxd_process_write_reply;
 	} else {
 		req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
@@ -508,7 +508,7 @@ static void pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t of
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_DISCARD;
-	if (req->pxd_dev->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		req->end = pxd_process_write_reply;
 	} else {
 		req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
@@ -521,7 +521,7 @@ static void pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t
 			uint32_t minor, uint32_t flags, bool qfn)
 {
 	req->in.h.opcode = PXD_WRITE_SAME;
-	if (req->pxd_dev->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		req->end = pxd_process_write_reply;
 	} else {
 		req->end = qfn ? pxd_process_write_reply_q : pxd_process_write_reply;
@@ -637,7 +637,7 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 {
 	struct fuse_req *req;
 
-	if (!pxd_dev->fastpath) {
+	if (!fastpath_enabled(pxd_dev)) {
 		return -EINVAL;
 	}
 
@@ -662,7 +662,7 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	if (!pxd_dev->fp.fastpath) {
+	if (!fastpath_active(pxd_dev)) {
 		// already in native path
 		return -EINVAL;
 	}
@@ -690,7 +690,7 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 {
 	int rc;
 
-	if (pxd_dev->fp.fastpath) {
+	if (fastpath_active(pxd_dev)) {
 		// already in fast path
 		return -EINVAL;
 	}
@@ -925,13 +925,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->private_data = pxd_dev;
 
 #ifndef __PX_FASTPATH__
-	if (pxd_dev->fastpath) {
+	if (fastpath_enabled(pxd_dev)) {
 		printk(KERN_NOTICE"PX driver does not support fastpath, disabling it.");
 		pxd_dev->fastpath = false;
 	}
 #endif
 
-	if (pxd_dev->fastpath) {
+	if (fastpath_enabled(pxd_dev)) {
 		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);	  
@@ -1013,7 +1013,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	/* Enable flush support. */
 	BLK_QUEUE_FLUSH(q);
 
-	if (pxd_dev->fastpath) {
+	if (fastpath_enabled(pxd_dev)) {
 		pxd_fastpath_adjust_limits(pxd_dev, q);
 	}
 
@@ -1041,7 +1041,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
 #ifdef __PX_BLKMQ__
-		if (!pxd_dev->fastpath) blk_mq_free_tag_set(&pxd_dev->tag_set);
+		if (!fastpath_enabled(pxd_dev)) blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
 	}
 	put_disk(disk);
@@ -1139,7 +1139,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (err)
 		goto out_id;
 
-	if (pxd_dev->fastpath) {
+	if (fastpath_enabled(pxd_dev)) {
 		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
 		if (err) {
 			pxd_fastpath_cleanup(pxd_dev);
@@ -1321,7 +1321,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.fastpath = 0;
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
 		id.blkmq_device = 1;
-		if (pxd_dev->fastpath) id.blkmq_device = 0;
+		if (fastpath_enabled(pxd_dev)) id.blkmq_device = 0;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -1345,10 +1345,10 @@ copy_error:
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
 {
-	if (!pxd_dev->fastpath) {
+	if (!fastpath_enabled(pxd_dev)) {
 		printk(KERN_WARNING"%llu: block device registered for native path - cannot update for fastpath\n", pxd_dev->dev_id);
 		return -EINVAL;
-	} else if (pxd_dev->fp.fastpath) {
+	} else if (fastpath_active(pxd_dev)) {
 		printk(KERN_ERR"%llu: device already in fast path - cannot update\n", pxd_dev->dev_id);
 		return -EINVAL;
 	}
@@ -1661,8 +1661,8 @@ static ssize_t pxd_debug_show(struct device *dev,
 	int suspend;
 
 	suspend=pxd_suspend_state(pxd_dev);
-	return sprintf(buf, "nfd:%d,suspend:%d,registered:%d,fastpath:%d\n",
-			pxd_dev->fp.nfd, suspend, pxd_dev->fastpath, pxd_dev->fp.fastpath);
+	return sprintf(buf, "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d\n",
+			pxd_dev->fp.nfd, suspend, fastpath_enabled(pxd_dev), fastpath_active(pxd_dev));
 }
 
 static ssize_t pxd_debug_store(struct device *dev,

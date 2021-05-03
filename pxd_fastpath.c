@@ -107,9 +107,9 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 
 	// incompat device
-	if (!pxd_dev->fastpath) {
+	if (!fastpath_enabled(pxd_dev)) {
 		printk("device %llu ioswitch request failed (fpregistered %d, fastpath %d)\n",
-			   pxd_dev->dev_id, pxd_dev->fastpath, fp->fastpath);
+			   pxd_dev->dev_id, fastpath_enabled(pxd_dev), fp->fastpath);
 		return -EINVAL;
 	}
 
@@ -138,7 +138,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	int i;
 	int rc;
 
-	if (!pxd_dev->fastpath) {
+	if (!fastpath_enabled(pxd_dev)) {
 		return -EINVAL;
 	}
 
@@ -206,7 +206,7 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 
 int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 {
-	if (!pxd_dev->fastpath) {
+	if (!fastpath_enabled(pxd_dev)) {
 		return -EINVAL;
 	}
 
@@ -244,7 +244,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	mode_t mode = open_mode(pxd_dev->mode);
 	char modestr[32];
 
-	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd) {
+	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd) {
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
@@ -333,7 +333,8 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int nfd = fp->nfd;
 	int i;
 
-	if (!pxd_dev->fastpath || !pxd_dev->fp.nfd || !pxd_dev->fp.fastpath) {
+	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
+			!fastpath_active(pxd_dev)) {
 		pxd_dev->fp.active_failover = false;
 		pxd_dev->fp.fastpath = false;
 		return;

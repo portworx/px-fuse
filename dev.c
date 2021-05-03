@@ -400,7 +400,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 
 static void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (req->pxd_dev->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		__fuse_convert_zero_writes_fastpath(req);
 	} else {
 		__fuse_convert_zero_writes_slowpath(req);
@@ -790,7 +790,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (req->pxd_dev->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
@@ -1050,7 +1050,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	spin_unlock(&fc->lock);
 
 	req->out.h = oh;
-	err = req->pxd_dev->fastpath ?
+	err = fastpath_enabled(req->pxd_dev) ?
 		      __fuse_dev_do_write_fastpath(fc, req, iter) :
 		      __fuse_dev_do_write_slowpath(fc, req, iter);
 

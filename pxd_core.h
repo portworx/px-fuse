@@ -61,6 +61,18 @@ struct pxd_device {
 #endif
 };
 
+// how pxd_device got registered with the kernel during device add.
+static inline
+bool fastpath_enabled(struct pxd_device *pxd_dev) {
+	return pxd_dev->fastpath;
+}
+
+// current IO status - fastpath vs nativepath
+static inline
+bool fastpath_active(struct pxd_device *pxd_dev) {
+	return pxd_dev->fp.fastpath;
+}
+
 void pxd_check_q_congested(struct pxd_device *pxd_dev);
 void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 
