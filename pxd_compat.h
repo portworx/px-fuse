@@ -16,6 +16,8 @@
 #include <linux/part_stat.h>
 #endif
 
+#include <linux/bio.h>
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER
 #endif
@@ -50,9 +52,12 @@
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#ifndef BIOSET_NEED_BVECS
+#define BIOSET_NEED_BVECS (1)
+#endif
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad)
 #endif
 
 #if defined(bio_set_dev)
@@ -93,6 +98,46 @@
 #define QUEUE_FLAG_SET(flag,q) blk_queue_flag_set(flag, q);
 #else
 #define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);
+#endif
+
+// helper macros for PXD_SETUP_CONGESTION_HOOK
+#define __type_is_ptr(bdev)  __builtin_types_compatible_p(typeof(bdev), struct backing_dev_info*)
+#define __ptr_or_null(bdev) __builtin_choose_expr(__type_is_ptr(bdev), bdev, (struct backing_dev_info*)NULL)
+#define __SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+    ({ \
+        if (bdev) { \
+            (bdev)->congested_fn = cfn;\
+            (bdev)->congested_data = cdata;\
+        } \
+    })
+
+#define PXD_SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+    __builtin_choose_expr(__type_is_ptr(bdev), \
+            __SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
+            __SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
+
+
+static inline unsigned int get_op_flags(struct bio *bio)
+{
+	unsigned int op_flags;
+	if (!bio) return 0;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
+	op_flags = 0; // Not present in older kernels
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
+	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
+	op_flags = bio_flags(bio);
+#else
+	op_flags = (bio->bi_opf & ~REQ_OP_MASK);
+#endif
+	return op_flags;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#define BDEVNAME(bio, b)   bio_devname(bio, b)
+#else
+#define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
 #endif
 
 #endif //GDFS_PXD_COMPAT_H

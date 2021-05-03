@@ -1,8 +1,8 @@
-px-objs = pxd.o dev.o iov_iter.o px_version.o pxd_fastpath_stub.o
+px-objs = pxd.o dev.o iov_iter.o px_version.o pxd_fastpath.o kiolib.o pxd_bio_makereq.o
 obj-m = px.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__
-PXDEFINES := -D__PXKERNEL__
+PXDEFINES := -D__PXKERNEL__ -D__PX_FASTPATH__ -D__PXD_BIO_MAKEREQ__
 
 KVERSION=$(shell uname -r)
 
@@ -29,7 +29,7 @@ $(error Kernel path: $(KERNELPATH)  directory does not exist.)
 endif
 
 MINKVER=3.10
-FPATH_MINKVER=4.10
+FPATH_MINKVER=3.10
 BLKMQ_MINKVER=4.18
 KERNELVER=$(shell echo $(CHK_KVER) | /bin/sed 's/\([0-9].[0-9]\+\).*/\1/g')
 
@@ -66,12 +66,12 @@ endif
 ## blkmq checks
 ifeq ($(call verlater,${kmajor},${blkmq_major}),0)
 PXDEFINES += -D__PX_BLKMQ__
-$(info Kernel version ${KERNELVER} supports blkmq driver model.")
+$(info Kernel version ${KERNELVER} supports blkmq driver model.)
 else
 ifeq ($(call versame,${kmajor},${blkmq_major}),0)
 ifeq ($(call versameorlater,${kminor},${blkmq_minor}),0)
 PXDEFINES += -D__PX_BLKMQ__
-$(info Kernel version ${KERNELVER} supports blkmq driver model.")
+$(info Kernel version ${KERNELVER} supports blkmq driver model.)
 endif
 endif
 endif

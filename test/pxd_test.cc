@@ -2,7 +2,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <linux/fuse.h>
+//#include <linux/fuse.h>
 #include <sys/poll.h>
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <sys/uio.h>
@@ -304,7 +304,7 @@ TEST_F(PxdTest, write)
 	// Process the write request
 	wr = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
 	ASSERT_EQ(rdwr->in.opcode, PXD_WRITE);
-	ASSERT_EQ(wr->minor, minor);
+	ASSERT_EQ(wr->dev_minor, minor);
 	ASSERT_EQ(wr->offset, 0);
 	ASSERT_EQ(wr->size, write_len);
 	
@@ -362,7 +362,7 @@ TEST_F(PxdTest, read)
 	// Process the read request
 	rd = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
 	ASSERT_EQ(rdwr->in.opcode, PXD_READ);
-	ASSERT_EQ(rd->minor, minor);
+	ASSERT_EQ(rd->dev_minor, minor);
 	ASSERT_EQ(rd->offset, 0);
 	//XXX: for some reason read req size we recieve here
 	// is greater than what read_thread issued. Ignore it

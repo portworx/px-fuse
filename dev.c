@@ -24,6 +24,7 @@
 #include <linux/version.h>
 #include <linux/blkdev.h>
 #include "pxd_compat.h"
+#include "pxd_core.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -166,8 +167,14 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 {
 	struct fuse_per_cpu_ids *my_ids;
 	int num_free;
-	int cpu = get_cpu();
+	int cpu;
 
+	// 'uid' never acquired, so nothing to do.
+	if (uid == 0) {
+		return;
+	}
+
+	cpu = get_cpu();
 	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 
 	if (unlikely(my_ids->num_free_ids == FUSE_MAX_PER_CPU_IDS)) {
@@ -216,6 +223,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req,
 __releases(fc->lock)
 {
 	u64 uid;
+	bool shouldfree = false;
 
 	if (likely(lock)) {
 		spin_lock(&fc->lock);
@@ -223,12 +231,13 @@ __releases(fc->lock)
 	list_del(&req->list);
 	spin_unlock(&fc->lock);
 	uid = req->in.h.unique;
+	/* 'req->end' is always set if the context gets used.
+	 * if error happens during processing, error path handling does free request.
+	 */
 	if (req->end)
-		req->end(fc, req);
+		shouldfree = req->end(fc, req);
 	fuse_put_unique(fc, uid);
-#ifndef __PX_BLKMQ__
-	fuse_request_free(req);
-#endif
+	if (shouldfree) fuse_request_free(req);
 }
 
 static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
@@ -391,7 +400,7 @@ static void __fuse_convert_zero_writes_fastpath(struct fuse_req *req)
 
 static void fuse_convert_zero_writes(struct fuse_req *req)
 {
-	if (req->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		__fuse_convert_zero_writes_fastpath(req);
 	} else {
 		__fuse_convert_zero_writes_slowpath(req);
@@ -781,7 +790,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	if (req->fastpath) {
+	if (fastpath_enabled(req->pxd_dev)) {
 		return __fuse_notify_read_data_fastpath(conn, req, &read_data, iter);
 	}
 
@@ -815,32 +824,6 @@ static int fuse_notify_update_size(struct fuse_conn *conn, unsigned int size,
 	return pxd_update_size(conn, &update_size);
 }
 
-static int fuse_notify_update_path(struct fuse_conn *conn, unsigned int size,
-		struct iov_iter *iter) {
-	struct pxd_update_path_out update_path;
-	size_t len = sizeof(update_path);
-
-	if (copy_from_iter(&update_path, len, iter) != len) {
-		printk(KERN_ERR "%s: can't copy arg\n", __func__);
-		return -EFAULT;
-	}
-
-	return pxd_update_path(conn, &update_path);
-}
-
-static int fuse_notify_set_fastpath(struct fuse_conn *conn, unsigned int size,
-		struct iov_iter *iter) {
-	struct pxd_fastpath_out fp;
-	size_t len = sizeof(fp);
-
-	if (copy_from_iter(&fp, len, iter) != len) {
-		printk(KERN_ERR "%s: can't copy arg\n", __func__);
-		return -EFAULT;
-	}
-
-	return pxd_set_fastpath(conn, &fp);
-}
-
 static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter) {
 	int features = 0;
@@ -850,6 +833,69 @@ static int fuse_notify_get_features(struct fuse_conn *conn, unsigned int size,
 #endif
 
 	return features;
+}
+
+static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+	struct pxd_suspend req;
+	size_t len = sizeof(req);
+	struct pxd_device *pxd_dev;
+
+	if (copy_from_iter(&req, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	pxd_dev = find_pxd_device(ctx, req.dev_id);
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found\n", req.dev_id);
+		return -EINVAL;
+	}
+	return pxd_request_suspend(pxd_dev, req.skip_flush, req.coe);
+}
+
+static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter) {
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+	struct pxd_resume req;
+	size_t len = sizeof(req);
+	struct pxd_device *pxd_dev;
+
+	if (copy_from_iter(&req, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	pxd_dev = find_pxd_device(ctx, req.dev_id);
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found\n", req.dev_id);
+		return -EINVAL;
+	}
+
+	return pxd_request_resume(pxd_dev);
+}
+
+static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
+               struct iov_iter *iter, bool failover) {
+       struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+       struct pxd_ioswitch req;
+       size_t len = sizeof(req);
+       struct pxd_device *pxd_dev;
+
+       if (copy_from_iter(&req, len, iter) != len) {
+               printk(KERN_ERR "%s: can't copy arg\n", __func__);
+               return -EFAULT;
+       }
+
+       pxd_dev = find_pxd_device(ctx, req.dev_id);
+       if (!pxd_dev) {
+               printk(KERN_ERR "device %llu not found\n", req.dev_id);
+               return -EINVAL;
+       }
+
+       return pxd_request_ioswitch(pxd_dev,
+                failover ? PXD_FAILOVER_TO_USERSPACE : PXD_FALLBACK_TO_KERNEL);
 }
 
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
@@ -866,12 +912,16 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_update_size(fc, size, iter);
 	case PXD_ADD_EXT:
 		return fuse_notify_add_ext(fc, size, iter);
-	case PXD_UPDATE_PATH:
-		return fuse_notify_update_path(fc, size, iter);
-	case PXD_SET_FASTPATH:
-		return fuse_notify_set_fastpath(fc, size, iter);
 	case PXD_GET_FEATURES:
 		return fuse_notify_get_features(fc, size, iter);
+    case PXD_SUSPEND:
+        return fuse_notify_suspend(fc, size, iter);
+    case PXD_RESUME:
+        return fuse_notify_resume(fc, size, iter);
+    case PXD_FAILOVER_TO_USERSPACE:
+        return fuse_notify_ioswitch_event(fc, size, iter, true);
+    case PXD_FALLBACK_TO_KERNEL:
+        return fuse_notify_ioswitch_event(fc, size, iter, false);
 	default:
 		return -EINVAL;
 	}
@@ -922,16 +972,15 @@ static int __fuse_dev_do_write_fastpath(struct fuse_conn *fc,
 #if defined(HAVE_BVEC_ITER)
 	struct bio_vec bvec;
 	struct bio *breq = req->bio;
-	int nsegs = bio_segments(breq);
 	struct bvec_iter bvec_iter;
 #else
 	struct bio_vec *bvec = NULL;
 	struct bio *breq = req->bio;
-	int nsegs = bio_segments(breq);
 	int bvec_iter;
 #endif
 
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
+		int nsegs = bio_segments(breq);
 		if (nsegs) {
 			int i = 0;
 			bio_for_each_segment(bvec, breq, bvec_iter) {
@@ -1001,12 +1050,9 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	spin_unlock(&fc->lock);
 
 	req->out.h = oh;
-
-	if (req->fastpath) {
-		err = __fuse_dev_do_write_fastpath(fc, req, iter);
-	} else {
-		err = __fuse_dev_do_write_slowpath(fc, req, iter);
-	}
+	err = fastpath_enabled(req->pxd_dev) ?
+		      __fuse_dev_do_write_fastpath(fc, req, iter) :
+		      __fuse_dev_do_write_slowpath(fc, req, iter);
 
 	if (err) return err;
 	return nbytes;
