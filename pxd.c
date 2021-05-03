@@ -298,6 +298,19 @@ static const struct block_device_operations pxd_bd_ops = {
 	.release		= pxd_release,
 };
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
+static const struct block_device_operations pxd_bd_fpops = {
+	.owner			= THIS_MODULE,
+	.open			= pxd_open,
+	.release		= pxd_release,
+	.submit_bio     = pxd_bio_make_request_entryfn,
+};
+#define get_bd_fpops() (&pxd_bd_fpops)
+#else
+#define get_bd_fpops() (&pxd_bd_ops)
+#endif
+
+
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
@@ -933,6 +946,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	if (fastpath_enabled(pxd_dev)) {
 		pxd_printk("adding disk for fastpath device %llu", pxd_dev->dev_id);
+	    disk->fops = get_bd_fpops();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 	  q = blk_alloc_queue(NUMA_NO_NODE);	  
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
