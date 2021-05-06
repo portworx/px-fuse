@@ -47,8 +47,8 @@
 #define SUBMIT_BIO(bio) submit_bio(bio)
 #define REQ_OP(rq)  req_op(rq)
 #else
-#define BIO_OP(bio)   ((bio)->bi_rw)
 // only supports read or write
+#define BIO_OP(bio)   ((bio)->bi_rw)
 #define SUBMIT_BIO(bio)  submit_bio(((bio)->bi_rw & 1), bio)
 #define REQ_OP(rq)  (rq)->cmd_flags
 #endif
@@ -56,7 +56,6 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
 #define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#include <linux/bio.h>
 #ifndef BIOSET_NEED_BVECS
 #define BIOSET_NEED_BVECS (1)
 #endif
@@ -112,7 +111,7 @@
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(blk_queue_fua))
+     defined(bvec_iter_sectors))
 #define QUEUE_FLAG_SET(flag,q) blk_queue_flag_set(flag, q);
 #else
 #define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);

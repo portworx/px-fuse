@@ -48,7 +48,7 @@ struct pxd_device {
 	struct pxd_context *ctx;
 	bool connected;
 	mode_t mode;
-	bool fastpath; // 'fastpath' enabled device -- persistent once registered with kernel
+	bool fastpath; // this is persistent, how the block device registered with kernel
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
@@ -63,6 +63,18 @@ struct pxd_device {
         struct blk_mq_tag_set tag_set;
 #endif
 };
+
+// how pxd_device got registered with the kernel during device add.
+static inline
+bool fastpath_enabled(struct pxd_device *pxd_dev) {
+	return pxd_dev->fastpath;
+}
+
+// current IO status - fastpath vs nativepath
+static inline
+bool fastpath_active(struct pxd_device *pxd_dev) {
+	return pxd_dev->fp.fastpath;
+}
 
 void pxd_check_q_congested(struct pxd_device *pxd_dev);
 void pxd_check_q_decongested(struct pxd_device *pxd_dev);
