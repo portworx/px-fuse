@@ -269,16 +269,6 @@ static int reconcile_io_status(struct pxd_io_tracker *head)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
-static void pxd_complete_io_dummy(struct bio* bio)
-#else
-static void pxd_complete_io_dummy(struct bio* bio, int error)
-#endif
-{
-	printk("%s: bio %px should never be called\n", __func__, bio);
-	BUG();
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,3,0)
 static void pxd_complete_io(struct bio* bio)
 #else
 static void pxd_complete_io(struct bio* bio, int error)
@@ -407,11 +397,7 @@ static struct pxd_io_tracker* __pxd_init_block_replica(struct pxd_device *pxd_de
 
 	clone_bio->bi_private = pxd_dev;
 	BIO_SET_DEV(clone_bio, bdev);
-	if (S_ISBLK(get_mode(fileh))) {
-		clone_bio->bi_end_io = pxd_complete_io;
-	} else {
-		clone_bio->bi_end_io = pxd_complete_io_dummy;
-	}
+	clone_bio->bi_end_io = pxd_complete_io;
 
 	return iot;
 }
