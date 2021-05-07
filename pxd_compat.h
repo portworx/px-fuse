@@ -15,6 +15,8 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 #include <linux/part_stat.h>
 #endif
+#include <linux/bio.h>
+#include <linux/blk_types.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER
@@ -43,11 +45,12 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 #define BIO_OP(bio)   bio_op(bio)
 #define SUBMIT_BIO(bio) submit_bio(bio)
+#define REQ_OP(rq)  req_op(rq)
 #else
-#define BIO_OP(bio)   ((bio)->bi_rw)
 // only supports read or write
-#define BIO_OP(bio)   ((bio)->bi_rw & 1)
-#define SUBMIT_BIO(bio)  submit_bio(BIO_OP(bio), bio)
+#define BIO_OP(bio)   ((bio)->bi_rw)
+#define SUBMIT_BIO(bio)  submit_bio(((bio)->bi_rw & 1), bio)
+#define REQ_OP(rq)  (rq)->cmd_flags
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
@@ -62,8 +65,7 @@
 #if defined(bio_set_dev)
 #define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
 #else
-#define BIO_SET_DEV(bio, bdev)  \
-	do { \
+#define BIO_SET_DEV(bio, bdev)  do { \
 		(bio)->bi_bdev = (bdev); \
 	} while (0)
 #endif
@@ -118,6 +120,8 @@
 static inline unsigned int get_op_flags(struct bio *bio)
 {
 	unsigned int op_flags;
+	if (!bio) return 0;
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
 	op_flags = 0; // Not present in older kernels
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
@@ -132,8 +136,22 @@ static inline unsigned int get_op_flags(struct bio *bio)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 #define BDEVNAME(bio, b)   bio_devname(bio, b)
+#define BIO_COPY_DEV(dst, src) bio_copy_dev(dst, src)
 #else
 #define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+#define BIO_COPY_DEV(dst, src) do {			\
+	(dst)->bi_bdev = (src)->bi_bdev; 		\
+} while (0)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#define BIO_SET_OP_ATTRS(b, op, flags) bio_set_op_attrs(b, op, flags)
+#else
+// no 'op_flags' present, hence ignored, but pet the compiler for unused var
+#define BIO_SET_OP_ATTRS(b, op, flags) do {		\
+	(void)(flags); \
+	(b)->bi_rw = op; \
+} while (0)
 #endif
 
 #endif //GDFS_PXD_COMPAT_H
