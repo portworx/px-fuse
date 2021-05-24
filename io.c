@@ -1126,7 +1126,7 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 
 	inode = req->file->f_inode;
 	if (S_ISBLK(inode->i_mode)) {
-		struct block_device *bdev = inode->i_bdev;
+		struct block_device *bdev = I_BDEV(inode);
 		struct address_space *mapping = bdev->bd_inode->i_mapping;
 		truncate_inode_pages_range(mapping, off, off + bytes - 1);
 		ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE,

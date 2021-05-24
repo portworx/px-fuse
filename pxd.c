@@ -1226,6 +1226,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
 	else
 		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
 #endif
@@ -1500,14 +1501,22 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	}
 	(void)get_device(&pxd_dev->dev);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+#else
+	// set_capacity is sufficient for modifying disk size from 5.11 onwards
+	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+#endif
 	spin_unlock(&pxd_dev->lock);
 
+	// set_capacity is sufficient for modifying disk size from 5.11 onwards
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	revalidate_disk_size(pxd_dev->disk, true);
 #else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
+#endif
 #endif
 	put_device(&pxd_dev->dev);
 
