@@ -1169,7 +1169,7 @@ void fuse_run_user_queue(struct work_struct *w)
 		}
 
 		smp_store_release(&cb->r.read, read);
-		cond_resched();
+		//cond_resched();
 		read = cb->r.read;
 		write = smp_load_acquire(&cb->r.write);
 	}
