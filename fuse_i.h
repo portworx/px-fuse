@@ -265,6 +265,11 @@ struct fuse_conn {
 
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
+
+	/** timer for periodic processing */
+	struct timer_list iowork_timer;
+	struct work_struct iowork;
+	int shutdown;
 };
 
 /** Device operations */
@@ -300,6 +305,11 @@ struct fuse_req *fuse_get_req_for_background(struct fuse_conn *fc);
  * Send a request in the background
  */
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
+
+/**
+ * start processing pending IOs from userspace.
+ */
+void fuse_run_user_queue(struct work_struct *w);
 
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);

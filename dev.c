@@ -1105,6 +1105,11 @@ void fuse_end_queued_requests(struct fuse_conn *fc)
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
+	fc->shutdown = 1;
+	wmb();
+	del_timer_sync(&fc->iowork_timer);
+	cancel_work_sync(&fc->iowork);
+
 	if (fc->per_cpu_ids)
 		free_percpu(fc->per_cpu_ids);
 	if (fc->free_ids)
@@ -1135,6 +1140,54 @@ static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
 	memset(queue->user_requests, 0, sizeof(queue->user_requests));
 }
 
+
+static void fuse_monitor_user_queue(struct fuse_conn *fc);
+void fuse_run_user_queue(struct work_struct *w)
+{
+	struct fuse_conn *fc = container_of(w, struct fuse_conn, iowork);
+	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+
+	struct fuse_user_request *req;
+
+	uint32_t read = cb->r.read;
+	uint32_t write = smp_load_acquire(&cb->r.write);
+
+	while (!fc->shutdown && (read != write)) {
+		for (; read != write; ++read) {
+			req = &fc->queue->user_requests[
+				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
+			fuse_process_user_request(fc, req);
+		}
+
+		smp_store_release(&cb->r.read, read);
+		cond_resched();
+		read = cb->r.read;
+		write = smp_load_acquire(&cb->r.write);
+	}
+	fuse_monitor_user_queue(fc);
+}
+
+static void fuse_check_user_queue(struct timer_list *t)
+{
+	struct fuse_conn *fc = container_of(t, struct fuse_conn, iowork_timer);
+
+	if (!fc->shutdown && request_pending(fc)) {
+		queue_work(system_wq, &fc->iowork);
+		return;
+	}
+
+	/* rearm the timer to check again in near future */
+	fuse_monitor_user_queue(fc);
+}
+
+static void fuse_monitor_user_queue(struct fuse_conn *fc)
+{
+	if (!fc->shutdown) {
+		fc->iowork_timer.expires = jiffies + HZ / 10000;
+		add_timer(&fc->iowork_timer);
+	}
+}
+
 int fuse_conn_init(struct fuse_conn *fc)
 {
 	int i, rc;
@@ -1146,6 +1199,9 @@ int fuse_conn_init(struct fuse_conn *fc)
 	init_waitqueue_head(&fc->waitq);
 	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
 		GFP_KERNEL);
+
+	timer_setup(&fc->iowork_timer, fuse_check_user_queue, 0);
+	INIT_WORK(&fc->iowork, fuse_run_user_queue);
 
 	rc = -ENOMEM;
 	if (!fc->request_map) {
@@ -1184,6 +1240,7 @@ int fuse_conn_init(struct fuse_conn *fc)
 	}
 
 	fuse_conn_queues_init(fc->queue);
+	fuse_monitor_user_queue(fc);
 
 	return 0;
 err_out:
