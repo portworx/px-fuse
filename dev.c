@@ -1170,7 +1170,7 @@ void fuse_run_user_queue(struct work_struct *w)
 
 		smp_store_release(&cb->r.read, read);
 		//cond_resched();
-		read = cb->r.read;
+		//read = cb->r.read;
 		write = smp_load_acquire(&cb->r.write);
 	}
 	atomic_set(&cb->r.in_runq, 0);
@@ -1192,10 +1192,12 @@ static void fuse_check_user_queue(struct timer_list *t)
 
 static void fuse_monitor_user_queue(struct fuse_conn *fc)
 {
+#if 0
 	if (!fc->shutdown) {
 		unsigned long expires = jiffies + HZ / 10000;
 		mod_timer(&fc->iowork_timer, expires);
 	}
+#endif
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
