@@ -1077,6 +1077,9 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
 	if (!fc)
 		return POLLERR;
 
+	if (request_pending(fc))
+		return (mask | POLLIN | POLLRDNORM);
+
 	poll_wait(file, &fc->waitq, wait);
 
 	if (request_pending(fc))
@@ -1148,11 +1151,17 @@ void fuse_run_user_queue(struct work_struct *w)
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 
 	struct fuse_user_request *req;
+	uint32_t read, write;
 
-	uint32_t read = cb->r.read;
-	uint32_t write = smp_load_acquire(&cb->r.write);
+	if (atomic_cmpxchg(&cb->r.in_runq, 0, 1) != 0) {
+		return; // already processing, skip it.
+	}
+
+	read = cb->r.read;
+	write = smp_load_acquire(&cb->r.write);
 
 	while (!fc->shutdown && (read != write)) {
+		rmb();
 		for (; read != write; ++read) {
 			req = &fc->queue->user_requests[
 				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
@@ -1164,6 +1173,7 @@ void fuse_run_user_queue(struct work_struct *w)
 		read = cb->r.read;
 		write = smp_load_acquire(&cb->r.write);
 	}
+	atomic_set(&cb->r.in_runq, 0);
 	fuse_monitor_user_queue(fc);
 }
 
@@ -1183,8 +1193,8 @@ static void fuse_check_user_queue(struct timer_list *t)
 static void fuse_monitor_user_queue(struct fuse_conn *fc)
 {
 	if (!fc->shutdown) {
-		fc->iowork_timer.expires = jiffies + HZ / 10000;
-		add_timer(&fc->iowork_timer);
+		unsigned long expires = jiffies + HZ / 10000;
+		mod_timer(&fc->iowork_timer, expires);
 	}
 }
 

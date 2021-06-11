@@ -226,7 +226,6 @@ static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
 	return ret;
 }
 
-#if 0
 static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
@@ -236,7 +235,6 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 
 	return 0;
 }
-#endif
 
 static void print_io_flusher_state(unsigned int new_flags,
 				   pid_t pid, pid_t ppid, char *comm)
@@ -351,8 +349,7 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_init(file, (void __user *)arg);
 	case PXD_IOC_RUN_USER_QUEUE:
 		/* becomes a nop */
-		// return pxd_ioctl_run_user_queue(file);
-		return 0;
+		return pxd_ioctl_run_user_queue(file);
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
 	case PXD_IOC_FPCLEANUP:
