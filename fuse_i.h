@@ -182,7 +182,7 @@ namespace ioring {
 /// @param fd file descriptor associated with the queue
 /// @param ioctl_cmd ioctl command
 /// @param lock queue lock, unlocked around ioctl
-void run_queue(fuse_queue_cb *queue, int fd, int ioctl_cmd,
+void run_queue(bool frontend, fuse_queue_cb *queue, int fd, int ioctl_cmd,
 	       std::unique_lock<px::spinlock> &lock);
 }
 }
