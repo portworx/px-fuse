@@ -159,7 +159,7 @@ struct alignas(64) fuse_queue_writer {
 	uint32_t need_wake_up;
 	uint64_t sequence;      /** next request sequence number */
 	uint32_t committed_;    /** last write index committed to reader */
-	bool in_runq;			/** a thread is processing the queue */
+	bool in_runq;           //not used //        /** a thread is processing the queue */
 	char pad_1[3];
 	uint32_t pad_2[8];
 };
@@ -169,7 +169,7 @@ struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
 	px::spinlock lock;
-	uint32_t pad_1;
+	std::atomic<uint32_t> in_runq; /** read only, kernel exposed flag, a thread is processing the queue */
 	uint64_t pad_2[6];
 };
 
@@ -269,8 +269,9 @@ struct fuse_conn {
 
 	/** timer for periodic processing */
 	struct timer_list iowork_timer;
-	struct work_struct iowork;
-	int shutdown;
+	// struct work_struct iowork;
+	wait_queue_head_t io_wait;
+	struct task_struct* io_worker_thread;
 };
 
 /** Device operations */
@@ -310,7 +311,8 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
 /**
  * start processing pending IOs from userspace.
  */
-void fuse_run_user_queue(struct work_struct *w);
+//void fuse_run_user_queue(struct work_struct *w);
+void fuse_run_user_queue(struct fuse_conn *fc);
 
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);

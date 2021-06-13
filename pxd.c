@@ -231,7 +231,8 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	struct fuse_conn *fc = &ctx->fc;
 
-	fuse_run_user_queue(&fc->iowork);
+	// fuse_run_user_queue(&fc->iowork);
+	wake_up(&fc->io_wait);
 
 	return 0;
 }

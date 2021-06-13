@@ -1108,10 +1108,9 @@ void fuse_end_queued_requests(struct fuse_conn *fc)
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
-	fc->shutdown = 1;
-	wmb();
-	del_timer_sync(&fc->iowork_timer);
-	cancel_work_sync(&fc->iowork);
+	// del_timer_sync(&fc->iowork_timer);
+	// cancel_work_sync(&fc->iowork);
+	kthread_stop(fc->io_worker_thread);
 
 	if (fc->per_cpu_ids)
 		free_percpu(fc->per_cpu_ids);
@@ -1145,23 +1144,22 @@ static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
 
 
 static void fuse_monitor_user_queue(struct fuse_conn *fc);
-void fuse_run_user_queue(struct work_struct *w)
+//void fuse_run_user_queue(struct work_struct *w)
+void fuse_run_user_queue(struct fuse_conn *fc)
 {
-	struct fuse_conn *fc = container_of(w, struct fuse_conn, iowork);
+	//struct fuse_conn *fc = container_of(w, struct fuse_conn, iowork);
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 
 	struct fuse_user_request *req;
 	uint32_t read, write;
 
-	if (atomic_cmpxchg(&cb->r.in_runq, 0, 1) != 0) {
-		return; // already processing, skip it.
-	}
-
-	read = cb->r.read;
+	wmb();
 	write = smp_load_acquire(&cb->r.write);
+	read = cb->r.read;
 
-	while (!fc->shutdown && (read != write)) {
-		rmb();
+	atomic_set(&cb->r.in_runq, 1);
+
+	while (read != write) {
 		for (; read != write; ++read) {
 			req = &fc->queue->user_requests[
 				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
@@ -1171,24 +1169,28 @@ void fuse_run_user_queue(struct work_struct *w)
 		smp_store_release(&cb->r.read, read);
 		//cond_resched();
 		//read = cb->r.read;
+		wmb();
 		write = smp_load_acquire(&cb->r.write);
 	}
+
 	atomic_set(&cb->r.in_runq, 0);
 	fuse_monitor_user_queue(fc);
 }
 
+/*
 static void fuse_check_user_queue(struct timer_list *t)
 {
 	struct fuse_conn *fc = container_of(t, struct fuse_conn, iowork_timer);
 
-	if (!fc->shutdown && request_pending(fc)) {
+	if (request_pending(fc)) {
 		queue_work(system_wq, &fc->iowork);
 		return;
 	}
 
-	/* rearm the timer to check again in near future */
+	// rearm the timer to check again in near future 
 	fuse_monitor_user_queue(fc);
 }
+*/
 
 static void fuse_monitor_user_queue(struct fuse_conn *fc)
 {
@@ -1198,6 +1200,23 @@ static void fuse_monitor_user_queue(struct fuse_conn *fc)
 		mod_timer(&fc->iowork_timer, expires);
 	}
 #endif
+}
+
+static int fuse_process_user_queue(void *c)
+{
+	struct fuse_conn *fc = (struct fuse_conn*) c;
+
+	while (!kthread_should_stop()) {
+		if (signal_pending(current))
+			flush_signals(current);
+		wait_event_interruptible_timeout(fc->io_wait, 
+				(request_pending(fc) || kthread_should_stop()),
+				usecs_to_jiffies(100));
+
+		fuse_run_user_queue(fc);
+	}
+
+	return 0;
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1212,8 +1231,16 @@ int fuse_conn_init(struct fuse_conn *fc)
 	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
 		GFP_KERNEL);
 
-	timer_setup(&fc->iowork_timer, fuse_check_user_queue, 0);
-	INIT_WORK(&fc->iowork, fuse_run_user_queue);
+	// timer_setup(&fc->iowork_timer, fuse_check_user_queue, 0);
+	// INIT_WORK(&fc->iowork, fuse_run_user_queue);
+	init_waitqueue_head(&fc->io_wait);
+
+	fc->io_worker_thread = kthread_create(fuse_process_user_queue, fc, "userq-worker");
+	if (IS_ERR(fc->io_worker_thread)) {
+		rc = (int) PTR_ERR(fc->io_worker_thread);
+		goto err_out;
+	}
+	wake_up_process(fc->io_worker_thread);
 
 	rc = -ENOMEM;
 	if (!fc->request_map) {
