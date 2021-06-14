@@ -349,7 +349,6 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 	case PXD_IOC_INIT:
 		return pxd_ioctl_init(file, (void __user *)arg);
 	case PXD_IOC_RUN_USER_QUEUE:
-		/* becomes a nop */
 		return pxd_ioctl_run_user_queue(file);
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
