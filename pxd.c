@@ -452,11 +452,25 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req, int
 }
 
 #ifdef __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+static void pxd_update_stats(struct fuse_req *req, int sgrp, unsigned int count)
+#else
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
+#endif
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
+{
+		struct block_device *p = pxd_dev->disk->part0;
+		if (!p) return;
+
+
+		part_stat_lock();
+		part_stat_add(p, sectors[sgrp], count);
+		part_stat_inc(p, ios[sgrp]);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
 		part_stat_lock();
 		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
 		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
@@ -487,7 +501,22 @@ static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 #else
 	trace_pxd_reply(req->in.unique, REQ_WRITE);
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+{
+        const struct bio* bio = req->bio;
+        int statgrp = STAT_WRITE;
+        size_t sz = BIO_SIZE(bio) / SECTOR_SIZE;
+
+        if (!bio) statgrp = STAT_FLUSH;
+        else if (!op_is_write(bio->bi_opf)) statgrp = STAT_READ;
+        else if (op_is_flush(bio->bi_opf) && (sz == 0)) statgrp = STAT_FLUSH;
+        else statgrp = STAT_WRITE;
+
+        pxd_update_stats(req, statgrp, sz);
+}
+#else
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
+#endif
 	BIO_ENDIO(req->bio, status);
 	pxd_request_complete(fc, req, status);
 
