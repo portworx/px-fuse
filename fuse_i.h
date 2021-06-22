@@ -194,7 +194,7 @@ void run_queue(bool frontend, fuse_queue_cb *queue, int fd, int ioctl_cmd,
 #define FUSE_USER_OP_REQ_DONE 1		/** request completion */
 
 /** request from user space to kernel */
-struct fuse_user_request {
+struct ____cacheline_aligned fuse_user_request {
 	uint8_t opcode;		/** operation code */
 	uint16_t len;		/** number of entries in iovec array */
 	uint8_t pad;		/** padding */
@@ -205,7 +205,7 @@ struct fuse_user_request {
 };
 
 /** queue control block */
-struct fuse_queue_cb {
+struct ____cacheline_aligned fuse_queue_cb {
 	struct fuse_queue_writer w;
 	struct fuse_queue_reader r;
 };
@@ -213,12 +213,12 @@ struct fuse_queue_cb {
 /** fuse connection queues */
 struct ____cacheline_aligned fuse_conn_queues {
 	/** requests from kernel to user space */
-	struct ____cacheline_aligned fuse_queue_cb requests_cb;
-	struct ____cacheline_aligned rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
+	struct fuse_queue_cb requests_cb;
+	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
 
 	/** requests from user space to kernel */
-	struct ____cacheline_aligned fuse_queue_cb user_requests_cb;
-	struct ____cacheline_aligned fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
+	struct fuse_queue_cb user_requests_cb;
+	struct fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 #ifdef __KERNEL__
