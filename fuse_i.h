@@ -169,7 +169,7 @@ struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
 	px::spinlock lock;
-	uint32_t in_runq; /** read only, kernel exposed flag, a thread is processing the queue */
+	std::atomic<uint32_t> in_runq; /** read only, kernel exposed flag, a thread is processing the queue */
 	uint64_t pad_2[6];
 };
 
@@ -213,12 +213,12 @@ struct fuse_queue_cb {
 /** fuse connection queues */
 struct ____cacheline_aligned fuse_conn_queues {
 	/** requests from kernel to user space */
-	struct fuse_queue_cb requests_cb;
-	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
+	struct ____cacheline_aligned fuse_queue_cb requests_cb;
+	struct ____cacheline_aligned rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
 
 	/** requests from user space to kernel */
-	struct fuse_queue_cb user_requests_cb;
-	struct fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
+	struct ____cacheline_aligned fuse_queue_cb user_requests_cb;
+	struct ____cacheline_aligned fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 #ifdef __KERNEL__

@@ -254,7 +254,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 static bool request_pending(struct fuse_conn *fc)
 {
 	struct fuse_queue_cb *cb = &fc->queue->requests_cb;
-	return cb->r.read != cb->r.write;
+	return cb->r.read != smp_load_acquire(&cb->r.write);
 }
 
 /* Wait until a request is available on the pending list */
@@ -1159,6 +1159,7 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 	write = smp_load_acquire(&cb->r.write);
 	read = cb->r.read;
 
+	pr_info("%s read idx %u, write idx %u", __func__, read, write);
 	while (read != write) {
 		for (; read != write; ++read) {
 			req = &fc->queue->user_requests[
@@ -1175,6 +1176,8 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 
 	//atomic_set(&cb->r.in_runq, 0);
 	smp_store_release(&cb->r.in_runq, 0);
+
+	pr_info("%s completing read idx %u, write idx %u", __func__, read, write);
 	fuse_monitor_user_queue(fc);
 }
 
