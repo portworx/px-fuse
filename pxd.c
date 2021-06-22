@@ -231,6 +231,7 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	struct fuse_conn *fc = &ctx->fc;
 
+	atomic_inc(&fc->woken);
 	// fuse_run_user_queue(&fc->iowork);
 	wake_up(&fc->io_wait);
 
@@ -1891,6 +1892,30 @@ static ssize_t pxd_debug_store(struct device *dev,
 	return count;
 }
 
+static ssize_t pxd_iowake_show(struct device *dev,
+                     struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	return sprintf(buf, "woken:%d,run:%d",
+			atomic_read(&pxd_dev->ctx->fc.woken),
+			atomic_read(&pxd_dev->ctx->fc.run));
+}
+
+static ssize_t pxd_iowake_store(struct device *dev,
+			struct device_attribute *attr,
+		        const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	struct fuse_conn *fc = &pxd_dev->ctx->fc;
+
+	atomic_inc(&fc->woken);
+	// fuse_run_user_queue(&fc->iowork);
+	wake_up(&fc->io_wait);
+
+	return count;
+}
+
 static ssize_t pxd_inprogress_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
@@ -1959,6 +1984,7 @@ static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);
 static DEVICE_ATTR(inprogress, S_IRUGO, pxd_inprogress_show, NULL);
 static DEVICE_ATTR(release, S_IWUSR, NULL, pxd_release_store);
+static DEVICE_ATTR(iowake, S_IRUGO|S_IWUSR, pxd_iowake_show, pxd_iowake_store);
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -1972,6 +1998,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_debug.attr,
 	&dev_attr_inprogress.attr,
 	&dev_attr_release.attr,
+	&dev_attr_iowake.attr,
 	NULL
 };
 

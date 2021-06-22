@@ -128,8 +128,8 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 #ifdef __KERNEL__
 /** writer control block */
 struct ____cacheline_aligned fuse_queue_writer {
-	uint32_t write ____cacheline_aligned;         /** cached write index */
-	uint32_t read ____cacheline_aligned;		/** cached read index */
+	uint32_t write;         /** cached write index */
+	uint32_t read;		/** cached read index */
 	spinlock_t lock;	/** writer lock */
 	uint32_t need_wake_up; /** if true reader needs wake up call */
 	uint64_t sequence;        /** next request sequence number */
@@ -153,8 +153,8 @@ struct ____cacheline_aligned fuse_queue_reader {
 
 /** writer control block */
 struct alignas(64) fuse_queue_writer {
-	uint32_t alignas(64) write;         	/** cached write index */
-	uint32_t alignas(64) read;			/** cached read index */
+	uint32_t write;         	/** cached write index */
+	uint32_t read;			/** cached read index */
 	px::spinlock lock;		/** writer lock */
 	uint32_t need_wake_up;
 	uint64_t sequence;      /** next request sequence number */
@@ -166,8 +166,8 @@ struct alignas(64) fuse_queue_writer {
 
 /** reader control block */
 struct alignas(64) fuse_queue_reader {
-	std::atomic<uint32_t> alignas(64) read;	/** read index updated by reader */
-	std::atomic<uint32_t> alignas(64) write;	/** write index updated by writer */
+	std::atomic<uint32_t> read;	/** read index updated by reader */
+	std::atomic<uint32_t> write;	/** write index updated by writer */
 	px::spinlock lock;
 	std::atomic<uint32_t> in_runq; /** read only, kernel exposed flag, a thread is processing the queue */
 	uint64_t pad_2[6];
@@ -194,7 +194,7 @@ void run_queue(bool frontend, fuse_queue_cb *queue, int fd, int ioctl_cmd,
 #define FUSE_USER_OP_REQ_DONE 1		/** request completion */
 
 /** request from user space to kernel */
-struct ____cacheline_aligned fuse_user_request {
+struct fuse_user_request {
 	uint8_t opcode;		/** operation code */
 	uint16_t len;		/** number of entries in iovec array */
 	uint8_t pad;		/** padding */
@@ -205,7 +205,7 @@ struct ____cacheline_aligned fuse_user_request {
 };
 
 /** queue control block */
-struct ____cacheline_aligned fuse_queue_cb {
+struct fuse_queue_cb {
 	struct fuse_queue_writer w;
 	struct fuse_queue_reader r;
 };
@@ -272,6 +272,7 @@ struct fuse_conn {
 	// struct work_struct iowork;
 	wait_queue_head_t io_wait;
 	struct task_struct* io_worker_thread;
+	atomic_t run, woken;
 };
 
 /** Device operations */

@@ -257,6 +257,12 @@ static bool request_pending(struct fuse_conn *fc)
 	return cb->r.read != smp_load_acquire(&cb->r.write);
 }
 
+static bool user_request_pending(struct fuse_conn *fc)
+{
+	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+	return cb->r.read != smp_load_acquire(&cb->r.write);
+}
+
 /* Wait until a request is available on the pending list */
 static void request_wait(struct fuse_conn *fc)
 {
@@ -1152,6 +1158,7 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 
 	struct fuse_user_request *req;
 	uint32_t read, write;
+	bool did_work = false;
 
 	//atomic_set(&cb->r.in_runq, 1);
 	smp_store_release(&cb->r.in_runq, 1);
@@ -1167,15 +1174,16 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 			fuse_process_user_request(fc, req);
 		}
 
+		did_work = true;
 		smp_store_release(&cb->r.read, read);
 		//cond_resched();
 		//read = cb->r.read;
-		wmb();
 		write = smp_load_acquire(&cb->r.write);
 	}
 
 	//atomic_set(&cb->r.in_runq, 0);
 	smp_store_release(&cb->r.in_runq, 0);
+	if (did_work) atomic_inc(&fc->run); // incr when actual work gets done
 
 	pr_info("%s completing read idx %u, write idx %u", __func__, read, write);
 	fuse_monitor_user_queue(fc);
@@ -1214,7 +1222,7 @@ static int fuse_process_user_queue(void *c)
 		if (signal_pending(current))
 			flush_signals(current);
 		wait_event_interruptible(fc->io_wait, 
-				(request_pending(fc) || kthread_should_stop()));
+				(user_request_pending(fc) || kthread_should_stop()));
 
 		fuse_run_user_queue(fc);
 	}
