@@ -1153,11 +1153,11 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 	struct fuse_user_request *req;
 	uint32_t read, write;
 
-	wmb();
+	//atomic_set(&cb->r.in_runq, 1);
+	smp_store_release(&cb->r.in_runq, 1);
+
 	write = smp_load_acquire(&cb->r.write);
 	read = cb->r.read;
-
-	atomic_set(&cb->r.in_runq, 1);
 
 	while (read != write) {
 		for (; read != write; ++read) {
@@ -1173,7 +1173,8 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 		write = smp_load_acquire(&cb->r.write);
 	}
 
-	atomic_set(&cb->r.in_runq, 0);
+	//atomic_set(&cb->r.in_runq, 0);
+	smp_store_release(&cb->r.in_runq, 0);
 	fuse_monitor_user_queue(fc);
 }
 
@@ -1209,9 +1210,8 @@ static int fuse_process_user_queue(void *c)
 	while (!kthread_should_stop()) {
 		if (signal_pending(current))
 			flush_signals(current);
-		wait_event_interruptible_timeout(fc->io_wait, 
-				(request_pending(fc) || kthread_should_stop()),
-				usecs_to_jiffies(100));
+		wait_event_interruptible(fc->io_wait, 
+				(request_pending(fc) || kthread_should_stop()));
 
 		fuse_run_user_queue(fc);
 	}
@@ -1234,13 +1234,11 @@ int fuse_conn_init(struct fuse_conn *fc)
 	// timer_setup(&fc->iowork_timer, fuse_check_user_queue, 0);
 	// INIT_WORK(&fc->iowork, fuse_run_user_queue);
 	init_waitqueue_head(&fc->io_wait);
-
 	fc->io_worker_thread = kthread_create(fuse_process_user_queue, fc, "userq-worker");
 	if (IS_ERR(fc->io_worker_thread)) {
 		rc = (int) PTR_ERR(fc->io_worker_thread);
 		goto err_out;
 	}
-	wake_up_process(fc->io_worker_thread);
 
 	rc = -ENOMEM;
 	if (!fc->request_map) {
@@ -1280,6 +1278,7 @@ int fuse_conn_init(struct fuse_conn *fc)
 
 	fuse_conn_queues_init(fc->queue);
 	fuse_monitor_user_queue(fc);
+	wake_up_process(fc->io_worker_thread);
 
 	return 0;
 err_out:
