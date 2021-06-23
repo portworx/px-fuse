@@ -1150,10 +1150,8 @@ static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
 void fuse_run_user_queue(struct fuse_conn *fc)
 {
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
-
 	struct fuse_user_request *req;
 	uint32_t read, write;
-	bool did_work = false;
 
 	smp_store_release(&cb->r.in_runq, 1);
 
@@ -1167,13 +1165,13 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 			fuse_process_user_request(fc, req);
 		}
 
-		did_work = true;
 		smp_store_release(&cb->r.read, read);
+		cond_resched();
+		read = cb->r.read;
 		write = smp_load_acquire(&cb->r.write);
 	}
 
 	smp_store_release(&cb->r.in_runq, 0);
-	if (did_work) atomic_inc(&fc->run); // incr when actual work gets done
 }
 
 static int fuse_process_user_queue(void *c)

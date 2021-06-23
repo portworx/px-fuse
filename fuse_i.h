@@ -159,7 +159,7 @@ struct alignas(64) fuse_queue_writer {
 	uint32_t need_wake_up;
 	uint64_t sequence;      /** next request sequence number */
 	uint32_t committed_;    /** last write index committed to reader */
-	bool in_runq;           //not used //        /** a thread is processing the queue */
+	bool in_runq;           // pxdev io - not used, iouring - still uses this
 	char pad_1[3];
 	uint32_t pad_2[8];
 };
@@ -267,13 +267,10 @@ struct fuse_conn {
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
 
-	/** timer for periodic processing */
-	struct timer_list iowork_timer;
-	// struct work_struct iowork;
+	/** user request processing */
 	wait_queue_head_t io_wait;
 	struct task_struct* io_worker_thread;
 	bool parked;
-	atomic_t run, woken;
 };
 
 /** Device operations */
@@ -313,7 +310,6 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
 /**
  * start processing pending IOs from userspace.
  */
-//void fuse_run_user_queue(struct work_struct *w);
 void fuse_run_user_queue(struct fuse_conn *fc);
 
 /* Abort all requests */
