@@ -1114,9 +1114,7 @@ void fuse_end_queued_requests(struct fuse_conn *fc)
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
-	// del_timer_sync(&fc->iowork_timer);
-	// cancel_work_sync(&fc->iowork);
-	kthread_stop(fc->io_worker_thread);
+	if (fc->io_worker_thread) kthread_stop(fc->io_worker_thread);
 
 	if (fc->per_cpu_ids)
 		free_percpu(fc->per_cpu_ids);
@@ -1185,17 +1183,46 @@ static int fuse_process_user_queue(void *c)
 	while (!kthread_should_stop()) {
 		if (signal_pending(current))
 			flush_signals(current);
-		wait_event_interruptible(fc->io_wait, 
+		wait_event_interruptible_timeout(fc->io_wait,
 				(user_request_pending(fc) || kthread_should_stop() ||
-				 kthread_should_park()));
+				 kthread_should_park()),
+				usecs_to_jiffies(100));
 
-		if (kthread_should_park()) kthread_parkme();
-		else if (kthread_should_stop()) break;
+		if (kthread_should_stop())
+			break;
+
+		if (kthread_should_park()) {
+			fc->parked = true;
+			kthread_parkme();
+			fc->parked = false;
+			continue;
+		}
 
 		fuse_run_user_queue(fc);
 	}
 
 	return 0;
+}
+
+void fuse_pause_user_queue(struct fuse_conn *fc)
+{
+	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+	kthread_park(fc->io_worker_thread);
+
+	// wait until active processing gets complete
+	while(cb->r.in_runq) {
+		schedule_timeout(msecs_to_jiffies(1));
+	}
+	// no more background thread to complete IO.
+}
+
+void fuse_restart_user_queue(struct fuse_conn *fc)
+{
+	if (unlikely(fc->parked)) {
+		kthread_unpark(fc->io_worker_thread);
+	} else {
+		wake_up(&fc->io_wait);
+	}
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1254,6 +1281,7 @@ int fuse_conn_init(struct fuse_conn *fc)
 	}
 
 	fuse_conn_queues_init(fc->queue);
+	fc->parked = false;
 	wake_up_process(fc->io_worker_thread);
 
 	return 0;
@@ -1353,12 +1381,7 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	int resend_count = 0;
 	struct rdwr_in *rdwr;
 
-	kthread_park(fc->io_worker_thread);
-	{
-		struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
-		cb->w.read = cb->w.write = 0;
-		cb->r.read = cb->r.write = 0;
-	}
+	fuse_pause_user_queue(fc);
 
 	/*
 	 * Receive function may be adding new requests while scan is in progress.
@@ -1447,8 +1470,6 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	spin_unlock(&fc->lock);
 
 	vfree(resend_reqs);
-
-	kthread_unpark(fc->io_worker_thread);
 
 	return 0;
 }

@@ -272,6 +272,7 @@ struct fuse_conn {
 	// struct work_struct iowork;
 	wait_queue_head_t io_wait;
 	struct task_struct* io_worker_thread;
+	bool parked;
 	atomic_t run, woken;
 };
 
@@ -340,6 +341,8 @@ void fuse_conn_put(struct fuse_conn *fc);
 struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 
 int fuse_restart_requests(struct fuse_conn *fc);
+void fuse_restart_user_queue(struct fuse_conn *fc);
+void fuse_pause_user_queue(struct fuse_conn *fc);
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);

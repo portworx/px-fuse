@@ -232,8 +232,7 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 	struct fuse_conn *fc = &ctx->fc;
 
 	atomic_inc(&fc->woken);
-	// fuse_run_user_queue(&fc->iowork);
-	wake_up(&fc->io_wait);
+	fuse_restart_user_queue(fc);
 
 	return 0;
 }
