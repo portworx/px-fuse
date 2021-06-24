@@ -271,6 +271,7 @@ struct fuse_conn {
 	wait_queue_head_t io_wait;
 	struct task_struct* io_worker_thread;
 	bool parked;
+	struct mm_struct *user_mm;
 };
 
 /** Device operations */

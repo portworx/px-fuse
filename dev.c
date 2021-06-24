@@ -25,6 +25,8 @@
 #include <linux/blkdev.h>
 #include <linux/sort.h>
 #include <linux/vmalloc.h>
+#include <linux/mmu_context.h>
+
 #include "pxd_compat.h"
 #include "pxd_core.h"
 
@@ -1177,6 +1179,22 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 static int fuse_process_user_queue(void *c)
 {
 	struct fuse_conn *fc = (struct fuse_conn*) c;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+	mm_segment_t old_fs = get_fs();
+#endif
+
+	printk("fuse_process_user_queue running\n");
+
+	if (fc->user_mm) {
+		printk("%s: setting up user access context\n", __func__);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+		use_mm(fc->user_mm);
+		old_fs = get_fs();
+		set_fs(USER_DS);
+#else
+		kthread_use_mm(fc->user_mm);
+#endif
+	}
 
 	while (!kthread_should_stop()) {
 		if (signal_pending(current))
@@ -1186,13 +1204,44 @@ static int fuse_process_user_queue(void *c)
 				 kthread_should_park()),
 				usecs_to_jiffies(100));
 
-		if (kthread_should_stop())
+		if (kthread_should_stop()) {
+			WARN_ON(fc->user_mm);
+			if (fc->user_mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+				set_fs(old_fs);
+				unuse_mm(fc->user_mm);
+#else
+				kthread_unuse_mm(fc->user_mm);
+#endif
+			}
+			fc->user_mm = NULL;
 			break;
+		}
 
 		if (kthread_should_park()) {
 			fc->parked = true;
+			if (fc->user_mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+				set_fs(old_fs);
+				unuse_mm(fc->user_mm);
+#else
+				kthread_unuse_mm(fc->user_mm);
+#endif
+			}
+			fc->user_mm = NULL;
+			printk("fuse_process_user_queue parked\n");
 			kthread_parkme();
+			printk("fuse_process_user_queue unparked\n");
 			fc->parked = false;
+			if (fc->user_mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+				use_mm(fc->user_mm);
+				old_fs = get_fs();
+				set_fs(USER_DS);
+#else
+				kthread_use_mm(fc->user_mm);
+#endif
+			}
 			continue;
 		}
 
@@ -1205,22 +1254,17 @@ static int fuse_process_user_queue(void *c)
 void fuse_pause_user_queue(struct fuse_conn *fc)
 {
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+
 	kthread_park(fc->io_worker_thread);
 
-	// wait until active processing gets complete
-	while(cb->r.in_runq) {
-		schedule_timeout(msecs_to_jiffies(1));
-	}
-	// no more background thread to complete IO.
+	BUG_ON(cb->r.in_runq);
+	BUG_ON(fc->user_mm);
 }
 
 void fuse_restart_user_queue(struct fuse_conn *fc)
 {
-	if (unlikely(fc->parked)) {
-		kthread_unpark(fc->io_worker_thread);
-	} else {
-		wake_up(&fc->io_wait);
-	}
+	fc->user_mm = current->mm;
+	kthread_unpark(fc->io_worker_thread);
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1278,9 +1322,12 @@ int fuse_conn_init(struct fuse_conn *fc)
 		memset(my_ids, 0, sizeof(*my_ids));
 	}
 
+	printk("kicking the user proc thread\n");
 	fuse_conn_queues_init(fc->queue);
-	fc->parked = false;
-	wake_up_process(fc->io_worker_thread);
+	fc->user_mm = NULL;
+	fc->parked = true;
+	// wake_up_process(fc->io_worker_thread);
+	kthread_park(fc->io_worker_thread);
 
 	return 0;
 err_out:
@@ -1379,8 +1426,6 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	int resend_count = 0;
 	struct rdwr_in *rdwr;
 
-	fuse_pause_user_queue(fc);
-
 	/*
 	 * Receive function may be adding new requests while scan is in progress.
 	 * Find the sequence of the first request unread by user space. If there are no
@@ -1468,6 +1513,9 @@ int fuse_restart_requests(struct fuse_conn *fc)
 	spin_unlock(&fc->lock);
 
 	vfree(resend_reqs);
+
+	/* user space init was good */
+	fuse_restart_user_queue(fc);
 
 	return 0;
 }
