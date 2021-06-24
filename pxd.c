@@ -231,7 +231,7 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	struct fuse_conn *fc = &ctx->fc;
 
-	fuse_restart_user_queue(fc);
+	wake_up(&fc->io_wait);
 
 	return 0;
 }
@@ -2105,6 +2105,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		WRITE_ONCE(ctx->fc.connected, 0);
 	}
 
+	fuse_pause_user_queue(&ctx->fc);
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
