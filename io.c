@@ -1176,8 +1176,10 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 		struct block_device *bdev = I_BDEV(inode);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0) &&  !defined(QUEUE_FLAG_NOWAIT)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
-#else
+#elif LINUX_VERSION_CODE <= KERNEL_VERSION(5,11,0)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL);
+#else
+		ret = blkdev_issue_flush(bdev);
 #endif
 	}
 
