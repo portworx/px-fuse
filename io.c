@@ -1126,7 +1126,7 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 
 	inode = req->file->f_inode;
 	if (S_ISBLK(inode->i_mode)) {
-		struct block_device *bdev = inode->i_bdev;
+		struct block_device *bdev = I_BDEV(inode);
 		struct address_space *mapping = bdev->bd_inode->i_mapping;
 		truncate_inode_pages_range(mapping, off, off + bytes - 1);
 		ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE,
@@ -1176,8 +1176,10 @@ static int io_syncfs(struct io_kiocb *req, const struct sqe_submit *s,
 		struct block_device *bdev = I_BDEV(inode);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0) &&  !defined(QUEUE_FLAG_NOWAIT)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
-#else
+#elif LINUX_VERSION_CODE <= KERNEL_VERSION(5,11,0)
 		ret = blkdev_issue_flush(bdev, GFP_KERNEL);
+#else
+		ret = blkdev_issue_flush(bdev);
 #endif
 	}
 
