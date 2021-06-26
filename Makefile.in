@@ -2,9 +2,6 @@ px-objs = pxd.o dev.o iov_iter.o px_version.o io.o kiolib.o pxd_bio_makereq.o px
 obj-m = px.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__
-#PXDEFINES := -D__PXKERNEL__ -D__PX_FASTPATH__ -D__PXD_BIO_MAKEREQ__
-PXDEFINES := -D__PXKERNEL__ -D__PX_FASTPATH__ -D__PXD_BIO_BLKMQ__
-
 KVERSION=$(shell uname -r)
 
 ifndef KERNELPATH
@@ -46,11 +43,20 @@ minver_minor=$(call minorfn, ${MINKVER})
 blkmq_major=$(call majorfn, ${BLKMQ_MINKVER})
 blkmq_minor=$(call minorfn, ${BLKMQ_MINKVER})
 
+kmajor=$(call majorfn, ${KERNELVER})
+kminor=$(call minorfn, ${KERNELVER})
+
+#makereq interface supports fastpath in all version (not recommended)
+#PXDEFINES := -D__PXKERNEL__ -D__PXD_BIO_MAKEREQ__
+#FPATH_MINKVER=${kmajor}.${kminor}
+
+#blkmq mode has version check for fastpath (default, enabled)
+PXDEFINES := -D__PXKERNEL__ -D__PXD_BIO_BLKMQ__
+FPATH_MINKVER=4.12
+
 fp_major=$(call majorfn, ${FPATH_MINKVER})
 fp_minor=$(call minorfn, ${FPATH_MINKVER})
 
-kmajor=$(call majorfn, ${KERNELVER})
-kminor=$(call minorfn, ${KERNELVER})
 
 ## min kernel version checks
 ifeq ($(call verlater,${minver_major},${kmajor}),0)
@@ -59,6 +65,19 @@ else
 ifeq ($(call versame,${minver_major},${kmajor}),0)
 ifeq ($(call verlater,${minver_minor},${kminor}),0)
 $(error Kernel version error: Build kernel version must be >= $(MINKVER).)
+endif
+endif
+endif
+
+## fastpath checks
+ifeq ($(call verlater,${kmajor},${fp_major}),0)
+PXDEFINES += -D__PX_FASTPATH__
+$(info Kernel version ${KERNELVER} supports fastpath.)
+else
+ifeq ($(call versame,${kmajor},${fp_major}),0)
+ifeq ($(call versameorlater,${kminor},${fp_minor}),0)
+PXDEFINES += -D__PX_FASTPATH__
+$(info Kernel version ${KERNELVER} supports fastpath.)
 endif
 endif
 endif
