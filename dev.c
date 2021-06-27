@@ -1225,6 +1225,7 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 		fuse_process_user_request(fc, req);
 	}
 
+	if (span != 0) cond_resched();
 	fuse_runq_exit(fc);
 }
 
