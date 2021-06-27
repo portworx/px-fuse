@@ -1116,7 +1116,8 @@ void fuse_end_queued_requests(struct fuse_conn *fc)
 
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
-	if (fc->io_worker_thread) kthread_stop(fc->io_worker_thread);
+	int i;
+	for (i=0; i<NWORKERS; i++) kthread_stop(fc->io_worker_thread[i]);
 
 	if (fc->per_cpu_ids)
 		free_percpu(fc->per_cpu_ids);
@@ -1148,32 +1149,83 @@ static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
 	memset(queue->user_requests, 0, sizeof(queue->user_requests));
 }
 
+static
+void fuse_runq_enter(struct fuse_conn *fc)
+{
+	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+	// incr below counter
+	// smp_store_release(&cb->r.in_runq, 1);
+
+	int32_t now = atomic_read(&cb->r.in_runq);
+	int32_t next = now + 1;
+	while (atomic_cmpxchg(&cb->r.in_runq, now, next) != now) {
+		next = now + 1;
+	}
+
+	BUG_ON(atomic_read(&cb->r.in_runq) > NWORKERS);
+}
+
+static
+void fuse_runq_exit(struct fuse_conn *fc)
+{
+	// decr below counter
+	// smp_store_release(&cb->r.in_runq, 0);
+
+	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+	// incr below counter
+	// smp_store_release(&cb->r.in_runq, 1);
+
+	int32_t now = atomic_read(&cb->r.in_runq);
+	int32_t next = now - 1;
+	while (atomic_cmpxchg(&cb->r.in_runq, now, next) != now) {
+		next = now - 1;
+	}
+
+	BUG_ON(atomic_read(&cb->r.in_runq) < 0);
+}
+
 
 void fuse_run_user_queue(struct fuse_conn *fc)
 {
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 	struct fuse_user_request *req;
 	uint32_t read, write;
+	uint32_t span, i;
 
-	smp_store_release(&cb->r.in_runq, 1);
+#define NREQINLINE (16u)
+	struct fuse_user_request ureq[NREQINLINE];
+
+
+	spin_lock(&fc->io_lock);
+
+	fuse_runq_enter(fc);
 
 	write = smp_load_acquire(&cb->r.write);
 	read = cb->r.read;
 
-	while (read != write) {
-		for (; read != write; ++read) {
-			req = &fc->queue->user_requests[
+	span = min((write - read), NREQINLINE);
+	for (i=0; i<span; i++, read++) {
+		req = &fc->queue->user_requests[
 				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
-			fuse_process_user_request(fc, req);
-		}
-
-		smp_store_release(&cb->r.read, read);
-		cond_resched();
-		read = cb->r.read;
-		write = smp_load_acquire(&cb->r.write);
+		memcpy(&ureq[i], req, sizeof(*req));
 	}
 
-	smp_store_release(&cb->r.in_runq, 0);
+	if (span != 0) {
+		smp_store_release(&cb->r.read, read);
+		wake_up(&fc->io_wait);
+	}
+
+	// give up lock
+	spin_unlock(&fc->io_lock);
+
+
+	// now process in the background
+	for (i=0; i<span; i++) {
+		req = &ureq[i];
+		fuse_process_user_request(fc, req);
+	}
+
+	fuse_runq_exit(fc);
 }
 
 static int fuse_process_user_queue(void *c)
@@ -1219,7 +1271,6 @@ static int fuse_process_user_queue(void *c)
 		}
 
 		if (kthread_should_park()) {
-			fc->parked = true;
 			if (fc->user_mm) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 				set_fs(old_fs);
@@ -1232,7 +1283,6 @@ static int fuse_process_user_queue(void *c)
 			printk("fuse_process_user_queue parked\n");
 			kthread_parkme();
 			printk("fuse_process_user_queue unparked\n");
-			fc->parked = false;
 			if (fc->user_mm) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 				use_mm(fc->user_mm);
@@ -1254,17 +1304,20 @@ static int fuse_process_user_queue(void *c)
 void fuse_pause_user_queue(struct fuse_conn *fc)
 {
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
+	int i;
 
-	kthread_park(fc->io_worker_thread);
+	for (i=0; i<NWORKERS; i++) kthread_park(fc->io_worker_thread[i]);
 
-	BUG_ON(cb->r.in_runq);
+	BUG_ON(atomic_read(&cb->r.in_runq) != 0);
 	BUG_ON(fc->user_mm);
 }
 
 void fuse_restart_user_queue(struct fuse_conn *fc)
 {
+	int i;
 	fc->user_mm = current->mm;
-	kthread_unpark(fc->io_worker_thread);
+
+	for (i=0; i<NWORKERS; i++) kthread_unpark(fc->io_worker_thread[i]);
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1280,10 +1333,13 @@ int fuse_conn_init(struct fuse_conn *fc)
 		GFP_KERNEL);
 
 	init_waitqueue_head(&fc->io_wait);
-	fc->io_worker_thread = kthread_create(fuse_process_user_queue, fc, "userq-worker");
-	if (IS_ERR(fc->io_worker_thread)) {
-		rc = (int) PTR_ERR(fc->io_worker_thread);
-		goto err_out;
+	spin_lock_init(&fc->io_lock);
+	for (i=0; i<NWORKERS; i++) {
+		fc->io_worker_thread[i] = kthread_create(fuse_process_user_queue, fc, "userq-worker-%d", i);
+		if (IS_ERR(fc->io_worker_thread[i])) {
+			rc = (int) PTR_ERR(fc->io_worker_thread[i]);
+			goto err_out;
+		}
 	}
 
 	rc = -ENOMEM;
@@ -1325,12 +1381,15 @@ int fuse_conn_init(struct fuse_conn *fc)
 	printk("kicking the user proc thread\n");
 	fuse_conn_queues_init(fc->queue);
 	fc->user_mm = NULL;
-	fc->parked = true;
 	// wake_up_process(fc->io_worker_thread);
-	kthread_park(fc->io_worker_thread);
+	for (i=0; i<NWORKERS; i++)
+		kthread_park(fc->io_worker_thread[i]);
 
 	return 0;
 err_out:
+	for (i=0; i<NWORKERS; i++) {
+		if (fc->io_worker_thread[i]) kthread_stop(fc->io_worker_thread[i]);
+	}
 	fuse_conn_free_allocs(fc);
 	return rc;
 }
