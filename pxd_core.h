@@ -62,6 +62,9 @@ struct pxd_device {
 #if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
         struct blk_mq_tag_set tag_set;
 #endif
+
+	// density map of io requests
+	unsigned io_map[3][256];
 };
 
 // how pxd_device got registered with the kernel during device add.
