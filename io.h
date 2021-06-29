@@ -90,6 +90,7 @@ struct io_ring_ctx {
 	struct task_struct	*sqo_thread;	/* if using sq thread polling */
 	struct mm_struct	*sqo_mm;
 	wait_queue_head_t	sqo_wait;
+	spinlock_t io_lock;
 
 	struct {
 		/* CQ ring */

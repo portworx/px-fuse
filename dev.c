@@ -1135,6 +1135,7 @@ void fuse_queue_init_cb(struct fuse_queue_cb *cb)
 	cb->w.read = 0;
 	cb->w.write = 0;
 	spin_lock_init(&cb->w.lock);
+	atomic_set(&cb->w.need_wake_up, 0);
 
 	cb->r.write = 0;
 	cb->r.read = 0;

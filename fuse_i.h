@@ -133,7 +133,7 @@ struct ____cacheline_aligned fuse_queue_writer {
 	uint32_t write;         /** cached write index */
 	uint32_t read;		/** cached read index */
 	spinlock_t lock;	/** writer lock */
-	uint32_t need_wake_up; /** if true reader needs wake up call */
+	atomic_t need_wake_up; /** if true reader needs wake up call */
 	uint64_t sequence;        /** next request sequence number */
 	uint64_t pad[5];
 };
@@ -158,7 +158,7 @@ struct alignas(64) fuse_queue_writer {
 	uint32_t write;         	/** cached write index */
 	uint32_t read;			/** cached read index */
 	px::spinlock lock;		/** writer lock */
-	uint32_t need_wake_up;
+	std::atomic<uint32_t> need_wake_up;
 	uint64_t sequence;      /** next request sequence number */
 	uint32_t committed_;    /** last write index committed to reader */
 	bool in_runq;           // pxdev io - not used, iouring - still uses this
