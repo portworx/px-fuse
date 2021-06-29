@@ -1174,10 +1174,8 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 	struct fuse_user_request *req;
 	uint32_t read, write;
 	uint32_t span, i;
-
 #define NREQINLINE (16u)
 	struct fuse_user_request ureq[NREQINLINE];
-
 
 	spin_lock(&fc->io_lock);
 
@@ -1210,70 +1208,58 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 	fuse_runq_exit(fc);
 }
 
-static int fuse_process_user_queue(void *c)
+mm_segment_t fuse_setup_user_access(struct fuse_conn *fc)
 {
-	struct fuse_conn *fc = (struct fuse_conn*) c;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	mm_segment_t old_fs = get_fs();
-#endif
-
-	printk("fuse_process_user_queue running\n");
 
 	if (fc->user_mm) {
 		printk("%s: setting up user access context\n", __func__);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		use_mm(fc->user_mm);
-		old_fs = get_fs();
 		set_fs(USER_DS);
 #else
 		kthread_use_mm(fc->user_mm);
 #endif
 	}
+	return old_fs;
+}
 
+void fuse_remove_user_access(struct fuse_conn *fc, mm_segment_t old_fs)
+{
+	if (fc->user_mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+		set_fs(old_fs);
+		unuse_mm(fc->user_mm);
+#else
+		kthread_unuse_mm(fc->user_mm);
+#endif
+	}
+	fc->user_mm = NULL;
+}
+
+static int fuse_process_user_queue(void *c)
+{
+	struct fuse_conn *fc = (struct fuse_conn*) c;
+	mm_segment_t old_fs;
+
+	old_fs = fuse_setup_user_access(fc);
 	while (!kthread_should_stop()) {
 		if (signal_pending(current))
 			flush_signals(current);
 		wait_event_interruptible(fc->io_wait,
 				(user_request_pending(fc) || kthread_should_stop() ||
 				 kthread_should_park()));
-				// usecs_to_jiffies(100));
 
 		if (kthread_should_stop()) {
 			WARN_ON(fc->user_mm);
-			if (fc->user_mm) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-				set_fs(old_fs);
-				unuse_mm(fc->user_mm);
-#else
-				kthread_unuse_mm(fc->user_mm);
-#endif
-			}
-			fc->user_mm = NULL;
+			fuse_remove_user_access(fc, old_fs);
 			break;
 		}
 
 		if (kthread_should_park()) {
-			if (fc->user_mm) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-				set_fs(old_fs);
-				unuse_mm(fc->user_mm);
-#else
-				kthread_unuse_mm(fc->user_mm);
-#endif
-			}
-			fc->user_mm = NULL;
-			printk("fuse_process_user_queue parked\n");
+			fuse_remove_user_access(fc, old_fs);
 			kthread_parkme();
-			printk("fuse_process_user_queue unparked\n");
-			if (fc->user_mm) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-				use_mm(fc->user_mm);
-				old_fs = get_fs();
-				set_fs(USER_DS);
-#else
-				kthread_use_mm(fc->user_mm);
-#endif
-			}
+			old_fs = fuse_setup_user_access(fc);
 			continue;
 		}
 
