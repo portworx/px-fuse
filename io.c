@@ -1973,7 +1973,9 @@ static void io_sq_remove_user_mm(struct mm_struct *mm, mm_segment_t old_fs)
 
 static bool io_sqe_pending(struct io_ring_ctx *ctx)
 {
-	return (ctx->cached_sq_head != smp_load_acquire(&ctx->requests_cb->r.write));
+	struct fuse_queue_cb *cb = ctx->requests_cb;
+
+	return (cb->r.read != smp_load_acquire(&cb->r.write));
 }
 
 static int io_sq_thread(void *data)
@@ -1984,6 +1986,8 @@ static int io_sq_thread(void *data)
 	mm_segment_t old_fs;
 	unsigned inflight;
 	unsigned long timeout;
+
+	printk("%s running\n", current->comm);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	old_fs = force_uaccess_begin();
@@ -2026,15 +2030,19 @@ static int io_sq_thread(void *data)
 			if (signal_pending(current))
 				flush_signals(current);
 
+			printk("%s going to sleep\n", current->comm);
+
 			/* Tell userspace we may need a wakeup call */
 			atomic_inc(&ctx->requests_cb->w.need_wake_up);
 			wait_event_interruptible(ctx->sqo_wait,
 					(kthread_should_stop() || io_sqe_pending(ctx)));
+					// usecs_to_jiffies(100));
 
+			printk("%s woken up pending: %d\n", current->comm, io_sqe_pending(ctx));
 			atomic_dec(&ctx->requests_cb->w.need_wake_up);
 			if (kthread_should_stop()) {
 				if (cur_mm) io_sq_remove_user_mm(cur_mm, old_fs);
-				return 0;
+				break;
 			}
 
 			continue;
@@ -2053,6 +2061,7 @@ static int io_sq_thread(void *data)
 		io_commit_sqring(ctx);
 	}
 
+	printk("%s exiting\n", current->comm);
 	return 0;
 }
 

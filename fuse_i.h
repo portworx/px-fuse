@@ -158,10 +158,10 @@ struct alignas(64) fuse_queue_writer {
 	uint32_t write;         	/** cached write index */
 	uint32_t read;			/** cached read index */
 	px::spinlock lock;		/** writer lock */
-	std::atomic<uint32_t> need_wake_up;
+	std::atomic<uint32_t> need_wake_up; // only read from userspace
 	uint64_t sequence;      /** next request sequence number */
 	uint32_t committed_;    /** last write index committed to reader */
-	bool in_runq;           // pxdev io - not used, iouring - still uses this
+	bool in_runq;           // pxdev io - not used, iouring - not use
 	uint8_t pad_1[3];
 	uint32_t pad_2[8];
 };
@@ -170,7 +170,7 @@ struct alignas(64) fuse_queue_writer {
 struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
-	px::spinlock lock;
+	px::spinlock lock; // user space concurrency protection
 	std::atomic<uint32_t> in_runq; /** read only, kernel exposed flag, a thread is processing the queue */
 	uint64_t pad_2[6];
 };
