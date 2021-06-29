@@ -1138,6 +1138,7 @@ void fuse_queue_init_cb(struct fuse_queue_cb *cb)
 
 	cb->r.write = 0;
 	cb->r.read = 0;
+	atomic_set(&cb->r.in_runq, 0);
 }
 
 static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
@@ -1146,7 +1147,6 @@ static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
 	memset(queue->requests, 0, sizeof(queue->requests));
 
 	fuse_queue_init_cb(&queue->user_requests_cb);
-	atomic_set(&queue->user_requests_cb.r.in_runq, 0);
 	memset(queue->user_requests, 0, sizeof(queue->user_requests));
 
 }
