@@ -298,11 +298,25 @@ static const struct block_device_operations pxd_bd_ops = {
 	.release		= pxd_release,
 };
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+static void pxd_update_stats(struct fuse_req *req, int sgrp, unsigned int count)
+#else
 static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
+#endif
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
+		
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
+{
+		struct block_device *p = pxd_dev->disk->part0;
+		if (!p) return;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
+
+		part_stat_lock();
+		part_stat_add(p, sectors[sgrp], count);
+		part_stat_inc(p, ios[sgrp]);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
 		part_stat_lock();
 		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
 		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
@@ -343,7 +357,22 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 #else
 	trace_pxd_reply(REQCTR(fc), req->in.h.unique, REQ_WRITE);
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+	{
+	  const struct bio* bio = req->bio;
+	  int statgrp = STAT_WRITE;
+	  size_t sz = BIO_SIZE(bio) / SECTOR_SIZE;
+	  
+	  if (!bio) statgrp = STAT_FLUSH;
+	  else if (!op_is_write(bio->bi_opf)) statgrp = STAT_READ;
+	  else if (op_is_flush(bio->bi_opf) && (sz == 0)) statgrp = STAT_FLUSH;
+	  else statgrp = STAT_WRITE;
+	  
+	  pxd_update_stats(req, statgrp, sz);
+	}
+#else
 	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
+#endif
 	BIO_ENDIO(req->bio, req->out.h.error);
 	pxd_request_complete(fc, req);
 }
@@ -1025,15 +1054,23 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 		goto out;
 	}
 	(void)get_device(&pxd_dev->dev);
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+#else
+	// set_capacity is sufficient for modifying disk size from 5.11 onwards
+	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+#endif
 	spin_unlock(&pxd_dev->lock);
 
+	// set_capacity is sufficient for modifying disk size from 5.11 onwards
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
+	
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	revalidate_disk_size(pxd_dev->disk, true);
 #else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
+#endif
 #endif
 	put_device(&pxd_dev->dev);
 
