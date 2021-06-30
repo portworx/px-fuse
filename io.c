@@ -203,7 +203,7 @@ struct io_mapped_ubuf {
 };
 
 #define IO_PLUG_THRESHOLD		2
-#define IO_IOPOLL_BATCH			8
+#define IO_IOPOLL_BATCH			16
 
 struct io_submit_state {
 	struct blk_plug		plug;
@@ -1987,8 +1987,6 @@ static int io_sq_thread(void *data)
 	unsigned inflight;
 	unsigned long timeout;
 
-	printk("%s running\n", current->comm);
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	old_fs = force_uaccess_begin();
 #else
@@ -2030,15 +2028,11 @@ static int io_sq_thread(void *data)
 			if (signal_pending(current))
 				flush_signals(current);
 
-			printk("%s going to sleep\n", current->comm);
-
 			/* Tell userspace we may need a wakeup call */
 			atomic_inc(&ctx->requests_cb->w.need_wake_up);
 			wait_event_interruptible(ctx->sqo_wait,
 					(kthread_should_stop() || io_sqe_pending(ctx)));
-					// usecs_to_jiffies(100));
 
-			printk("%s woken up pending: %d\n", current->comm, io_sqe_pending(ctx));
 			atomic_dec(&ctx->requests_cb->w.need_wake_up);
 			if (kthread_should_stop()) {
 				if (cur_mm) io_sq_remove_user_mm(cur_mm, old_fs);
@@ -2054,6 +2048,7 @@ static int io_sq_thread(void *data)
 		}
 		spin_unlock(&ctx->io_lock);
 
+		if (io_sqe_pending(ctx)) wake_up(&ctx->sqo_wait);
 		inflight += io_submit_sqes(ctx, sqes, i, cur_mm != NULL,
 						false);
 
@@ -2061,7 +2056,6 @@ static int io_sq_thread(void *data)
 		io_commit_sqring(ctx);
 	}
 
-	printk("%s exiting\n", current->comm);
 	return 0;
 }
 
@@ -2088,14 +2082,12 @@ static int io_sqe_files_unregister(struct io_ring_ctx *ctx)
 
 static void io_sq_thread_stop(struct io_ring_ctx *ctx)
 {
-	if (ctx->sqo_thread) {
-		/*
-		 * The park is a bit of a work-around, without it we get
-		 * warning spews on shutdown with SQPOLL set and affinity
-		 * set to a single CPU.
-		 */
-		kthread_stop(ctx->sqo_thread);
-		ctx->sqo_thread = NULL;
+	int i;
+	for (i=0; i<NSLAVES; i++) {
+		if (ctx->sqo_thread[i]) {
+			kthread_stop(ctx->sqo_thread[i]);
+			ctx->sqo_thread[i] = NULL;
+		}
 	}
 }
 
@@ -2223,6 +2215,7 @@ static int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
 static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *p)
 {
 	int ret;
+	int i;
 
 	init_waitqueue_head(&ctx->sqo_wait);
 	mmgrab(current->mm);
@@ -2237,14 +2230,16 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 		if (!ctx->sq_thread_idle)
 			ctx->sq_thread_idle = usecs_to_jiffies(100);
 
-		ctx->sqo_thread = kthread_create(io_sq_thread, ctx,
-			"pxd-io");
-		if (IS_ERR(ctx->sqo_thread)) {
-			ret = PTR_ERR(ctx->sqo_thread);
-			ctx->sqo_thread = NULL;
-			goto err;
+		for (i=0; i<NSLAVES; i++) {
+			ctx->sqo_thread[i] = kthread_create(io_sq_thread, ctx, "pxd-io-%d", i);
+			if (IS_ERR(ctx->sqo_thread[i])) {
+				ret = PTR_ERR(ctx->sqo_thread[i]);
+				ctx->sqo_thread[i] = NULL;
+				goto err;
+			}
+			wake_up_process(ctx->sqo_thread[i]);
 		}
-		wake_up_process(ctx->sqo_thread);
+
 	} else if (p->flags & IORING_SETUP_SQ_AFF) {
 		/* Can't have SQ_AFF without SQPOLL */
 		ret = -EINVAL;

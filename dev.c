@@ -26,6 +26,9 @@
 #include <linux/sort.h>
 #include <linux/vmalloc.h>
 #include <linux/mmu_context.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/mm.h>
+#endif
 
 #include "pxd_compat.h"
 #include "pxd_core.h"
@@ -1117,7 +1120,14 @@ void fuse_end_queued_requests(struct fuse_conn *fc)
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
 	int i;
-	for (i=0; i<NWORKERS; i++) kthread_stop(fc->io_worker_thread[i]);
+
+	fc->user_mm = NULL;
+	for (i=0; i<NWORKERS; i++) {
+		if (fc->io_worker_thread[i]) {
+			kthread_stop(fc->io_worker_thread[i]);
+			fc->io_worker_thread[i] = NULL;
+		}
+	}
 
 	if (fc->per_cpu_ids)
 		free_percpu(fc->per_cpu_ids);
@@ -1209,12 +1219,17 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 	fuse_runq_exit(fc);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 mm_segment_t fuse_setup_user_access(struct fuse_conn *fc)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	mm_segment_t old_fs = force_uaccess_begin();
+#else
 	mm_segment_t old_fs = get_fs();
+#endif
 
 	if (fc->user_mm) {
-		printk("%s: setting up user access context\n", __func__);
+		mmgrab(fc->user_mm);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 		use_mm(fc->user_mm);
 		set_fs(USER_DS);
@@ -1222,6 +1237,7 @@ mm_segment_t fuse_setup_user_access(struct fuse_conn *fc)
 		kthread_use_mm(fc->user_mm);
 #endif
 	}
+
 	return old_fs;
 }
 
@@ -1234,9 +1250,13 @@ void fuse_remove_user_access(struct fuse_conn *fc, mm_segment_t old_fs)
 #else
 		kthread_unuse_mm(fc->user_mm);
 #endif
+		mmdrop(fc->user_mm);
 	}
-	fc->user_mm = NULL;
 }
+#else
+mm_segment_t fuse_setup_user_access(struct fuse_conn *fc) {return get_fs();}
+void fuse_remove_user_access(struct fuse_conn *fc, mm_segment_t old_fs) {}
+#endif
 
 static int fuse_process_user_queue(void *c)
 {
@@ -1253,7 +1273,6 @@ static int fuse_process_user_queue(void *c)
 
 		if (kthread_should_stop()) {
 			WARN_ON(fc->user_mm);
-			fuse_remove_user_access(fc, old_fs);
 			break;
 		}
 
@@ -1275,18 +1294,21 @@ void fuse_pause_user_queue(struct fuse_conn *fc)
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 	int i;
 
+	pr_info("parking worker threads");
 	for (i=0; i<NWORKERS; i++) kthread_park(fc->io_worker_thread[i]);
 
+	if (fc->user_mm) mmdrop(fc->user_mm);
 	BUG_ON(atomic_read(&cb->r.in_runq) != 0);
-	BUG_ON(fc->user_mm);
 }
 
 void fuse_restart_user_queue(struct fuse_conn *fc)
 {
 	int i;
+
+	mmgrab(current->mm);
 	fc->user_mm = current->mm;
 
-	printk("%s unparking worker threads..\n", __func__);
+	pr_info("unparking worker threads");
 	for (i=0; i<NWORKERS; i++) kthread_unpark(fc->io_worker_thread[i]);
 }
 
@@ -1350,15 +1372,11 @@ int fuse_conn_init(struct fuse_conn *fc)
 
 	fuse_conn_queues_init(fc->queue);
 	fc->user_mm = NULL;
-	// wake_up_process(fc->io_worker_thread);
 	for (i=0; i<NWORKERS; i++)
 		kthread_park(fc->io_worker_thread[i]);
 
 	return 0;
 err_out:
-	for (i=0; i<NWORKERS; i++) {
-		if (fc->io_worker_thread[i]) kthread_stop(fc->io_worker_thread[i]);
-	}
 	fuse_conn_free_allocs(fc);
 	return rc;
 }

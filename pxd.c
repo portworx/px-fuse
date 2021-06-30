@@ -2222,9 +2222,9 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		pxd_printk("%s: not opened\n", __func__);
 	} else {
 		WRITE_ONCE(ctx->fc.connected, 0);
+		fuse_pause_user_queue(&ctx->fc);
 	}
 
-	fuse_pause_user_queue(&ctx->fc);
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 

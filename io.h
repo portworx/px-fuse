@@ -87,7 +87,8 @@ struct io_ring_ctx {
 
 	/* IO offload */
 	struct workqueue_struct	*sqo_wq;
-	struct task_struct	*sqo_thread;	/* if using sq thread polling */
+#define NSLAVES (8)
+	struct task_struct	*sqo_thread[NSLAVES];	/* if using sq thread polling */
 	struct mm_struct	*sqo_mm;
 	wait_queue_head_t	sqo_wait;
 	spinlock_t io_lock;
