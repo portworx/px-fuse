@@ -203,7 +203,7 @@ struct io_mapped_ubuf {
 };
 
 #define IO_PLUG_THRESHOLD		2
-#define IO_IOPOLL_BATCH			16
+#define IO_IOPOLL_BATCH			32
 
 struct io_submit_state {
 	struct blk_plug		plug;
