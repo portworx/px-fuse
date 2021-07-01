@@ -1354,14 +1354,16 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	err = vfs_stat(devfile, &pxdev_stat);
 	if (err == 0) {
 		pr_err("stale device(%s) found, attach fail", devfile);
-		return -EEXIST;
+		err = -EEXIST;
+		goto out_module;
 	}
 
 	sprintf(devfile, "/sys/devices/virtual/block/pxd!pxd%llu", add->dev_id);
 	err = vfs_stat(devfile, &pxdev_stat);
 	if (err == 0) {
 		pr_err("stale device(%s) found, attach fail", devfile);
-		return -EEXIST;
+		err = -EEXIST;
+		goto out_module;
 	}
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
