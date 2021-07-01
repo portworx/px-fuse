@@ -1179,7 +1179,7 @@ void fuse_runq_exit(struct fuse_conn *fc)
 }
 
 
-void fuse_run_user_queue(struct fuse_conn *fc)
+void fuse_run_user_queue(struct fuse_conn *fc, bool mm_fault)
 {
 	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 	struct fuse_user_request *req;
@@ -1213,14 +1213,18 @@ void fuse_run_user_queue(struct fuse_conn *fc)
 
 	// now process in the background
 	for (i=0; i<span; i++) {
-		fuse_process_user_request(fc, &ureq[i]);
+		if (unlikely(mm_fault)) {
+			fuse_user_complete(fc, ureq[i].unique, ureq[i].user_data, -EFAULT);
+		} else {
+			fuse_process_user_request(fc, &ureq[i]);
+		}
 	}
 
 	fuse_runq_exit(fc);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-mm_segment_t fuse_setup_user_access(struct fuse_conn *fc)
+mm_segment_t fuse_setup_user_access(struct mm_struct *mm, bool *mm_fault)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	mm_segment_t old_fs = force_uaccess_begin();
@@ -1228,64 +1232,95 @@ mm_segment_t fuse_setup_user_access(struct fuse_conn *fc)
 	mm_segment_t old_fs = get_fs();
 #endif
 
-	if (fc->user_mm) {
-		mmgrab(fc->user_mm);
+	*mm_fault = false;
+	if (mm) {
+		if (!mmget_not_zero(mm)) {
+			*mm_fault = true;
+			return old_fs;
+		}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-		use_mm(fc->user_mm);
+		use_mm(mm);
 		set_fs(USER_DS);
 #else
-		kthread_use_mm(fc->user_mm);
+		kthread_use_mm(mm);
 #endif
 	}
 
 	return old_fs;
 }
 
-void fuse_remove_user_access(struct fuse_conn *fc, mm_segment_t old_fs)
+void fuse_remove_user_access(struct mm_struct *mm, mm_segment_t old_fs)
 {
-	if (fc->user_mm) {
+	if (mm) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+		unuse_mm(mm);
 		set_fs(old_fs);
-		unuse_mm(fc->user_mm);
 #else
-		kthread_unuse_mm(fc->user_mm);
+		kthread_unuse_mm(mm);
 #endif
-		mmdrop(fc->user_mm);
+		mmput(mm);
 	}
 }
 #else
-mm_segment_t fuse_setup_user_access(struct fuse_conn *fc) {return get_fs();}
-void fuse_remove_user_access(struct fuse_conn *fc, mm_segment_t old_fs) {}
+mm_segment_t fuse_setup_user_access(struct fuse_conn *fc, bool *mm_fault) { *mm_fault = false; return get_fs();}
+void fuse_remove_user_access(struct mm_struct *mm, mm_segment_t old_fs) {}
 #endif
 
 static int fuse_process_user_queue(void *c)
 {
 	struct fuse_conn *fc = (struct fuse_conn*) c;
-	mm_segment_t old_fs;
+	bool mm_fault;
+	struct mm_struct *cur_mm = NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	mm_segment_t old_fs = force_uaccess_begin();
+#else
+	mm_segment_t old_fs = get_fs();
+#endif
+	unsigned long spin_wait = jiffies;
 
-	old_fs = fuse_setup_user_access(fc);
 	while (!kthread_should_stop()) {
 		if (signal_pending(current))
 			flush_signals(current);
+
+		// tight wait for IO for a short time.
+		do {
+			if (user_request_pending(fc)) break;
+			cpu_relax();
+		} while (jiffies < spin_wait);
+
+		if (!user_request_pending(fc) && cur_mm != NULL) {
+			fuse_remove_user_access(cur_mm, old_fs);
+			cur_mm = NULL;
+		}
+
 		wait_event_interruptible(fc->io_wait,
 				(user_request_pending(fc) || kthread_should_stop() ||
 				 kthread_should_park()));
 
 		if (kthread_should_stop()) {
-			WARN_ON(fc->user_mm);
 			break;
 		}
 
 		if (kthread_should_park()) {
-			fuse_remove_user_access(fc, old_fs);
+			fuse_remove_user_access(cur_mm, old_fs);
+			cur_mm = NULL;
 			kthread_parkme();
-			old_fs = fuse_setup_user_access(fc);
 			continue;
 		}
 
-		fuse_run_user_queue(fc);
+
+		mm_fault = false;
+		if (cur_mm != NULL) {
+			fuse_setup_user_access(fc->user_mm, &mm_fault);
+			cur_mm = fc->user_mm;
+		}
+		fuse_run_user_queue(fc, mm_fault);
+		spin_wait = jiffies + msecs_to_jiffies(3);
 	}
 
+	if (cur_mm != NULL) {
+		fuse_remove_user_access(cur_mm, old_fs);
+	}
 	return 0;
 }
 

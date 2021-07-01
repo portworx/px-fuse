@@ -313,7 +313,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
 /**
  * start processing pending IOs from userspace.
  */
-void fuse_run_user_queue(struct fuse_conn *fc);
+void fuse_run_user_queue(struct fuse_conn *fc, bool mm_fault);
 
 /* Abort all requests */
 void fuse_abort_conn(struct fuse_conn *fc);
