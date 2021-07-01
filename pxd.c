@@ -598,6 +598,24 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 					  ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
 					  ((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #endif
+
+	if (size != 0) {
+		// Add logs about the requests to determine IOs are generally of
+		// what particular block sizes
+		unsigned idx = (size / PXD_LBS) - 1;
+		if (idx >= 256) idx = 255;
+		switch (req->in.opcode) {
+		case PXD_READ:
+			req->pxd_dev->io_map[0][idx]++;
+		case PXD_WRITE:
+			req->pxd_dev->io_map[1][idx]++;
+		case PXD_DISCARD:
+			req->pxd_dev->io_map[2][idx]++;
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 /*
@@ -2001,6 +2019,58 @@ static ssize_t pxd_release_store(struct device *dev,
 	return count;
 }
 
+static ssize_t _iomap_show(int iotype, struct pxd_device *pxd_dev, char *buf, size_t buflen)
+{
+	char *p = buf;
+	ssize_t tlen = 0;
+	int i;
+
+	buflen -= 128; // give space for trailing overrun if any
+	for (i=0; i<256; i++) {
+		int len;
+		if (!pxd_dev->io_map[iotype][i]) continue;
+		len = sprintf(p, "[%d]=%llu\n", i+1, pxd_dev->io_map[iotype][i]);
+		if (len > 0) {
+			p += len;
+			tlen += len;
+		}
+		if (tlen >= buflen)
+			return tlen;
+	}
+
+	return tlen;
+}
+
+static ssize_t pxd_iomap_read_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return _iomap_show(0, pxd_dev, buf, PAGE_SIZE);
+}
+
+static ssize_t pxd_iomap_write_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return _iomap_show(1, pxd_dev, buf, PAGE_SIZE);
+}
+
+static ssize_t pxd_iomap_discard_show(struct device *dev,
+					struct device_attribute *attr, char *buf)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	return _iomap_show(2, pxd_dev, buf, PAGE_SIZE);
+}
+
+static ssize_t pxd_iomap_clear(struct device *dev,
+			struct device_attribute *attr,
+		        const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+
+	memset(pxd_dev->io_map, 0, sizeof(pxd_dev->io_map));
+	return count;
+}
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
@@ -2012,6 +2082,10 @@ static DEVICE_ATTR(mode, S_IRUGO, pxd_mode_show, NULL);
 static DEVICE_ATTR(debug, S_IRUGO|S_IWUSR, pxd_debug_show, pxd_debug_store);
 static DEVICE_ATTR(inprogress, S_IRUGO, pxd_inprogress_show, NULL);
 static DEVICE_ATTR(release, S_IWUSR, NULL, pxd_release_store);
+static DEVICE_ATTR(readmap, S_IRUGO|S_IWUSR, pxd_iomap_read_show, pxd_iomap_clear);
+static DEVICE_ATTR(writemap, S_IRUGO|S_IWUSR, pxd_iomap_write_show, pxd_iomap_clear);
+static DEVICE_ATTR(discardmap, S_IRUGO|S_IWUSR, pxd_iomap_discard_show, pxd_iomap_clear);
+
 
 static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
@@ -2025,6 +2099,9 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_debug.attr,
 	&dev_attr_inprogress.attr,
 	&dev_attr_release.attr,
+	&dev_attr_readmap.attr,
+	&dev_attr_writemap.attr,
+	&dev_attr_discardmap.attr,
 	NULL
 };
 

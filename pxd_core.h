@@ -62,6 +62,9 @@ struct pxd_device {
 #if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
         struct blk_mq_tag_set tag_set;
 #endif
+	// to capture io pattern map for each supported blocksize
+	// separate for read/write and discard.
+	uint64_t io_map[3][256];
 };
 
 // how pxd_device got registered with the kernel during device add.
