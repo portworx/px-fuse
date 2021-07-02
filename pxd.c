@@ -607,8 +607,10 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 		switch (req->in.opcode) {
 		case PXD_READ:
 			req->pxd_dev->io_map[0][idx]++;
+			break;
 		case PXD_WRITE:
 			req->pxd_dev->io_map[1][idx]++;
+			break;
 		case PXD_DISCARD:
 			req->pxd_dev->io_map[2][idx]++;
 			break;
