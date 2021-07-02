@@ -1251,25 +1251,27 @@ static int fuse_process_user_queue(void *c)
 	unsigned long spin_wait = jiffies;
 
 	while (!kthread_should_stop()) {
-		if (signal_pending(current))
-			flush_signals(current);
-
 		do {
 			if (user_request_pending(fc)) break;
 			cpu_relax();
 		} while (jiffies < spin_wait);
 
 		// prepare to sleep
-		if (!user_request_pending(fc) && cur_mm != NULL) {
-			fuse_remove_user_access(cur_mm, old_fs);
-			cur_mm = NULL;
-		}
+		if (!user_request_pending(fc)) {
+			if (cur_mm != NULL) {
+				fuse_remove_user_access(cur_mm, old_fs);
+				cur_mm = NULL;
+			}
 
-		atomic_inc(&cb->r.need_wake_up);
-		wait_event_interruptible(fc->io_wait,
+			atomic_inc(&cb->r.need_wake_up);
+			if (signal_pending(current))
+				flush_signals(current);
+
+			wait_event_interruptible(fc->io_wait,
 				(user_request_pending(fc) || kthread_should_stop() ||
 				 kthread_should_park()));
-		atomic_dec(&cb->r.need_wake_up);
+			atomic_dec(&cb->r.need_wake_up);
+		}
 
 		if (kthread_should_stop()) {
 			break;
@@ -1304,9 +1306,12 @@ void fuse_pause_user_queue(struct fuse_conn *fc)
 
 	pr_info("parking worker threads");
 	for (i=0; i<NWORKERS; i++) kthread_park(fc->io_worker_thread[i]);
+	BUG_ON(atomic_read(&cb->r.need_wake_up) != 0);
 
-	if (fc->user_mm) mmdrop(fc->user_mm);
-	BUG_ON(atomic_read(&cb->r.need_wake_up) == 0);
+	if (fc->user_mm) {
+		mmdrop(fc->user_mm);
+		fc->user_mm = NULL;
+	}
 }
 
 void fuse_restart_user_queue(struct fuse_conn *fc)
@@ -1330,16 +1335,6 @@ int fuse_conn_init(struct fuse_conn *fc)
 	init_waitqueue_head(&fc->waitq);
 	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
 		GFP_KERNEL);
-
-	init_waitqueue_head(&fc->io_wait);
-	spin_lock_init(&fc->io_lock);
-	for (i=0; i<NWORKERS; i++) {
-		fc->io_worker_thread[i] = kthread_create(fuse_process_user_queue, fc, "userq-worker-%d", i);
-		if (IS_ERR(fc->io_worker_thread[i])) {
-			rc = (int) PTR_ERR(fc->io_worker_thread[i]);
-			goto err_out;
-		}
-	}
 
 	rc = -ENOMEM;
 	if (!fc->request_map) {
@@ -1378,9 +1373,18 @@ int fuse_conn_init(struct fuse_conn *fc)
 	}
 
 	fuse_conn_queues_init(fc->queue);
+
 	fc->user_mm = NULL;
-	for (i=0; i<NWORKERS; i++)
-		kthread_park(fc->io_worker_thread[i]);
+	init_waitqueue_head(&fc->io_wait);
+	spin_lock_init(&fc->io_lock);
+	for (i=0; i<NWORKERS; i++) {
+		fc->io_worker_thread[i] = kthread_create(fuse_process_user_queue, fc, "userq-worker-%d", i);
+		if (IS_ERR(fc->io_worker_thread[i])) {
+			rc = (int) PTR_ERR(fc->io_worker_thread[i]);
+			goto err_out;
+		}
+		wake_up_process(fc->io_worker_thread[i]);
+	}
 
 	return 0;
 err_out:
