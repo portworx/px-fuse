@@ -2041,10 +2041,6 @@ static int io_sq_thread(void *data)
 			atomic_dec(&ctx->requests_cb->r.need_wake_up);
 
 			if (kthread_should_stop()) {
-				if (cur_mm) {
-					io_sq_remove_user_mm(cur_mm, old_fs);
-					cur_mm = NULL;
-				}
 				break;
 			}
 			continue;
