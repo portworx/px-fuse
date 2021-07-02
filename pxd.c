@@ -230,25 +230,8 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	struct fuse_conn *fc = &ctx->fc;
-	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 
-	struct fuse_user_request *req;
-
-	uint32_t read = cb->r.read;
-	uint32_t write = smp_load_acquire(&cb->r.write);
-
-	while (read != write) {
-		for (; read != write; ++read) {
-			req = &fc->queue->user_requests[
-				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
-			fuse_process_user_request(fc, req);
-		}
-
-		smp_store_release(&cb->r.read, read);
-
-		write = smp_load_acquire(&cb->r.write);
-	}
-
+	fuse_run_user_queue(fc, false);
 	return 0;
 }
 
