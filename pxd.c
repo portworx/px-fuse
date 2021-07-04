@@ -1109,7 +1109,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	pxd_printk("%s: dev m %d g %lld %s at %lu len %d bytes %d pages "
 		   "flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
@@ -1151,6 +1151,24 @@ static const struct blk_mq_ops pxd_mq_ops = {
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_BLKMQ__ */
 
+static
+bool pxd_supported_block_size(uint64_t dev_id, int32_t block_size)
+{
+	int32_t bs = PAGE_SIZE;
+	if (block_size <= 0) {
+		goto out;
+	}
+
+	do {
+		if (block_size == bs) return true;
+		bs >>= 1;
+	} while (bs >= SECTOR_SIZE);
+
+out:
+	printk(KERN_ERR"device %llu passed unsupported block size %u", dev_id, block_size);
+	return false;
+}
+
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
 {
 	struct gendisk *disk;
@@ -1158,6 +1176,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	int err = 0;
 
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
+		return -EINVAL;
+
+	if (!pxd_supported_block_size(pxd_dev->dev_id, add->block_size))
 		return -EINVAL;
 
 	/* Create gendisk info. */
@@ -1238,19 +1259,20 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
-	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
-	blk_queue_io_min(q, PXD_LBS);
+
+	// set block size based on passed scale factor.
+	blk_queue_max_segments(q, (SEGMENT_SIZE / add->block_size));
+	blk_queue_io_min(q, add->block_size);
 	blk_queue_io_opt(q, PXD_LBS);
-	blk_queue_logical_block_size(q, PXD_LBS);
-	blk_queue_physical_block_size(q, PXD_LBS);
+	blk_queue_logical_block_size(q, add->block_size);
+	blk_queue_physical_block_size(q, add->block_size);
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-
-    q->limits.discard_granularity = PXD_LBS;
-	q->limits.discard_alignment = PXD_LBS;
+	q->limits.discard_granularity = add->block_size;
+	q->limits.discard_alignment = add->block_size;
 	if (add->discard_size < SECTOR_SIZE)
 		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
 	else

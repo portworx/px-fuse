@@ -131,6 +131,7 @@ struct pxd_add_out {
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
+	int32_t block_size;    /**< block size of attached device */
 };
 
 /**
@@ -141,6 +142,7 @@ struct pxd_add_ext_out {
 	size_t size;		/**< block device size in bytes */
 	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
 	int32_t discard_size;	/**< block device discard size in bytes */
+	int32_t block_size;    /**< block size of attached device */
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
 	bool    enable_fp; /**< enable fast path */
 	struct pxd_update_path_out paths; /**< backing device paths */
