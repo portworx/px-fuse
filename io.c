@@ -83,7 +83,7 @@
 #include <uapi/linux/eventpoll.h>
 
 #define IORING_MAX_ENTRIES	4096
-#define IORING_MAX_FIXED_FILES	1024
+#define IORING_MAX_FIXED_FILES	4096
 
 struct io_uring {
 	u32 head ____cacheline_aligned_in_smp;
@@ -2131,15 +2131,19 @@ static int io_sqe_register_file(struct io_ring_ctx *ctx, int fd)
 	}
 
 	err = -ENFILE;
-	if (i == ctx->nr_user_files)
+	if (i == ctx->nr_user_files) {
+		pr_err("iouring: max user file limit");
 		goto out;
+	}
 
 	err = -EBADF;
 	ctx->user_files[i] = fget(fd);
 	if (!ctx->user_files[i])
+		pr_err("iouring: bad file descriptor");
 		goto out;
 
 	if (ctx->user_files[i]->f_op == &fuse_dev_operations) {
+		pr_err("iouring: got control fd");
 		fput(ctx->user_files[i]);
 		ctx->user_files[i] = NULL;
 		goto out;
