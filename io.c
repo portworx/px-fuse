@@ -2131,19 +2131,15 @@ static int io_sqe_register_file(struct io_ring_ctx *ctx, int fd)
 	}
 
 	err = -ENFILE;
-	if (i == ctx->nr_user_files) {
-		pr_err("iouring: max user file limit");
+	if (i == ctx->nr_user_files)
 		goto out;
-	}
 
 	err = -EBADF;
 	ctx->user_files[i] = fget(fd);
 	if (!ctx->user_files[i])
-		pr_err("iouring: bad file descriptor");
 		goto out;
 
 	if (ctx->user_files[i]->f_op == &fuse_dev_operations) {
-		pr_err("iouring: got control fd");
 		fput(ctx->user_files[i]);
 		ctx->user_files[i] = NULL;
 		goto out;
@@ -2153,6 +2149,7 @@ static int io_sqe_register_file(struct io_ring_ctx *ctx, int fd)
 	return i;
 
 out:
+	pr_err("iouring: register file failed with %d", err);
 	mutex_unlock(&ctx->uring_lock);
 	return err;
 }
