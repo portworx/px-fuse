@@ -1323,6 +1323,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
+	struct kstat pxdev_stat;
+	char devfile[128];
 
 	err = -ENODEV;
 	if (!try_module_get(THIS_MODULE))
@@ -1345,6 +1347,23 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 			disableFastPath(pxd_dev, false);
 		}
 		return pxd_dev->minor;
+	}
+
+	/* pre-check to detect if prior instance is removed */
+	sprintf(devfile, "/dev/pxd/pxd!pxd%llu", add->dev_id);
+	err = vfs_stat(devfile, &pxdev_stat);
+	if (err == 0) {
+		pr_err("stale device(%s) found, attach fail", devfile);
+		err = -EEXIST;
+		goto out_module;
+	}
+
+	sprintf(devfile, "/sys/devices/virtual/block/pxd!pxd%llu", add->dev_id);
+	err = vfs_stat(devfile, &pxdev_stat);
+	if (err == 0) {
+		pr_err("stale device(%s) found, attach fail", devfile);
+		err = -EEXIST;
+		goto out_module;
 	}
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
