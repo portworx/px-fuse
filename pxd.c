@@ -1323,8 +1323,12 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
-	struct kstat pxdev_stat;
 	char devfile[128];
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
+	struct block_device *bdev;
+#else
+	dev_t kdev;
+#endif
 
 	err = -ENODEV;
 	if (!try_module_get(THIS_MODULE))
@@ -1350,21 +1354,23 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	}
 
 	/* pre-check to detect if prior instance is removed */
-	sprintf(devfile, "/dev/pxd/pxd!pxd%llu", add->dev_id);
-	err = vfs_stat(devfile, &pxdev_stat);
-	if (err == 0) {
-		pr_err("stale device(%s) found, attach fail", devfile);
+	sprintf(devfile, "/dev/pxd/pxd%llu", add->dev_id);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
+	bdev = lookup_bdev(devfile);
+	if (!IS_ERR(bdev)) {
+		bdput(bdev);
+		pr_err("stale bdev %s still alive", devfile);
 		err = -EEXIST;
 		goto out_module;
 	}
-
-	sprintf(devfile, "/sys/devices/virtual/block/pxd!pxd%llu", add->dev_id);
-	err = vfs_stat(devfile, &pxdev_stat);
-	if (err == 0) {
-		pr_err("stale device(%s) found, attach fail", devfile);
+#else
+	err = lookup_bdev(devfile, &kdev);
+	if (!err) {
+		pr_err("stale bdev %s still alive", devfile);
 		err = -EEXIST;
 		goto out_module;
 	}
+#endif
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
 	if (!pxd_dev)
@@ -1493,6 +1499,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	pxd_dev->removing = true;
 	wmb();
+	pr_info("removing device %llu", pxd_dev->dev_id);
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
@@ -1512,6 +1519,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	return 0;
 out:
+	pr_err("remove device %llu failed %d", pxd_dev->dev_id, err);
 	return err;
 }
 
