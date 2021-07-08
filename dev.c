@@ -1233,7 +1233,7 @@ void fuse_remove_user_access(struct mm_struct *mm, mm_segment_t old_fs)
 	}
 }
 #else
-mm_segment_t fuse_setup_user_access(struct fuse_conn *fc, bool *mm_fault) { *mm_fault = false; return get_fs();}
+mm_segment_t fuse_setup_user_access(struct mm_struct *mm, bool *mm_fault) { *mm_fault = false; return get_fs();}
 void fuse_remove_user_access(struct mm_struct *mm, mm_segment_t old_fs) {}
 #endif
 
