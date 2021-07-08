@@ -83,7 +83,7 @@
 #include <uapi/linux/eventpoll.h>
 
 #define IORING_MAX_ENTRIES	4096
-#define IORING_MAX_FIXED_FILES	1024
+#define IORING_MAX_FIXED_FILES	4096
 
 struct io_uring {
 	u32 head ____cacheline_aligned_in_smp;
@@ -2149,6 +2149,7 @@ static int io_sqe_register_file(struct io_ring_ctx *ctx, int fd)
 	return i;
 
 out:
+	pr_err("iouring: register file failed with %d", err);
 	mutex_unlock(&ctx->uring_lock);
 	return err;
 }
