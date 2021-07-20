@@ -2241,6 +2241,7 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 {
 	int ret;
 	int i;
+	uint32_t max_threads = min(p->sqo_threads, NSLAVES);
 
 	init_waitqueue_head(&ctx->sqo_wait);
 	mmgrab(current->mm);
@@ -2255,7 +2256,7 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 		if (!ctx->sq_thread_idle)
 			ctx->sq_thread_idle = HZ;
 
-		for (i=0; i<NSLAVES; i++) {
+		for (i=0; i<max_threads; i++) {
 			ctx->sqo_thread[i] = kthread_create(io_sq_thread, ctx, "pxd-io-%d", i);
 			if (IS_ERR(ctx->sqo_thread[i])) {
 				ret = PTR_ERR(ctx->sqo_thread[i]);

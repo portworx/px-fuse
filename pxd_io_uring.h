@@ -132,7 +132,8 @@ struct io_uring_params {
 	__u32 flags;
 	__u32 sq_thread_cpu;
 	__u32 sq_thread_idle;
-	__u32 resv[5];
+	__u32 sqo_threads; // ofload threads
+	__u32 resv[4];
 	struct io_sqring_offsets sq_off;
 	struct io_cqring_offsets cq_off;
 };

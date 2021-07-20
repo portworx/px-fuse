@@ -64,14 +64,25 @@ uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
+uint32_t pxd_offload = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+/// specify number of threads for bgio processing
+module_param(pxd_offload, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
+
+uint32_t pxd_offload_threads(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+	return min(NWORKERS, pxd_offload);
+#endif
+	return 0;
+}
 
 struct pxd_context* find_context(unsigned ctx)
 {
@@ -2256,7 +2267,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops.mmap = pxd_mmap;
 
 	if (ctx->id < pxd_num_contexts_exported) {
-		err = fuse_conn_init(&ctx->fc);
+		err = fuse_conn_init(&ctx->fc, pxd_offload_threads());
 		if (err)
 			return err;
 	}

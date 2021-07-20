@@ -269,7 +269,7 @@ struct fuse_conn {
 
 	/** user request processing */
 	wait_queue_head_t io_wait;
-#define NWORKERS (8)
+#define NWORKERS (8u)
 	struct task_struct* io_worker_thread[NWORKERS];
 	struct mm_struct *user_mm;
 	spinlock_t io_lock;
@@ -322,7 +322,7 @@ void fuse_pause_user_queue(struct fuse_conn *fc);
 /**
  * Initialize fuse_conn
  */
-int fuse_conn_init(struct fuse_conn *fc);
+int fuse_conn_init(struct fuse_conn *fc, uint32_t max_threads);
 
 /**
  * Abort pending requests

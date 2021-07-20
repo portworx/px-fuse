@@ -215,6 +215,7 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 #define PXD_FEATURE_FASTPATH (0x1)
 #define PXD_FEATURE_BGIO     (0x2)
 
+uint32_t pxd_offload_threads(void);
 static inline
 int pxd_supported_features(void)
 {
@@ -222,9 +223,7 @@ int pxd_supported_features(void)
 #ifdef __PX_FASTPATH__
 	features |= PXD_FEATURE_FASTPATH;
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-	features |= PXD_FEATURE_BGIO;
-#endif
+	if (pxd_offload_threads()) features |= PXD_FEATURE_BGIO;
 
 	return features;
 }
