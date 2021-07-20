@@ -161,7 +161,9 @@ struct alignas(64) fuse_queue_writer {
 	uint32_t committed_;    /** last write index committed to reader */
 	bool in_runq;			/** a thread is processing the queue */
 	char pad_1[3];
-	uint32_t pad_2[8];
+	uint64_t submitted;	/** number of requests submitted */
+	uint64_t completed;	/** number of requests completed */
+	uint32_t pad_2[4];
 };
 
 /** reader control block */
@@ -169,7 +171,9 @@ struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
 	px::spinlock lock;
-	uint64_t pad_2[6];
+	uint32_t pad_1;
+	std::atomic<uint64_t> completed = 0;	/** number of requests completed */
+	uint64_t pad_2[5];
 };
 
 struct fuse_queue_cb;
