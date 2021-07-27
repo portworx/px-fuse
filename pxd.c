@@ -2368,11 +2368,11 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 #ifdef __PX_BLKMQ__
-	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
-			gitversion, pxd_supported_features());
+	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x max threads %d\n",
+			gitversion, pxd_supported_features(), pxd_offload_threads());
 #else
-	printk(KERN_INFO "pxd: driver loaded version %s, features %#x\n",
-			gitversion, pxd_supported_features());
+	printk(KERN_INFO "pxd: driver loaded version %s, features %#x, max threads %d\n",
+			gitversion, pxd_supported_features(), pxd_offload_threads());
 #endif
 
 	return 0;
