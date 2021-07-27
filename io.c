@@ -2742,7 +2742,6 @@ static long io_run_cmd(struct io_ring_ctx *ctx, unsigned long arg)
 {
 	struct io_uring_sqe entry;
 	struct sqe_submit s;
-	int ret;
 
 	if (copy_from_user(&entry, (void *)arg, sizeof(entry)))
 		return -EFAULT;
