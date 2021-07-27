@@ -2731,6 +2731,7 @@ static long io_run_cmd(struct io_ring_ctx *ctx, unsigned long arg)
 {
 	struct io_uring_sqe entry;
 	struct sqe_submit s;
+	long ret;
 
 	if (copy_from_user(&entry, (void *)arg, sizeof(entry)))
 		return -EFAULT;
@@ -2738,14 +2739,18 @@ static long io_run_cmd(struct io_ring_ctx *ctx, unsigned long arg)
 	if (entry.flags & IOSQE_IO_DRAIN)
 		return -EINVAL;
 
-	s.sqe = &entry;
+	s.sqe = &entry; // local var instead of a ring entry.
 	s.index = 0; // should be invalid, needed only for drain reqs
 
 	s.has_user = true;
 	s.needs_lock = false;
 	s.needs_fixed_file = false;
 
-	return io_submit_sqe(ctx, &s, NULL);
+	if (!percpu_ref_tryget(&ctx->refs))
+		return 0;
+	ret = io_submit_sqe(ctx, &s, NULL);
+	io_ring_drop_ctx_refs(ctx, 1);
+	return ret;
 }
 
 static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
