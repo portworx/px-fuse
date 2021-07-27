@@ -2738,6 +2738,28 @@ static long io_ring_ioctl_init(struct io_ring_ctx *ctx, unsigned long arg)
 	return 0;
 }
 
+static long io_run_cmd(struct io_ring_ctx *ctx, unsigned long arg)
+{
+	struct io_uring_sqe entry;
+	struct sqe_submit s;
+	int ret;
+
+	if (copy_from_user(&entry, (void *)arg, sizeof(entry)))
+		return -EFAULT;
+
+	if (entry.flags & IOSQE_IO_DRAIN)
+		return -EINVAL;
+
+	s.sqe = &entry;
+	s.index = 0; // should be invalid, needed only for drain reqs
+
+	s.has_user = true;
+	s.needs_lock = false;
+	s.needs_fixed_file = false;
+
+	return io_submit_sqe(ctx, &s, NULL);
+}
+
 static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct io_ring_ctx *ctx = filp->private_data;
@@ -2748,6 +2770,8 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return 0;
 	case PXD_IOC_RUN_IO_QUEUE:
 		return io_run_queue(ctx);
+	case PXD_IOC_RUN_CMD:
+		return io_run_cmd(ctx, arg);
 	case PXD_IOC_REGISTER_FILE:
 		return io_sqe_register_file(ctx, arg);
 	case PXD_IOC_UNREGISTER_FILE:

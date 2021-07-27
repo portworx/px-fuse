@@ -38,6 +38,7 @@
 #define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 #define PXD_IOC_INIT_IO         _IO(PXD_IOCTL_MAGIC, 11)    /* 0x50580b */
 #define PXD_IOC_WAKE_UP_SQO     _IO(PXD_IOCTL_MAGIC, 12)    /* 0x50580c */
+#define PXD_IOC_RUN_CMD     _IO(PXD_IOCTL_MAGIC, 13)    /* 0x50580d */
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
