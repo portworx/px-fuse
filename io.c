@@ -1460,18 +1460,13 @@ static int io_req_defer(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	if (!io_sequence_defer(ctx, req) && list_empty(&ctx->defer_list))
 		return 0;
 
-	sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
-	if (!sqe_copy)
-		return -EAGAIN;
-
+	sqe_copy = &req->cached_sqe;
 	spin_lock_irq(&ctx->completion_lock);
 	if (!io_sequence_defer(ctx, req) && list_empty(&ctx->defer_list)) {
 		spin_unlock_irq(&ctx->completion_lock);
-		kfree(sqe_copy);
 		return 0;
 	}
 
-	memcpy(sqe_copy, sqe, sizeof(*sqe_copy));
 	req->submit.sqe = sqe_copy;
 
 	INIT_WORK(&req->work, io_sq_wq_submit_work);
@@ -1630,9 +1625,6 @@ restart:
 			io_put_req(req);
 		}
 
-		/* async context always use a copy of the sqe */
-		kfree(sqe);
-
 		if (!async_list)
 			break;
 		if (!list_empty(&req_list)) {
@@ -1741,6 +1733,8 @@ static int io_req_set_file(struct io_ring_ctx *ctx, const struct sqe_submit *s,
 	unsigned flags;
 	int fd;
 
+	memcpy(&req->cached_sqe, s->sqe, sizeof(*s->sqe));
+
 	flags = READ_ONCE(s->sqe->flags);
 	fd = READ_ONCE(s->sqe->fd);
 
@@ -1794,31 +1788,26 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct sqe_submit *s,
 
 	ret = __io_submit_sqe(ctx, req, s, true);
 	if (ret == -EAGAIN && !(req->flags & REQ_F_NOWAIT)) {
-		struct io_uring_sqe *sqe_copy;
+		struct io_uring_sqe *sqe_copy = &req->cached_sqe;
+		struct async_list *list;
 
-		sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
-		if (sqe_copy) {
-			struct async_list *list;
+		s->sqe = sqe_copy;
+		req->submit.sqe = sqe_copy;
 
-			memcpy(sqe_copy, s->sqe, sizeof(*sqe_copy));
-			s->sqe = sqe_copy;
-
-			memcpy(&req->submit, s, sizeof(*s));
-			list = io_async_list_from_sqe(ctx, s->sqe);
-			if (!io_add_to_prev_work(list, req)) {
-				if (list)
-					atomic_inc(&list->cnt);
-				INIT_WORK(&req->work, io_sq_wq_submit_work);
-				queue_work(ctx->sqo_wq, &req->work);
-			}
-
-			/*
-			 * Queued up for async execution, worker will release
-			 * submit reference when the iocb is actually
-			 * submitted.
-			 */
-			return 0;
+		list = io_async_list_from_sqe(ctx, s->sqe);
+		if (!io_add_to_prev_work(list, req)) {
+			if (list)
+				atomic_inc(&list->cnt);
+			INIT_WORK(&req->work, io_sq_wq_submit_work);
+			queue_work(ctx->sqo_wq, &req->work);
 		}
+
+		/*
+		 * Queued up for async execution, worker will release
+		 * submit reference when the iocb is actually
+		 * submitted.
+		 */
+		return 0;
 	}
 
 out:
