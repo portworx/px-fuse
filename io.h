@@ -49,6 +49,7 @@
 #include <linux/percpu-refcount.h>
 #include <linux/miscdevice.h>
 #include "fuse_i.h"
+#include "pxd_io_uring.h"
 
 struct async_list {
 	spinlock_t		lock;
@@ -87,7 +88,7 @@ struct io_ring_ctx {
 
 	/* IO offload */
 	struct workqueue_struct	*sqo_wq;
-#define NSLAVES (8)
+#define NSLAVES (8u)
 	struct task_struct	*sqo_thread[NSLAVES];	/* if using sq thread polling */
 	struct mm_struct	*sqo_mm;
 	wait_queue_head_t	sqo_wait;
@@ -174,6 +175,7 @@ struct io_kiocb {
 		struct io_poll_iocb	poll;
 	};
 
+	struct io_uring_sqe __attribute__((aligned(8))) cached_sqe; // cached orig req
 	struct sqe_submit	submit;
 
 	struct io_ring_ctx	*ctx;

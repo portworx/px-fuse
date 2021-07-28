@@ -1460,18 +1460,13 @@ static int io_req_defer(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	if (!io_sequence_defer(ctx, req) && list_empty(&ctx->defer_list))
 		return 0;
 
-	sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
-	if (!sqe_copy)
-		return -EAGAIN;
-
+	sqe_copy = &req->cached_sqe;
 	spin_lock_irq(&ctx->completion_lock);
 	if (!io_sequence_defer(ctx, req) && list_empty(&ctx->defer_list)) {
 		spin_unlock_irq(&ctx->completion_lock);
-		kfree(sqe_copy);
 		return 0;
 	}
 
-	memcpy(sqe_copy, sqe, sizeof(*sqe_copy));
 	req->submit.sqe = sqe_copy;
 
 	INIT_WORK(&req->work, io_sq_wq_submit_work);
@@ -1630,9 +1625,6 @@ restart:
 			io_put_req(req);
 		}
 
-		/* async context always use a copy of the sqe */
-		kfree(sqe);
-
 		if (!async_list)
 			break;
 		if (!list_empty(&req_list)) {
@@ -1741,6 +1733,8 @@ static int io_req_set_file(struct io_ring_ctx *ctx, const struct sqe_submit *s,
 	unsigned flags;
 	int fd;
 
+	memcpy(&req->cached_sqe, s->sqe, sizeof(*s->sqe));
+
 	flags = READ_ONCE(s->sqe->flags);
 	fd = READ_ONCE(s->sqe->fd);
 
@@ -1794,31 +1788,26 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct sqe_submit *s,
 
 	ret = __io_submit_sqe(ctx, req, s, true);
 	if (ret == -EAGAIN && !(req->flags & REQ_F_NOWAIT)) {
-		struct io_uring_sqe *sqe_copy;
+		struct io_uring_sqe *sqe_copy = &req->cached_sqe;
+		struct async_list *list;
 
-		sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
-		if (sqe_copy) {
-			struct async_list *list;
+		s->sqe = sqe_copy;
+		req->submit.sqe = sqe_copy;
 
-			memcpy(sqe_copy, s->sqe, sizeof(*sqe_copy));
-			s->sqe = sqe_copy;
-
-			memcpy(&req->submit, s, sizeof(*s));
-			list = io_async_list_from_sqe(ctx, s->sqe);
-			if (!io_add_to_prev_work(list, req)) {
-				if (list)
-					atomic_inc(&list->cnt);
-				INIT_WORK(&req->work, io_sq_wq_submit_work);
-				queue_work(ctx->sqo_wq, &req->work);
-			}
-
-			/*
-			 * Queued up for async execution, worker will release
-			 * submit reference when the iocb is actually
-			 * submitted.
-			 */
-			return 0;
+		list = io_async_list_from_sqe(ctx, s->sqe);
+		if (!io_add_to_prev_work(list, req)) {
+			if (list)
+				atomic_inc(&list->cnt);
+			INIT_WORK(&req->work, io_sq_wq_submit_work);
+			queue_work(ctx->sqo_wq, &req->work);
 		}
+
+		/*
+		 * Queued up for async execution, worker will release
+		 * submit reference when the iocb is actually
+		 * submitted.
+		 */
+		return 0;
 	}
 
 out:
@@ -2041,6 +2030,10 @@ static int io_sq_thread(void *data)
 			atomic_dec(&ctx->requests_cb->r.need_wake_up);
 
 			if (kthread_should_stop()) {
+				if (cur_mm) {
+					io_sq_remove_user_mm(cur_mm, old_fs);
+					cur_mm = NULL;
+				}
 				break;
 			}
 			continue;
@@ -2237,6 +2230,7 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 {
 	int ret;
 	int i;
+	uint32_t max_threads = min(p->sqo_threads, NSLAVES);
 
 	init_waitqueue_head(&ctx->sqo_wait);
 	mmgrab(current->mm);
@@ -2251,7 +2245,7 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 		if (!ctx->sq_thread_idle)
 			ctx->sq_thread_idle = HZ;
 
-		for (i=0; i<NSLAVES; i++) {
+		for (i=0; i<max_threads; i++) {
 			ctx->sqo_thread[i] = kthread_create(io_sq_thread, ctx, "pxd-io-%d", i);
 			if (IS_ERR(ctx->sqo_thread[i])) {
 				ret = PTR_ERR(ctx->sqo_thread[i]);
@@ -2733,6 +2727,32 @@ static long io_ring_ioctl_init(struct io_ring_ctx *ctx, unsigned long arg)
 	return 0;
 }
 
+static long io_run_cmd(struct io_ring_ctx *ctx, unsigned long arg)
+{
+	struct io_uring_sqe entry;
+	struct sqe_submit s;
+	long ret;
+
+	if (copy_from_user(&entry, (void *)arg, sizeof(entry)))
+		return -EFAULT;
+
+	if (entry.flags & IOSQE_IO_DRAIN)
+		return -EINVAL;
+
+	s.sqe = &entry; // local var instead of a ring entry.
+	s.index = 0; // should be invalid, needed only for drain reqs
+
+	s.has_user = true;
+	s.needs_lock = false;
+	s.needs_fixed_file = false;
+
+	if (!percpu_ref_tryget(&ctx->refs))
+		return 0;
+	ret = io_submit_sqe(ctx, &s, NULL);
+	io_ring_drop_ctx_refs(ctx, 1);
+	return ret;
+}
+
 static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct io_ring_ctx *ctx = filp->private_data;
@@ -2743,6 +2763,8 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return 0;
 	case PXD_IOC_RUN_IO_QUEUE:
 		return io_run_queue(ctx);
+	case PXD_IOC_RUN_CMD:
+		return io_run_cmd(ctx, arg);
 	case PXD_IOC_REGISTER_FILE:
 		return io_sqe_register_file(ctx, arg);
 	case PXD_IOC_UNREGISTER_FILE:
