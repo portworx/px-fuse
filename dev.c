@@ -800,6 +800,21 @@ static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
                 failover ? PXD_FAILOVER_TO_USERSPACE : PXD_FALLBACK_TO_KERNEL);
 }
 
+static int fuse_notify_export(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter)
+{
+	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
+	uint64_t dev_id;
+	size_t len = sizeof(dev_id);
+
+	if (copy_from_iter(&dev_id, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+
+	return pxd_export(conn, dev_id);
+}
+
 static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		       unsigned int size, struct iov_iter *iter)
 {
@@ -824,6 +839,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
         return fuse_notify_ioswitch_event(fc, size, iter, true);
     case PXD_FALLBACK_TO_KERNEL:
         return fuse_notify_ioswitch_event(fc, size, iter, false);
+    case PXD_EXPORT_DEV:
+        return fuse_notify_export(fc, size, iter);
 	default:
 		return -EINVAL;
 	}

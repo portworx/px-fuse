@@ -328,6 +328,7 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 int fuse_restart_requests(struct fuse_conn *fc);
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
+ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
 ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);

@@ -1475,10 +1475,10 @@ out:
 	return err;
 }
 
-ssize_t pxd_export(struct fuse_conn *fc, struct pxd_add_ext_out *add)
+ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	struct pxd_device *pxd_dev = find_pxd_device(ctx, add->dev_id);
+	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
 	if (pxd_dev) {
 		add_disk(pxd_dev->disk);
