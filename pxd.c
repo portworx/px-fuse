@@ -1362,7 +1362,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		} else {
 			disableFastPath(pxd_dev, false);
 		}
-		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
+		return pxd_dev->minor;
 	}
 
 	/* pre-check to detect if prior instance is removed */
@@ -1461,7 +1461,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
 
-	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
+	return pxd_dev->minor;
 
 out_disk:
 	pxd_free_disk(pxd_dev);

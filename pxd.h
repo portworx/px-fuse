@@ -10,10 +10,6 @@
 #include <sys/param.h>
 #include <string.h>
 
-// definitions needed by userspace
-#define MINORBITS   20
-#define MINORMASK   ((1U << MINORBITS) - 1)
-
 #endif
 
 #include "fuse.h"
