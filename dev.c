@@ -803,7 +803,6 @@ static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
 static int fuse_notify_export(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
-	struct pxd_context *ctx = container_of(conn, struct pxd_context, fc);
 	uint64_t dev_id;
 	size_t len = sizeof(dev_id);
 
