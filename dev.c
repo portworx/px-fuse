@@ -834,12 +834,12 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_suspend(fc, size, iter);
 	case PXD_RESUME:
 		return fuse_notify_resume(fc, size, iter);
-    case PXD_FAILOVER_TO_USERSPACE:
-        return fuse_notify_ioswitch_event(fc, size, iter, true);
-    case PXD_FALLBACK_TO_KERNEL:
-        return fuse_notify_ioswitch_event(fc, size, iter, false);
-    case PXD_EXPORT_DEV:
-        return fuse_notify_export(fc, size, iter);
+	case PXD_FAILOVER_TO_USERSPACE:
+		return fuse_notify_ioswitch_event(fc, size, iter, true);
+	case PXD_FALLBACK_TO_KERNEL:
+		return fuse_notify_ioswitch_event(fc, size, iter, false);
+	case PXD_EXPORT_DEV:
+		return fuse_notify_export(fc, size, iter);
 	default:
 		return -EINVAL;
 	}
