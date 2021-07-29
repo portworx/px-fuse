@@ -9,7 +9,6 @@
 #include <stdint.h>
 #include <sys/param.h>
 #include <string.h>
-
 #endif
 
 #include "fuse.h"
