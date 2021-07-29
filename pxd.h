@@ -9,6 +9,11 @@
 #include <stdint.h>
 #include <sys/param.h>
 #include <string.h>
+
+// definitions needed for userspace
+// ref: include/linux/kdev_t.h
+#define MINORBITS	20
+#define MINORMASK	((1U << MINORBITS) - 1)
 #endif
 
 #include "fuse.h"
