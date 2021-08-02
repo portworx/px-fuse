@@ -1309,6 +1309,18 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
+typedef struct block_device* (*lookup_bdev_wrapper_fn)(char *dev, int mask);
+// This hack is needed because in ubuntu lookup_bdev is defined with 2 arg.
+// ubuntu commit id 6bdf7d686366556020b6ed044fa9eadd090d3984
+// struct block_device *lookup_bdev(const char *pathname, int mask)
+// mask = 0, no perm checks are done
+// So this module shall always push 2 args into stack, but the kernel function
+// decides whether it uses both or only 1.
+// This satisfies the compilation.
+static lookup_bdev_wrapper_fn lookup_bdev_wrapper = (lookup_bdev_wrapper_fn)lookup_bdev;
+#endif
+
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
@@ -1317,6 +1329,12 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
+	char devfile[128];
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
+	struct block_device *bdev;
+#else
+	dev_t kdev;
+#endif
 
 	err = -ENODEV;
 	if (!try_module_get(THIS_MODULE))
@@ -1338,8 +1356,27 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		} else {
 			disableFastPath(pxd_dev, false);
 		}
-		return pxd_dev->minor;
+		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 	}
+
+	/* pre-check to detect if prior instance is removed */
+	sprintf(devfile, "/dev/pxd/pxd%llu", add->dev_id);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
+	bdev = lookup_bdev_wrapper(devfile, 0);
+	if (!IS_ERR(bdev)) {
+		bdput(bdev);
+		pr_err("stale bdev %s still alive", devfile);
+		err = -EEXIST;
+		goto out_module;
+	}
+#else
+	err = lookup_bdev(devfile, &kdev);
+	if (!err) {
+		pr_err("stale bdev %s still alive", devfile);
+		err = -EEXIST;
+		goto out_module;
+	}
+#endif
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
 	if (!pxd_dev)
@@ -1420,7 +1457,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 
 	add_disk(pxd_dev->disk);
 
-	return pxd_dev->minor;
+	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
 out_disk:
 	pxd_free_disk(pxd_dev);
@@ -1468,6 +1505,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	pxd_dev->removing = true;
 	wmb();
+	pr_info("removing device %llu", pxd_dev->dev_id);
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
@@ -1487,6 +1525,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	return 0;
 out:
+	pr_err("remove device %llu failed %d", pxd_dev->dev_id, err);
 	return err;
 }
 
