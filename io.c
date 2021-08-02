@@ -1110,31 +1110,45 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	const int mode = FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE;
 	int ret = -EINVAL;
 	const struct io_uring_sqe *sqe = s->sqe;
-	struct inode *inode;
+	struct inode *inode = NULL;
+	struct block_device *bdev = NULL;
+	struct address_space *mapping = NULL;
 
 	loff_t off = READ_ONCE(sqe->off);
 	loff_t bytes = READ_ONCE(sqe->len);
 
 	/* discard always requires a blocking context */
-	if (force_nonblock)
+	if (force_nonblock) {
 		return -EAGAIN;
+	}
 
 	if (unlikely(!(req->file->f_mode & FMODE_WRITE))) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	inode = req->file->f_inode;
+	inode = req->file->f_mapping->host;
 	if (S_ISBLK(inode->i_mode)) {
-		struct block_device *bdev = I_BDEV(inode);
-		struct address_space *mapping = bdev->bd_inode->i_mapping;
+		bdev = I_BDEV(inode);;
+		if (!bdev || IS_ERR(bdev)) {
+			pr_warn("%s: invalid bdev", __func__);
+			return -EIO;
+		}
+
+		if (off + bytes > i_size_read(bdev->bd_inode)) {
+			pr_warn("%s: invalid arguments: offset: %llu len: %llu", __func__, off, bytes);
+			return -EINVAL;
+		}
+
+		mapping = bdev->bd_inode->i_mapping;
 		truncate_inode_pages_range(mapping, off, off + bytes - 1);
-		ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE,
-			bytes / SECTOR_SIZE, GFP_KERNEL, 0);
+		ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE, bytes / SECTOR_SIZE,
+			GFP_KERNEL, 0);
 		if (ret < 0) {
 			pr_warn("%s: blkdev_issue_discard failed: ret %d", __func__, ret);
-			if (ret != -EINVAL && ret != -EOPNOTSUPP)
+			if (ret != -EINVAL && ret != -EOPNOTSUPP) {
 				ret = -EIO;
+			}
 		}
 	} else if (unlikely(!req->file->f_op->fallocate)) {
 		printk("%s: fallocate is NULL", __func__);
