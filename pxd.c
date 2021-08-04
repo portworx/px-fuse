@@ -1461,8 +1461,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
 
-	add_disk(pxd_dev->disk);
-
 	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
 out_disk:
@@ -1475,6 +1473,19 @@ out_module:
 	module_put(THIS_MODULE);
 out:
 	return err;
+}
+
+ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
+{
+	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
+	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
+
+	if (pxd_dev) {
+		add_disk(pxd_dev->disk);
+		return 0;
+	}
+
+	return -ENOENT;
 }
 
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
