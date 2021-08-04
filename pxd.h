@@ -79,6 +79,7 @@ enum pxd_opcode {
 						  from kernel on a suspended device */
 	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
+	PXD_EXPORT_DEV,     /**< export the attached device to the kernel */
 	PXD_LAST,
 };
 
