@@ -266,6 +266,13 @@ struct fuse_conn {
 
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
+
+	/** user request processing */
+	wait_queue_head_t io_wait;
+#define NWORKERS (8u)
+	struct task_struct* io_worker_thread[NWORKERS];
+	struct mm_struct *user_mm;
+	spinlock_t io_lock;
 };
 
 /** Device operations */
@@ -306,9 +313,16 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req);
 void fuse_abort_conn(struct fuse_conn *fc);
 
 /**
+ * start processing pending IOs from userspace.
+ */
+void fuse_run_user_queue(struct fuse_conn *fc, bool mm_fault);
+void fuse_restart_user_queue(struct fuse_conn *fc);
+void fuse_pause_user_queue(struct fuse_conn *fc);
+
+/**
  * Initialize fuse_conn
  */
-int fuse_conn_init(struct fuse_conn *fc);
+int fuse_conn_init(struct fuse_conn *fc, uint32_t max_threads);
 
 /**
  * Abort pending requests

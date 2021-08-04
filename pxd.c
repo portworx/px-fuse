@@ -64,14 +64,25 @@ uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
+uint32_t pxd_offload = 0;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+/// specify number of threads for bgio processing
+module_param(pxd_offload, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
+
+uint32_t pxd_offload_threads(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+	return min(NWORKERS, pxd_offload);
+#endif
+	return 0;
+}
 
 struct pxd_context* find_context(unsigned ctx)
 {
@@ -230,25 +241,8 @@ static long pxd_ioctl_run_user_queue(struct file *file)
 {
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	struct fuse_conn *fc = &ctx->fc;
-	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
 
-	struct fuse_user_request *req;
-
-	uint32_t read = cb->r.read;
-	uint32_t write = smp_load_acquire(&cb->r.write);
-
-	while (read != write) {
-		for (; read != write; ++read) {
-			req = &fc->queue->user_requests[
-				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
-			fuse_process_user_request(fc, req);
-		}
-
-		smp_store_release(&cb->r.read, read);
-
-		write = smp_load_acquire(&cb->r.write);
-	}
-
+	fuse_run_user_queue(fc, false);
 	return 0;
 }
 
@@ -2207,6 +2201,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		pxd_printk("%s: not opened\n", __func__);
 	} else {
 		WRITE_ONCE(ctx->fc.connected, 0);
+		fuse_pause_user_queue(&ctx->fc);
 	}
 
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
@@ -2322,7 +2317,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->fops.mmap = pxd_mmap;
 
 	if (ctx->id < pxd_num_contexts_exported) {
-		err = fuse_conn_init(&ctx->fc);
+		err = fuse_conn_init(&ctx->fc, pxd_offload_threads());
 		if (err)
 			return err;
 	}
@@ -2423,11 +2418,11 @@ int pxd_init(void)
 		goto out_blkdev;
 	}
 #ifdef __PX_BLKMQ__
-	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
-			gitversion, pxd_supported_features());
+	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x max threads %d\n",
+			gitversion, pxd_supported_features(), pxd_offload_threads());
 #else
-	printk(KERN_INFO "pxd: driver loaded version %s, features %#x\n",
-			gitversion, pxd_supported_features());
+	printk(KERN_INFO "pxd: driver loaded version %s, features %#x, max threads %d\n",
+			gitversion, pxd_supported_features(), pxd_offload_threads());
 #endif
 
 	return 0;
