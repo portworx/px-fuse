@@ -9,12 +9,19 @@
 #include <stdint.h>
 #include <sys/param.h>
 #include <string.h>
+
+// definitions needed for userspace
+// ref: include/linux/kdev_t.h
+#define MINORBITS   20
+#define MINORMASK   ((1U << MINORBITS) - 1)
+
 #endif
 
 #include "fuse.h"
 
 /// @file px_fuse/pxd.h
 
+#define PXD_POISON (0xdeadbeef)
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
@@ -60,8 +67,8 @@ enum pxd_opcode {
 	PXD_UPDATE_SIZE,	/**< update device size */
 	PXD_WRITE_SAME,		/**< write_same operation */
 	PXD_ADD_EXT,		/**< add device with extended info to kernel */
-	PXD_UPDATE_PATH,    /**< update backing file/device path for a volume */
-	PXD_SET_FASTPATH,   /**< enable/disable fastpath */
+	PXD_DEPRECATE_1,    /**< deprecated */
+	PXD_DEPRECATE_0,   /**< deprecated */
 	PXD_GET_FEATURES,   /**< get features */
 	PXD_COMPLETE,		/**< complete kernel operation */
 	PXD_SUSPEND,		/**< IO suspend */
@@ -70,6 +77,7 @@ enum pxd_opcode {
 						  from kernel on a suspended device */
 	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
+	PXD_EXPORT_DEV,     /**< export the attached device to the kernel */
 	PXD_LAST,
 };
 
@@ -177,6 +185,7 @@ struct pxd_fastpath_out {
 	uint64_t dev_id;
 	int enable;
 	int cleanup; // only meaningful while disabling
+	int context_id;
 };
 
 /**
@@ -209,6 +218,16 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
 
+static inline
+int pxd_supported_features(void)
+{
+    int features = 0;
+#ifdef __PX_FASTPATH__
+    features |= PXD_FEATURE_FASTPATH;
+#endif
+
+    return features;
+}
 
 /**
  * PXD_READ/PXD_WRITE kernel request structure

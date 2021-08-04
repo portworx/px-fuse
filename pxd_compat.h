@@ -15,6 +15,8 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 #include <linux/part_stat.h>
 #endif
+#include <linux/bio.h>
+#include <linux/blk_types.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER
@@ -43,23 +45,27 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
 #define BIO_OP(bio)   bio_op(bio)
 #define SUBMIT_BIO(bio) submit_bio(bio)
+#define REQ_OP(rq)  req_op(rq)
 #else
 // only supports read or write
-#define BIO_OP(bio)   ((bio)->bi_rw & 1)
-#define SUBMIT_BIO(bio)  submit_bio(BIO_OP(bio), bio)
+#define BIO_OP(bio)   ((bio)->bi_rw)
+#define SUBMIT_BIO(bio)  submit_bio(((bio)->bi_rw & 1), bio)
+#define REQ_OP(rq)  (rq)->cmd_flags
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad, 0)
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad, opt)
 #else
-#define BIOSET_CREATE(sz, pad)   bioset_create(sz, pad)
+#ifndef BIOSET_NEED_BVECS
+#define BIOSET_NEED_BVECS (1)
+#endif
+#define BIOSET_CREATE(sz, pad, opt)   bioset_create(sz, pad)
 #endif
 
 #if defined(bio_set_dev)
 #define BIO_SET_DEV(bio, bdev)  bio_set_dev(bio, bdev)
 #else
-#define BIO_SET_DEV(bio, bdev)  \
-	do { \
+#define BIO_SET_DEV(bio, bdev)  do { \
 		(bio)->bi_bdev = (bdev); \
 	} while (0)
 #endif
@@ -87,12 +93,65 @@
 #define BLK_RQ_IS_PASSTHROUGH(rq)	(rq->cmd_type != REQ_TYPE_FS)
 #endif
 
+// helper macros for PXD_SETUP_CONGESTION_HOOK
+#define __type_is_ptr(bdev)  __builtin_types_compatible_p(typeof(bdev), struct backing_dev_info*)
+#define __ptr_or_null(bdev) __builtin_choose_expr(__type_is_ptr(bdev), bdev, (struct backing_dev_info*)NULL)
+#define __SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+	({ \
+		if (bdev) { \
+			(bdev)->congested_fn = cfn;\
+			(bdev)->congested_data = cdata;\
+		} \
+	})
+
+#define PXD_SETUP_CONGESTION_HOOK(bdev, cfn, cdata) \
+	__builtin_choose_expr(__type_is_ptr(bdev), \
+			__SETUP_CONGESTION_HOOK(__ptr_or_null(bdev), cfn, cdata), \
+			__SETUP_CONGESTION_HOOK(__ptr_or_null(&bdev), cfn, cdata))
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0) || \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
      defined(bvec_iter_sectors))
 #define QUEUE_FLAG_SET(flag,q) blk_queue_flag_set(flag, q);
 #else
 #define QUEUE_FLAG_SET(flag,q) queue_flag_set_unlocked(flag, q);
+#endif
+
+static inline unsigned int get_op_flags(struct bio *bio)
+{
+	unsigned int op_flags;
+	if (!bio) return 0;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,8,0)
+	op_flags = 0; // Not present in older kernels
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
+	op_flags = (bio->bi_opf & ((1 << BIO_OP_SHIFT) - 1));
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(4,10,0)
+	op_flags = bio_flags(bio);
+#else
+	op_flags = (bio->bi_opf & ~REQ_OP_MASK);
+#endif
+	return op_flags;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#define BDEVNAME(bio, b)   bio_devname(bio, b)
+#define BIO_COPY_DEV(dst, src) bio_copy_dev(dst, src)
+#else
+#define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+#define BIO_COPY_DEV(dst, src) do {			\
+	(dst)->bi_bdev = (src)->bi_bdev; 		\
+} while (0)
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
+#define BIO_SET_OP_ATTRS(b, op, flags) bio_set_op_attrs(b, op, flags)
+#else
+// no 'op_flags' present, hence ignored, but pet the compiler for unused var
+#define BIO_SET_OP_ATTRS(b, op, flags) do {		\
+	(void)(flags); \
+	(b)->bi_rw = op; \
+} while (0)
 #endif
 
 #endif //GDFS_PXD_COMPAT_H

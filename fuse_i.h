@@ -37,6 +37,7 @@
 #endif
 
 #include "pxd.h"
+#include "pxd_bio.h"
 
 struct fuse_conn;
 
@@ -78,8 +79,8 @@ struct fuse_req {
 	    fuse_conn */
 	struct list_head list;
 
-	/** Request to use fastpath */
-	unsigned fastpath:1;
+	/** Need to fetch state of device */
+	struct pxd_device *pxd_dev;
 
 	/** The request input */
 	struct fuse_in in;
@@ -98,11 +99,40 @@ struct fuse_req {
 	};
 
 	/** Request completion callback */
-	void (*end)(struct fuse_conn *, struct fuse_req *);
+	bool (*end)(struct fuse_conn *, struct fuse_req *, int status);
 
 	/** Associate request queue */
 	struct request_queue *queue;
+#ifdef __PXD_BIO_BLKMQ__
+	// Additional fastpath context
+	struct fp_root_context fproot;
+#endif
 };
+
+#ifdef __PXD_BIO_BLKMQ__
+static inline
+struct pxd_device* fproot_to_pxd(struct fp_root_context *fproot)
+{
+	struct fuse_req *f = container_of(fproot, struct fuse_req, fproot);
+
+	return f->pxd_dev;
+}
+
+static inline
+struct request* fproot_to_request(struct fp_root_context *fproot)
+{
+	struct fuse_req *f = container_of(fproot, struct fuse_req, fproot);
+
+	return f->rq;
+}
+
+static inline
+struct fuse_req* fproot_to_fuse_request(struct fp_root_context *fproot)
+{
+	return container_of(fproot, struct fuse_req, fproot);
+}
+
+#endif
 
 #define FUSE_MAX_PER_CPU_IDS 256
 
@@ -319,12 +349,14 @@ void fuse_conn_put(struct fuse_conn *fc);
 struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 
 void fuse_restart_requests(struct fuse_conn *fc);
+void fuse_convert_zero_writes(struct fuse_req *req);
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
 ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
+ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id);
 
 // fastpath extension
 ssize_t pxd_update_path(struct fuse_conn *fc, struct pxd_update_path_out *update_path);
