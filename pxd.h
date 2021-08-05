@@ -26,7 +26,8 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 11				/**< driver version */
+#define PXD_VERSION 12				/**< driver version */
+#define PXD_FASTPATH_MINVERSION (12) /**< fastpath enabled min kernel version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -217,11 +218,12 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
  */
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
+#define PXD_FEATURE_ATTACH_OPTIMIZED (0x2)
 
 static inline
 int pxd_supported_features(void)
 {
-    int features = 0;
+    int features = PXD_FEATURE_ATTACH_OPTIMIZED;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif
