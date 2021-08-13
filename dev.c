@@ -563,6 +563,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 
 	memset(&add_ext, 0, sizeof(add_ext));
 	memcpy(&add_ext, &add, sizeof(add));
+	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
 	return pxd_add(conn, &add_ext);
 }
 
@@ -594,6 +595,15 @@ static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 		return NULL;
 	}
 	return req;
+}
+
+struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
+{
+	struct pxd_context *pctx = find_context(ctx);
+
+	if (!pctx) return NULL;
+
+	return request_find(&pctx->fc, unique);
 }
 
 #define IOV_BUF_SIZE 64

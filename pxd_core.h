@@ -20,7 +20,6 @@ struct pxd_context {
 	char name[256];
 	int id;
 	struct miscdevice miscdev;
-	struct list_head pending_requests;
 	struct delayed_work abort_work;
 
 	uint64_t open_seq;
