@@ -2285,6 +2285,12 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 			pr_info("found existing mapping %d, off %ld", buf_index, offset);
 			break;
 		}
+		if (imu->ubuf < (uintptr_t) arg.base + arg.len &&
+			(uintptr_t) arg.base < imu->ubuf + imu->len) {
+			pr_info("%s: intersects with existing mapping", __func__);
+			ret = -EEXIST;
+			goto err;
+		}
 	}
 
 	if (buf_index == PXD_IO_MAX_USER_BUFS) {
@@ -2322,6 +2328,16 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 	nr_pages = end - start;
 	max_nr_pages = arg.max_len >> PAGE_SHIFT;
 
+	if (existing) {
+		for (j = 0; j < nr_pages; ++j) {
+			if (imu->bvec[j + offset].bv_page) {
+				pr_err("%s: trying to overwrite existing mapping", __func__);
+				ret = -EEXIST;
+				goto err;
+			}
+		}
+	}
+
 	ret = -ENOMEM;
 	pages = kvmalloc_array(nr_pages, sizeof(struct page *),
 		GFP_KERNEL);
@@ -2331,10 +2347,12 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 		goto err;
 	}
 
-	imu->bvec = kvcalloc(max_nr_pages, sizeof(struct bio_vec),
-		GFP_KERNEL);
-	if (!imu->bvec) {
-		goto err;
+	if (!existing) {
+		imu->bvec = kvmalloc_array(max_nr_pages, sizeof(struct bio_vec),
+			GFP_KERNEL | __GFP_ZERO);
+		if (!imu->bvec) {
+			goto err;
+		}
 	}
 
 	ret = 0;
