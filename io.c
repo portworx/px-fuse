@@ -2381,8 +2381,10 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 			for (j = 0; j < pret; j++)
 				put_page(pages[j]);
 		}
-		kvfree(imu->bvec);
-		imu->bvec = NULL;
+		if (!existing) {
+			kvfree(imu->bvec);
+			imu->bvec = NULL;
+		}
 		goto err;
 	}
 
