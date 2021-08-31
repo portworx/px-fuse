@@ -417,6 +417,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
+	printk("%s: entered for device %llu", __func__, pxd_dev->dev_id);
 	disableFastPath(pxd_dev, false);
 
 	if (pxd_dev->fp.wq) {

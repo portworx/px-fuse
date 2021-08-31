@@ -1506,7 +1506,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	spin_unlock(&pxd_dev->lock);
 
-	pxd_fastpath_cleanup(pxd_dev);
 	device_unregister(&pxd_dev->dev);
 
 	module_put(THIS_MODULE);
