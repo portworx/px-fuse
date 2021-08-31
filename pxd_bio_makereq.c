@@ -1,6 +1,10 @@
 // enable this only if the px block device IO is
 // registered through make_request() fn.
-#ifdef __PXD_BIO_MAKEREQ__
+#if defined __PXD_BIO_MAKEREQ__ && defined __PX_FASTPATH__
+
+#ifndef _PX_FASTPATH_
+#error "invalid compile option"
+#endif
 
 #include <linux/delay.h>
 #include <linux/genhd.h>
