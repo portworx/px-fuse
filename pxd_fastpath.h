@@ -65,6 +65,10 @@ struct pxd_fastpath_extension {
 	atomic_t nerror; // [global] total IO error
 };
 
+#ifndef __PX_FASTPATH__
+#include "pxd_fastpath_stub.h"
+#else
+
 // global initialization during module init for fastpath
 int fastpath_init(void);
 void fastpath_cleanup(void);
@@ -75,8 +79,6 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev);
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
-
-void pxdctx_set_connected(struct pxd_context *ctx, bool enable);
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
 void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
@@ -141,5 +143,6 @@ int remap_io_status(int status)
 
 	return -EIO;
 }
+#endif /* __PX_FASTPATH__ */
 
 #endif /* _PXD_FASTPATH_H_ */

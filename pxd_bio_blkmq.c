@@ -1,6 +1,6 @@
 // enable this only if the px block device IO is
 // registered through blkmq
-#ifdef __PXD_BIO_BLKMQ__
+#if defined __PXD_BIO_BLKMQ__ && defined __PX_FASTPATH__
 
 #include <linux/delay.h>
 #include <linux/errno.h>
