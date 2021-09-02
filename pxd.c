@@ -1501,15 +1501,21 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
+#ifndef __PX_BLKMQ__
 		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
 
 		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
 
         mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+#else
+		blk_mq_freeze_queue(pxd_dev->disk->queue);
+		blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
 	}
 
 	spin_unlock(&pxd_dev->lock);
 
+	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
 
 	module_put(THIS_MODULE);
