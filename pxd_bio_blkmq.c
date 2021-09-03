@@ -281,10 +281,11 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                    op_flags);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
-        if ((BIO_OP(rq->bio) != REQ_OP_FLUSH) &&
-            (BIO_OP(rq->bio) != REQ_OP_DISCARD)) {
+        if ((REQ_OP(rq) != REQ_OP_DISCARD) && (blk_rq_bytes(rq) != 0)) {
+            BUG_ON(BIO_OP(rq->bio) == REQ_OP_DISCARD);
 #else
-        if (!(BIO_OP(rq->bio) & (REQ_FLUSH | REQ_DISCARD))) {
+        if (!(REQ_OP(rq) & REQ_DISCARD) && (blk_rq_bytes(rq) != 0)) {
+            BUG_ON(BIO_OP(rq->bio) & REQ_DISCARD);
 #endif
                 rq_for_each_segment(bv, rq, rq_iter) {
                         unsigned len =
