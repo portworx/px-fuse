@@ -88,7 +88,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 		err = -ENXIO;
 	} else {
 		spin_lock(&pxd_dev->lock);
-		if (pxd_dev->removing)
+		if (atomic_read(&pxd_dev->removing))
 			err = -EBUSY;
 		else
 			pxd_dev->open_count++;
@@ -1003,6 +1003,11 @@ static void pxd_rq_fn(struct request_queue *q)
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
+		if (atomic_read(&pxd_dev->removing)) {
+			pr_info("EIO: pxd device %llu removing...\n", pxd_dev->dev_id);
+			__blk_end_request_all(rq, 0);
+			continue;
+		}
 		spin_unlock_irq(&pxd_dev->qlock);
 		pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 			"flags  %llx\n", __func__,
@@ -1081,6 +1086,11 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
+
+	if (atomic_read(&pxd_dev->removing)) {
+		pr_info("EIO: pxd device %llu removing...\n", pxd_dev->dev_id);
+		return BLK_STS_IOERR;
+	}
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
 		   "flags  %x\n", __func__,
@@ -1366,6 +1376,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_mem_printk("device %llu allocated at %px\n", add->dev_id, pxd_dev);
 
 	pxd_dev->magic = PXD_DEV_MAGIC;
+	atomic_set(&pxd_dev->removing, 0u);
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
@@ -1495,7 +1506,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
-	pxd_dev->removing = true;
+	atomic_set(&pxd_dev->removing, 1u);
 	wmb();
 	pr_info("removing device %llu", pxd_dev->dev_id);
 
@@ -1540,7 +1551,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if ((pxd_dev->dev_id == update_size->dev_id) && !pxd_dev->removing) {
+		if ((pxd_dev->dev_id == update_size->dev_id) && !atomic_read(&pxd_dev->removing)) {
 			spin_lock(&pxd_dev->lock);
 			found = true;
 			break;

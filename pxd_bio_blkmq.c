@@ -245,11 +245,17 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         // it is possible for sync request to carry no bio
-        if (!rq->bio)
+        if (!rq->bio) {
+				printk("%s:(none) rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
+					__func__, rq->cmd_flags, req_op(rq), 0, op_flags);
                 return 0;
+		}
 
         // single bio request
         if (rq->bio == rq->biotail) {
+				printk("%s:(single) rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
+                   __func__, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
+                   op_flags);
                 fproot->bio = rq->bio;
                 BUG_ON(BIO_SECTOR(fproot->bio) != blk_rq_pos(rq));
                 BUG_ON(BIO_SIZE(fproot->bio) != blk_rq_bytes(rq));
