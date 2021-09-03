@@ -276,7 +276,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
         bio->bi_private = fproot;
 
-        pxd_printk("%s: rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
+        printk("%s: rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
                    __func__, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
                    op_flags);
 
@@ -594,6 +594,9 @@ static void fp_handle_specialops(struct work_struct *work) {
                 BUG_ON("unexpected condition");
         }
 #endif
+
+		printk("%s discard for device %llu, off %lu, sectors %d\n",
+				__func__, pxd_dev->dev_id, blk_rq_pos(rq), blk_rq_sectors(rq));
 
         // submit discard to replica
         if (blk_queue_discard(q)) { // discard supported
