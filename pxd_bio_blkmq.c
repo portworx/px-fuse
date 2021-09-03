@@ -595,8 +595,8 @@ static void fp_handle_specialops(struct work_struct *work) {
         }
 #endif
 
-		printk("%s discard for device %llu, off %lu, sectors %d\n",
-				__func__, pxd_dev->dev_id, blk_rq_pos(rq), blk_rq_sectors(rq));
+		printk("%s discard for device %llu, off %llu, sectors %u\n",
+				__func__, pxd_dev->dev_id, (unsigned long long)blk_rq_pos(rq), blk_rq_sectors(rq));
 
         // submit discard to replica
         if (blk_queue_discard(q)) { // discard supported
