@@ -484,13 +484,15 @@ clone_and_map(struct fp_root_context *fproot) {
                         atomic_inc(&pxd_dev->fp.nswitch);
                         if (rq_is_special(rq)) {
                                 INIT_WORK(&cc->work, fp_handle_specialops);
-                                queue_work(pxd_dev->fp.wq, &cc->work);
+                                // queue_work(pxd_dev->fp.wq, &cc->work);
+								schedule_work(&cc->work);
                         } else {
                                 SUBMIT_BIO(clone);
                         }
                 } else {
                         INIT_WORK(&cc->work, pxd_process_fileio);
-                        queue_work(pxd_dev->fp.wq, &cc->work);
+                        // queue_work(pxd_dev->fp.wq, &cc->work);
+						schedule_work(&cc->work);
                 }
         }
 
@@ -552,12 +554,13 @@ static void pxd_io_failover(struct work_struct *work) {
 }
 
 static void pxd_failover_initiate(struct fp_root_context *fproot) {
-        struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+        // struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         INIT_WORK(&fproot->work, pxd_io_failover);
-        queue_work(pxd_dev->fp.wq, &fproot->work);
+        //queue_work(pxd_dev->fp.wq, &fproot->work);
+		schedule_work(&fproot->work);
 }
 
 // io handling functions

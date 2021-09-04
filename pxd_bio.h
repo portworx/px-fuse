@@ -26,6 +26,9 @@ void pxd_suspend_io(struct pxd_device *pxd_dev);
 void pxd_resume_io(struct pxd_device *pxd_dev);
 
 #ifdef __PXD_BIO_BLKMQ__
+// io entry point
+void fp_handle_io(struct work_struct *work);
+
 // structure is exported only so, it can be embedded within fuse_context.
 // Treat it as private outside fastpath
 struct fp_root_context {
@@ -45,10 +48,9 @@ static inline void fp_root_context_init(struct fp_root_context *fproot) {
   atomic_set(&fproot->nactive, 0);
   INIT_LIST_HEAD(&fproot->wait);
   // work struct should get initialized right before use
+  INIT_WORK(&fproot->work, fp_handle_io);
 }
 
-// io entry point
-void fp_handle_io(struct work_struct *work);
 #endif
 
 #endif /* _PXD_BIO_H_ */
