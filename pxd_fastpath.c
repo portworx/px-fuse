@@ -339,6 +339,10 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	pxd_dev->fp.can_failover = false;
 
 	pxd_resume_io(pxd_dev);
+
+	// ensure all pending workqueue items on this device gets finished.
+	if (pxd_dev->fp.wq)
+		flush_workqueue(pxd_dev->fp.wq);
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev)
