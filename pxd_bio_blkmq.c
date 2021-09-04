@@ -485,14 +485,16 @@ clone_and_map(struct fp_root_context *fproot) {
                         if (rq_is_special(rq)) {
                                 INIT_WORK(&cc->work, fp_handle_specialops);
                                 // queue_work(pxd_dev->fp.wq, &cc->work);
-								schedule_work(&cc->work);
+								// schedule_work(&cc->work);
+								queue_work(fastpath_workqueue(), &cc->work);
                         } else {
                                 SUBMIT_BIO(clone);
                         }
                 } else {
                         INIT_WORK(&cc->work, pxd_process_fileio);
                         // queue_work(pxd_dev->fp.wq, &cc->work);
-						schedule_work(&cc->work);
+						// schedule_work(&cc->work);
+						queue_work(fastpath_workqueue(), &cc->work);
                 }
         }
 
@@ -560,7 +562,8 @@ static void pxd_failover_initiate(struct fp_root_context *fproot) {
 
         INIT_WORK(&fproot->work, pxd_io_failover);
         //queue_work(pxd_dev->fp.wq, &fproot->work);
-		schedule_work(&fproot->work);
+		// schedule_work(&fproot->work);
+		queue_work(fastpath_workqueue(), &fproot->work);
 }
 
 // io handling functions

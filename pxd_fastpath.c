@@ -11,6 +11,8 @@
 #include "pxd_compat.h"
 #include "kiolib.h"
 
+static struct workqueue_struct *fpwq;
+
 int fastpath_init(void)
 {
 #ifdef __PXD_BIO_MAKEREQ__
@@ -19,11 +21,24 @@ int fastpath_init(void)
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 #endif
 
+	fpwq = alloc_workqueue("pxdwq", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0);
+	if (!fpwq)
+		return -ENOMEM;
+
 	return __fastpath_init();
+}
+
+struct workqueue_struct* fastpath_workqueue(void)
+{
+	return fpwq;
 }
 
 void fastpath_cleanup(void)
 {
+	if (fpwq != NULL) {
+		destroy_workqueue(fpwq);
+		fpwq = NULL;
+	}
 	__fastpath_cleanup();
 }
 
@@ -132,7 +147,8 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	reinit_completion(&fp->sync_complete);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
 		// queue_work(fp->wq, &fp->syncwi[i].ws);
-		schedule_work(&fp->syncwi[i].ws);
+		queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
+		// schedule_work(&fp->syncwi[i].ws);
 	}
 
 #define SYNC_TIMEOUT (60000)
