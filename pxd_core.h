@@ -40,7 +40,7 @@ struct pxd_device {
 	spinlock_t qlock;
 	struct list_head node;
 	int open_count;
-	atomic_t removing;
+	bool removing;
 	struct pxd_fastpath_extension fp;
 	struct pxd_context *ctx;
 	bool connected;
