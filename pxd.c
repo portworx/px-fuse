@@ -1026,18 +1026,8 @@ static void pxd_rq_fn(struct request_queue *q)
 
 #ifdef __PX_FASTPATH__
 		if (pxd_dev->fp.fastpath) {
-#if 0
-			if (!pxd_dev->fp.wq || atomic_read(&pxd_dev->removing)) {
-				pr_info("EIO: pxd device %llu removing...\n", pxd_dev->dev_id);
-				__blk_end_request_all(rq, 0);
-				continue;
-			}
-#endif
 			// route through fastpath
-			// INIT_WORK(&fproot->work, fp_handle_io);
-			// queue_work(pxd_dev->fp.wq, &fproot->work);
-			// schedule_work(&fproot->work);
-			queue_work(fastpath_workqueue(), &fproot->work);
+			queue_work(pxd_dev->fp.wq, &fproot->work);
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
@@ -1109,19 +1099,10 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 #ifdef __PX_FASTPATH__
 	if (pxd_dev->fp.fastpath) {
-#if 0
-		if (!pxd_dev->fp.wq || atomic_read(&pxd_dev->removing)) {
-			pr_info("EIO: pxd device %llu removing...\n", pxd_dev->dev_id);
-			return BLK_STS_IOERR;
-		}
-#endif
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
-		// INIT_WORK(&fproot->work, fp_handle_io);
-		// queue_work(pxd_dev->fp.wq, &fproot->work);
-		// schedule_work(&fproot->work);
-		queue_work(fastpath_workqueue(), &fproot->work);
+		queue_work(pxd_dev->fp.wq, &fproot->work);
 		return BLK_STS_OK;
 	}
 #endif
@@ -1524,7 +1505,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
 
-        mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
 		blk_mq_freeze_queue(pxd_dev->disk->queue);
 		blk_set_queue_dying(pxd_dev->disk->queue);

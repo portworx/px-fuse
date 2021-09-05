@@ -73,8 +73,6 @@ struct pxd_fastpath_extension {
 int fastpath_init(void);
 void fastpath_cleanup(void);
 
-struct workqueue_struct *fastpath_workqueue(void);
-
 struct pxd_update_path_out;
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 

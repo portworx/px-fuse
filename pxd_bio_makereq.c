@@ -2,10 +2,6 @@
 // registered through make_request() fn.
 #if defined __PXD_BIO_MAKEREQ__ && defined __PX_FASTPATH__
 
-#ifndef _PX_FASTPATH_
-#error "invalid compile option"
-#endif
-
 #include <linux/delay.h>
 #include <linux/genhd.h>
 #include <linux/types.h>
@@ -447,9 +443,7 @@ static void pxd_io_failover(struct work_struct *ws) {
 static void pxd_failover_initiate(struct pxd_device *pxd_dev,
                                   struct pxd_io_tracker *head) {
         INIT_WORK(&head->wi, pxd_io_failover);
-        // queue_work(pxd_dev->fp.wq, &head->wi);
-		// schedule_work(&head->wi);
-		queue_work(fastpath_workqueue(), &head->wi);
+        queue_work(pxd_dev->fp.wq, &head->wi);
 }
 
 // special handling for discards
@@ -611,17 +605,13 @@ static void pxd_process_io(struct pxd_io_tracker *head) {
                         if (S_ISBLK(curr->file->f_inode->i_mode)) {
                                 if (special_op(BIO_OP(&curr->clone))) {
                                         INIT_WORK(&curr->wi, fp_handle_special);
-                                        // queue_work(pxd_dev->fp.wq, &curr->wi);
-										// schedule_work(&curr->wi);
-										queue_work(fastpath_workqueue(), &curr->wi);
+                                        queue_work(pxd_dev->fp.wq, &curr->wi);
                                 } else {
                                         SUBMIT_BIO(&curr->clone);
                                 }
                                 atomic_inc(&pxd_dev->fp.nswitch);
                         } else {
-                                // queue_work(pxd_dev->fp.wq, &curr->wi);
-								// schedule_work(&curr->wi);
-								queue_work(fastpath_workqueue(), &curr->wi);
+                                queue_work(pxd_dev->fp.wq, &curr->wi);
                         }
                 }
         } else {
@@ -632,17 +622,13 @@ static void pxd_process_io(struct pxd_io_tracker *head) {
         if (S_ISBLK(head->file->f_inode->i_mode)) {
                 if (special_op(BIO_OP(&head->clone))) {
                         INIT_WORK(&head->wi, fp_handle_special);
-                        // queue_work(pxd_dev->fp.wq, &head->wi);
-						// schedule_work(&head->wi);
-						queue_work(fastpath_workqueue(), &head->wi);
+                        queue_work(pxd_dev->fp.wq, &head->wi);
                 } else {
                         SUBMIT_BIO(&head->clone);
                 }
                 atomic_inc(&pxd_dev->fp.nswitch);
         } else {
-                // queue_work(pxd_dev->fp.wq, &head->wi);
-				// schedule_work(&head->wi);
-				queue_work(fastpath_workqueue(), &head->wi);
+                queue_work(pxd_dev->fp.wq, &head->wi);
         }
 }
 
@@ -706,7 +692,7 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
         blk_queue_split(q, &bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
-blk_queue_split(q, &bio, q->bio_split);
+        blk_queue_split(q, &bio, q->bio_split);
 #else
 {
         unsigned op = 0; // READ

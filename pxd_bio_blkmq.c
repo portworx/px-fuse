@@ -240,35 +240,23 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         struct req_iterator rq_iter;
         struct bio *bio;
         int nr_bvec = 0;
-		bool specialops = rq_is_special(rq);
+        bool specialops = rq_is_special(rq);
         unsigned int op_flags = get_op_flags(rq->bio);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         // it is possible for sync request to carry no bio
-        if (!rq->bio) {
-				fproot->bio = NULL;
-				pxd_printk("%s:(none) %llu rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
-					__func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), 0, op_flags);
-                return 0;
-		}
+        if (!rq->bio)
+            return 0;
 
         // single bio request
         if (rq->bio == rq->biotail) {
-				pxd_printk("%s:(single) %llu rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
-                   __func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
-                   op_flags);
                 fproot->bio = rq->bio;
                 BUG_ON(BIO_SECTOR(fproot->bio) != blk_rq_pos(rq));
                 BUG_ON(BIO_SIZE(fproot->bio) != blk_rq_bytes(rq));
                 return 0;
         }
 
-		if (rq->rq_flags & RQF_SPECIAL_PAYLOAD) {
-			printk("%s:(special_payload) %llu rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
-                   __func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
-                   op_flags);
-		}
 		if (!specialops)
 			rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
 
@@ -291,11 +279,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
         bio->bi_private = fproot;
 
-        pxd_printk("%s: %llu rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
-                   __func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
-                   op_flags);
-
-		if (!specialops) {
+        if (!specialops) {
                 rq_for_each_segment(bv, rq, rq_iter) {
                         unsigned len =
                             bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
@@ -487,17 +471,13 @@ clone_and_map(struct fp_root_context *fproot) {
                         atomic_inc(&pxd_dev->fp.nswitch);
                         if (rq_is_special(rq)) {
                                 INIT_WORK(&cc->work, fp_handle_specialops);
-                                // queue_work(pxd_dev->fp.wq, &cc->work);
-								// schedule_work(&cc->work);
-								queue_work(fastpath_workqueue(), &cc->work);
+                                queue_work(pxd_dev->fp.wq, &cc->work);
                         } else {
                                 SUBMIT_BIO(clone);
                         }
                 } else {
                         INIT_WORK(&cc->work, pxd_process_fileio);
-                        // queue_work(pxd_dev->fp.wq, &cc->work);
-						// schedule_work(&cc->work);
-						queue_work(fastpath_workqueue(), &cc->work);
+                        queue_work(pxd_dev->fp.wq, &cc->work);
                 }
         }
 
@@ -559,14 +539,12 @@ static void pxd_io_failover(struct work_struct *work) {
 }
 
 static void pxd_failover_initiate(struct fp_root_context *fproot) {
-        // struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+        struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         INIT_WORK(&fproot->work, pxd_io_failover);
-        //queue_work(pxd_dev->fp.wq, &fproot->work);
-		// schedule_work(&fproot->work);
-		queue_work(fastpath_workqueue(), &fproot->work);
+        queue_work(pxd_dev->fp.wq, &fproot->work);
 }
 
 // io handling functions
@@ -596,22 +574,8 @@ static void fp_handle_specialops(struct work_struct *work) {
         bdev = get_bdev(file);
         q = bdev_get_queue(bdev);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
-        if (REQ_OP(rq) == REQ_OP_DISCARD) {
-                atomic_inc(&pxd_dev->fp.nio_discard);
-        } else {
-                BUG_ON("unexpected condition");
-        }
-#else
-        if (REQ_OP(rq) & REQ_DISCARD) {
-                atomic_inc(&pxd_dev->fp.nio_discard);
-        } else {
-                BUG_ON("unexpected condition");
-        }
-#endif
-
-		pxd_printk("%s discard for device %llu, off %llu, sectors %u\n", __func__,
-				pxd_dev->dev_id, (unsigned long long)blk_rq_pos(rq), blk_rq_sectors(rq));
+		BUG_ON(!rq_is_special(rq));
+        atomic_inc(&pxd_dev->fp.nio_discard);
 
         // submit discard to replica
         if (blk_queue_discard(q)) { // discard supported

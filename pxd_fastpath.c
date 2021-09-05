@@ -11,8 +11,6 @@
 #include "pxd_compat.h"
 #include "kiolib.h"
 
-static struct workqueue_struct *fpwq;
-
 int fastpath_init(void)
 {
 #ifdef __PXD_BIO_MAKEREQ__
@@ -21,24 +19,11 @@ int fastpath_init(void)
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 #endif
 
-	fpwq = alloc_workqueue("pxdwq", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0);
-	if (!fpwq)
-		return -ENOMEM;
-
 	return __fastpath_init();
-}
-
-struct workqueue_struct* fastpath_workqueue(void)
-{
-	return fpwq;
 }
 
 void fastpath_cleanup(void)
 {
-	if (fpwq != NULL) {
-		destroy_workqueue(fpwq);
-		fpwq = NULL;
-	}
 	__fastpath_cleanup();
 }
 
@@ -146,9 +131,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
 	reinit_completion(&fp->sync_complete);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-		// queue_work(fp->wq, &fp->syncwi[i].ws);
-		queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
-		// schedule_work(&fp->syncwi[i].ws);
+		queue_work(pxd_dev->fp.wq, &fp->syncwi[i].ws);
 	}
 
 #define SYNC_TIMEOUT (60000)
@@ -335,6 +318,10 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 
 	pxd_suspend_io(pxd_dev);
+	// ensure all pending workqueue items on this device gets flushed.
+	if (pxd_dev->fp.wq)
+		flush_workqueue(pxd_dev->fp.wq);
+
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
@@ -357,9 +344,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	pxd_resume_io(pxd_dev);
 
-	// ensure all pending workqueue items on this device gets finished.
-	if (pxd_dev->fp.wq)
-		flush_workqueue(pxd_dev->fp.wq);
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev)
@@ -415,7 +399,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
-	printk("%s: entered for device %llu", __func__, pxd_dev->dev_id);
 	disableFastPath(pxd_dev, false);
 
 	if (pxd_dev->fp.wq) {
