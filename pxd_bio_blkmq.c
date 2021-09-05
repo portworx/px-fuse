@@ -279,7 +279,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
         bio->bi_private = fproot;
 
-        if (!specialops) {
+        if (!specialops && (blk_rq_bytes(rq) != 0)) {
                 rq_for_each_segment(bv, rq, rq_iter) {
                         unsigned len =
                             bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
