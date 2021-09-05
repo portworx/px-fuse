@@ -131,7 +131,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
 	reinit_completion(&fp->sync_complete);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-		queue_work(pxd_dev->fp.wq, &fp->syncwi[i].ws);
+		queue_work(fp->wq, &fp->syncwi[i].ws);
 	}
 
 #define SYNC_TIMEOUT (60000)
@@ -343,7 +343,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	pxd_dev->fp.can_failover = false;
 
 	pxd_resume_io(pxd_dev);
-
 }
 
 int pxd_fastpath_init(struct pxd_device *pxd_dev)

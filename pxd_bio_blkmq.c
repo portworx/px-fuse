@@ -247,7 +247,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 
         // it is possible for sync request to carry no bio
         if (!rq->bio)
-            return 0;
+                return 0;
 
         // single bio request
         if (rq->bio == rq->biotail) {
@@ -257,8 +257,8 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                 return 0;
         }
 
-		if (!specialops)
-			rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
+        if (!specialops)
+                rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
 
         bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
         if (!bio) {
@@ -574,7 +574,7 @@ static void fp_handle_specialops(struct work_struct *work) {
         bdev = get_bdev(file);
         q = bdev_get_queue(bdev);
 
-		BUG_ON(!rq_is_special(rq));
+        BUG_ON(!rq_is_special(rq));
         atomic_inc(&pxd_dev->fp.nio_discard);
 
         // submit discard to replica
