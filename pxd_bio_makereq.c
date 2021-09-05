@@ -696,7 +696,7 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
         blk_queue_split(q, &bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
-blk_queue_split(q, &bio, q->bio_split);
+        blk_queue_split(q, &bio, q->bio_split);
 #else
 {
         unsigned op = 0; // READ

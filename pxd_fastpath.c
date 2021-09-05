@@ -318,6 +318,10 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 
 	pxd_suspend_io(pxd_dev);
+    // ensure all pending workqueue items on this device gets flushed.
+    if (pxd_dev->fp.wq)
+        flush_workqueue(pxd_dev->fp.wq);
+
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
