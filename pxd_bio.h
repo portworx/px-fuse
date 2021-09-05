@@ -47,7 +47,6 @@ static inline void fp_root_context_init(struct fp_root_context *fproot) {
   fproot->clones = NULL;
   atomic_set(&fproot->nactive, 0);
   INIT_LIST_HEAD(&fproot->wait);
-  // work struct should get initialized right before use
   INIT_WORK(&fproot->work, fp_handle_io);
 }
 
