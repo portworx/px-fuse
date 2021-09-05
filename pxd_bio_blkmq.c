@@ -246,6 +246,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 
         // it is possible for sync request to carry no bio
         if (!rq->bio) {
+				fproot->bio = NULL;
 				pxd_printk("%s:(none) %llu rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
 					__func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), 0, op_flags);
                 return 0;
@@ -262,7 +263,11 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                 return 0;
         }
 
+#ifdef rq_for_each_bvec
+		rq_for_each_bvec(bv, rq, rq_iter) nr_bvec++;
+#else
         rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
+#endif
         bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
         if (!bio) {
                 dump_allocs();
@@ -293,7 +298,11 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         if (!(REQ_OP(rq) & REQ_DISCARD) && (blk_rq_bytes(rq) != 0)) {
             BUG_ON(BIO_OP(rq->bio) & REQ_DISCARD);
 #endif
+#ifdef rq_for_each_bvec
+				rq_for_each_bvec(bv, rq, rq_iter) {
+#else
                 rq_for_each_segment(bv, rq, rq_iter) {
+#endif
                         unsigned len =
                             bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
                                          BVEC(bv).bv_offset);
