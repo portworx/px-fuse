@@ -240,7 +240,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         struct req_iterator rq_iter;
         struct bio *bio;
         int nr_bvec = 0;
-		bool specialops = false;
+		bool specialops = rq_is_special(rq);
         unsigned int op_flags = get_op_flags(rq->bio);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
@@ -264,14 +264,11 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                 return 0;
         }
 
-		WARN_ON_ONCE(rq->rq_flags & RQF_SPECIAL_PAYLOAD);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
-        if ((REQ_OP(rq) != REQ_OP_DISCARD) && (blk_rq_bytes(rq) != 0))
-			specialops = true;
-#else
-        if (!(REQ_OP(rq) & REQ_DISCARD) && (blk_rq_bytes(rq) != 0))
-			specialops = true;
-#endif
+		if (rq->rq_flags & RQF_SPECIAL_PAYLOAD) {
+			printk("%s:(special_payload) %llu rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
+                   __func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
+                   op_flags);
+		}
 		if (!specialops)
 			rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
 
