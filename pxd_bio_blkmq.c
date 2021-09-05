@@ -240,6 +240,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         struct req_iterator rq_iter;
         struct bio *bio;
         int nr_bvec = 0;
+		bool specialops = false;
         unsigned int op_flags = get_op_flags(rq->bio);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
@@ -263,11 +264,17 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                 return 0;
         }
 
-#ifdef rq_for_each_bvec
-		rq_for_each_bvec(bv, rq, rq_iter) nr_bvec++;
+		WARN_ON_ONCE(rq->rq_flags & RQF_SPECIAL_PAYLOAD);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
+        if ((REQ_OP(rq) != REQ_OP_DISCARD) && (blk_rq_bytes(rq) != 0))
+			specialops = true;
 #else
-        rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
+        if (!(REQ_OP(rq) & REQ_DISCARD) && (blk_rq_bytes(rq) != 0))
+			specialops = true;
 #endif
+		if (!specialops)
+			rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
+
         bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
         if (!bio) {
                 dump_allocs();
@@ -291,18 +298,8 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                    __func__, fproot_to_pxd(fproot)->dev_id, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
                    op_flags);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
-        if ((REQ_OP(rq) != REQ_OP_DISCARD) && (blk_rq_bytes(rq) != 0)) {
-            BUG_ON(BIO_OP(rq->bio) == REQ_OP_DISCARD);
-#else
-        if (!(REQ_OP(rq) & REQ_DISCARD) && (blk_rq_bytes(rq) != 0)) {
-            BUG_ON(BIO_OP(rq->bio) & REQ_DISCARD);
-#endif
-#ifdef rq_for_each_bvec
-				rq_for_each_bvec(bv, rq, rq_iter) {
-#else
+		if (!specialops) {
                 rq_for_each_segment(bv, rq, rq_iter) {
-#endif
                         unsigned len =
                             bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
                                          BVEC(bv).bv_offset);
