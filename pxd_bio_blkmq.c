@@ -574,7 +574,7 @@ static void fp_handle_specialops(struct work_struct *work) {
         bdev = get_bdev(file);
         q = bdev_get_queue(bdev);
 
-		BUG_ON(!rq_is_special(rq));
+        BUG_ON(!rq_is_special(rq));
         atomic_inc(&pxd_dev->fp.nio_discard);
 
         // submit discard to replica
