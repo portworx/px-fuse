@@ -1538,7 +1538,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-		blk_mq_freeze_queue(pxd_dev->disk->queue);
 		blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
 	}
