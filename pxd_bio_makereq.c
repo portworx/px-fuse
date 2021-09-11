@@ -1,6 +1,6 @@
 // enable this only if the px block device IO is
 // registered through make_request() fn.
-#ifdef __PXD_BIO_MAKEREQ__
+#if defined __PXD_BIO_MAKEREQ__ && defined __PX_FASTPATH__
 
 #include <linux/delay.h>
 #include <linux/genhd.h>
@@ -692,7 +692,7 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
         blk_queue_split(q, &bio);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
-blk_queue_split(q, &bio, q->bio_split);
+        blk_queue_split(q, &bio, q->bio_split);
 #else
 {
         unsigned op = 0; // READ

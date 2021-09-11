@@ -1024,13 +1024,14 @@ static void pxd_rq_fn(struct request_queue *q)
 		fproot = &req->fproot;
 		fp_root_context_init(fproot);
 
+#ifdef __PX_FASTPATH__
 		if (pxd_dev->fp.fastpath) {
 			// route through fastpath
-			INIT_WORK(&fproot->work, fp_handle_io);
 			queue_work(pxd_dev->fp.wq, &fproot->work);
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
+#endif
 		atomic_inc(&pxd_dev->fp.nslowPath);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 		if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
@@ -1096,14 +1097,15 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	req->pxd_dev = pxd_dev;
 	req->rq = rq;
 
+#ifdef __PX_FASTPATH__
 	if (pxd_dev->fp.fastpath) {
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
-		INIT_WORK(&fproot->work, fp_handle_io);
 		queue_work(pxd_dev->fp.wq, &fproot->work);
 		return BLK_STS_OK;
 	}
+#endif
 	atomic_inc(&pxd_dev->fp.nslowPath);
 
 	if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
@@ -1362,6 +1364,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_mem_printk("device %llu allocated at %px\n", add->dev_id, pxd_dev);
 
 	pxd_dev->magic = PXD_DEV_MAGIC;
+	pxd_dev->removing = false;
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
@@ -1497,16 +1500,20 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
+#ifndef __PX_BLKMQ__
 		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
 
 		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
 
-        mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+#else
+		blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
 	}
 
 	spin_unlock(&pxd_dev->lock);
 
-	pxd_fastpath_cleanup(pxd_dev);
+	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
 
 	module_put(THIS_MODULE);
@@ -1637,6 +1644,30 @@ static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_
 		return -EINVAL;
 	}
 	return pxd_init_fastpath_target(pxd_dev, update_path);
+}
+
+static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
+{
+	if (!enable) {
+		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
+		pxd_dev->connected = false;
+		pxd_abortfailQ(pxd_dev);
+	} else {
+		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
+		pxd_dev->connected = true;
+	}
+}
+
+static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
+{
+	struct list_head *cur;
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+
+		_pxd_setup(pxd_dev, enable);
+	}
+	spin_unlock(&ctx->lock);
 }
 
 static struct bus_type pxd_bus_type = {
@@ -1927,6 +1958,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 			struct device_attribute *attr,
 		        const char *buf, size_t count)
 {
+#ifdef __PX_FASTPATH__
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 	switch (buf[0]) {
 	case 'Y': /* switch native path through IO failover */
@@ -1961,7 +1993,7 @@ static ssize_t pxd_debug_store(struct device *dev,
 		/* no action */
 		printk("dev:%llu - no action for %c\n", pxd_dev->dev_id, buf[0]);
 	}
-
+#endif
 	return count;
 }
 

@@ -1,6 +1,6 @@
 // enable this only if the px block device IO is
 // registered through blkmq
-#ifdef __PXD_BIO_BLKMQ__
+#if defined __PXD_BIO_BLKMQ__ && defined __PX_FASTPATH__
 
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -240,6 +240,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         struct req_iterator rq_iter;
         struct bio *bio;
         int nr_bvec = 0;
+        bool specialops = rq_is_special(rq);
         unsigned int op_flags = get_op_flags(rq->bio);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
@@ -256,7 +257,9 @@ static int prep_root_bio(struct fp_root_context *fproot) {
                 return 0;
         }
 
-        rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
+        if (!specialops)
+                rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
+
         bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
         if (!bio) {
                 dump_allocs();
@@ -276,21 +279,16 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
         bio->bi_private = fproot;
 
-        pxd_printk("%s: rq->cmd_flags %#x req_op %#x bio_op %#x op_flags %#x\n",
-                   __func__, rq->cmd_flags, req_op(rq), BIO_OP(rq->bio),
-                   op_flags);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
-        if ((BIO_OP(rq->bio) != REQ_OP_FLUSH) &&
-            (BIO_OP(rq->bio) != REQ_OP_DISCARD)) {
-#else
-        if (!(BIO_OP(rq->bio) & (REQ_FLUSH | REQ_DISCARD))) {
-#endif
-                rq_for_each_segment(bv, rq, rq_iter) {
-                        unsigned len =
-                            bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
+        if (specialops) {
+                BIO_SIZE(bio) = blk_rq_bytes(rq);
+        } else {
+                if (blk_rq_bytes(rq) != 0) {
+                        rq_for_each_segment(bv, rq, rq_iter) {
+                                unsigned len =
+                                    bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
                                          BVEC(bv).bv_offset);
-                        BUG_ON(len != BVEC(bv).bv_len);
+                                BUG_ON(len != BVEC(bv).bv_len);
+                        }
                 }
         }
 
@@ -580,19 +578,8 @@ static void fp_handle_specialops(struct work_struct *work) {
         bdev = get_bdev(file);
         q = bdev_get_queue(bdev);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
-        if (REQ_OP(rq) == REQ_OP_DISCARD) {
-                atomic_inc(&pxd_dev->fp.nio_discard);
-        } else {
-                BUG_ON("unexpected condition");
-        }
-#else
-        if (REQ_OP(rq) & REQ_DISCARD) {
-                atomic_inc(&pxd_dev->fp.nio_discard);
-        } else {
-                BUG_ON("unexpected condition");
-        }
-#endif
+        BUG_ON(!rq_is_special(rq));
+        atomic_inc(&pxd_dev->fp.nio_discard);
 
         // submit discard to replica
         if (blk_queue_discard(q)) { // discard supported
