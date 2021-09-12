@@ -1057,7 +1057,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		fp_root_context_init(fproot);
 		if (pxd_dev->fp.fastpath) {
 			// route through fastpath
-			queue_work(pxd_dev->fp.wq, &fproot->work);
+			queue_work(fastpath_workqueue(), &fproot->work);
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
@@ -1133,7 +1133,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
-		queue_work(pxd_dev->fp.wq, &fproot->work);
+		queue_work(fastpath_workqueue(), &fproot->work);
 		return BLK_STS_OK;
 	}
 #endif

@@ -447,7 +447,7 @@ static void pxd_io_failover(struct work_struct *ws) {
 static void pxd_failover_initiate(struct pxd_device *pxd_dev,
                                   struct pxd_io_tracker *head) {
         INIT_WORK(&head->wi, pxd_io_failover);
-        queue_work(pxd_dev->fp.wq, &head->wi);
+        queue_work(fastpath_workqueue(), &head->wi);
 }
 
 // special handling for discards
@@ -609,13 +609,13 @@ static void pxd_process_io(struct pxd_io_tracker *head) {
                         if (S_ISBLK(curr->file->f_inode->i_mode)) {
                                 if (special_op(BIO_OP(&curr->clone))) {
                                         INIT_WORK(&curr->wi, fp_handle_special);
-                                        queue_work(pxd_dev->fp.wq, &curr->wi);
+                                        queue_work(fastpath_workqueue(), &curr->wi);
                                 } else {
                                         SUBMIT_BIO(&curr->clone);
                                 }
                                 atomic_inc(&pxd_dev->fp.nswitch);
                         } else {
-                                queue_work(pxd_dev->fp.wq, &curr->wi);
+                                queue_work(fastpath_workqueue(), &curr->wi);
                         }
                 }
         } else {
@@ -626,13 +626,13 @@ static void pxd_process_io(struct pxd_io_tracker *head) {
         if (S_ISBLK(head->file->f_inode->i_mode)) {
                 if (special_op(BIO_OP(&head->clone))) {
                         INIT_WORK(&head->wi, fp_handle_special);
-                        queue_work(pxd_dev->fp.wq, &head->wi);
+                        queue_work(fastpath_workqueue(), &head->wi);
                 } else {
                         SUBMIT_BIO(&head->clone);
                 }
                 atomic_inc(&pxd_dev->fp.nswitch);
         } else {
-                queue_work(pxd_dev->fp.wq, &head->wi);
+                queue_work(fastpath_workqueue(), &head->wi);
         }
 }
 

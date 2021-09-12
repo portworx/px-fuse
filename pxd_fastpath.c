@@ -11,6 +11,9 @@
 #include "pxd_compat.h"
 #include "kiolib.h"
 
+// global fastpath IO work queue
+static struct workqueue_struct *gwq;
+
 int fastpath_init(void)
 {
 #ifdef __PXD_BIO_MAKEREQ__
@@ -19,12 +22,27 @@ int fastpath_init(void)
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 #endif
 
+	gwq = alloc_workqueue("pxwq", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0);
+	if (!gwq) {
+		printk(KERN_ERR"fastpath workqueue alloc failure\n");
+		return -ENOMEM;
+	}
+
 	return __fastpath_init();
 }
 
 void fastpath_cleanup(void)
 {
+	if (gwq) {
+		destroy_workqueue(gwq);
+		gwq = NULL;
+	}
 	__fastpath_cleanup();
+}
+
+struct workqueue_struct* fastpath_workqueue(void)
+{
+	return gwq;
 }
 
 void pxd_abortfailQ(struct pxd_device *pxd_dev)
@@ -131,7 +149,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
 	reinit_completion(&fp->sync_complete);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-		queue_work(fp->wq, &fp->syncwi[i].ws);
+		queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
 	}
 
 #define SYNC_TIMEOUT (60000)
@@ -318,10 +336,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 
 	pxd_suspend_io(pxd_dev);
-    // ensure all pending workqueue items on this device gets flushed.
-    if (pxd_dev->fp.wq)
-        flush_workqueue(pxd_dev->fp.wq);
-
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
@@ -362,11 +376,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->suspend, 0);
 	atomic_set(&fp->app_suspend, 0);
 	atomic_set(&fp->ioswitch_active, 0);
-	fp->wq = alloc_workqueue("pxd%llu", WQ_SYSFS | WQ_UNBOUND | WQ_HIGHPRI, 0, pxd_dev->dev_id);
-	if (!fp->wq) {
-		printk(KERN_ERR"pxd_dev:%llu failed allocating workqueue\n", pxd_dev->dev_id);
-		return -ENOMEM;
-	}
 	init_completion(&fp->sync_complete);
 	atomic_set(&fp->sync_done, 0);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
@@ -399,11 +408,6 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev)
 {
 	disableFastPath(pxd_dev, false);
-
-	if (pxd_dev->fp.wq) {
-		destroy_workqueue(pxd_dev->fp.wq);
-		pxd_dev->fp.wq = NULL;
-	}
 }
 
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path)
