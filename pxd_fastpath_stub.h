@@ -12,6 +12,7 @@ int fastpath_init(void) { return 0; }
 static inline
 void fastpath_cleanup(void) {}
 
+static inline
 struct workqueue_struct* fastpath_workqueue(void)
 {
 	BUG_ON(!"unexpected");
