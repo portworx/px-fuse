@@ -65,6 +65,8 @@ int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
 
 // restart code path
 static inline
+void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status) {}
+static inline
 void pxd_abortfailQ(struct pxd_device *pxd_dev) {}
 static inline
 void disableFastPath(struct pxd_device *pxd_dev, bool skipSync) {}
