@@ -22,7 +22,6 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio);
 #endif
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev);
-void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 
 void pxd_suspend_io(struct pxd_device *pxd_dev);
 void pxd_resume_io(struct pxd_device *pxd_dev);

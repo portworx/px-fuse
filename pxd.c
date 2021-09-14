@@ -1107,7 +1107,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
-	struct fp_root_context *fproot;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
@@ -1127,7 +1126,8 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	req->rq = rq;
 
 #ifdef __PX_FASTPATH__
-	fproot = &req->fproot;
+{
+	struct fp_root_context *fproot = &req->fproot;
 	fp_root_context_init(fproot);
 	if (pxd_dev->fp.fastpath) {
 		// route through fastpath
@@ -1136,6 +1136,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		queue_work(fastpath_workqueue(), &fproot->work);
 		return BLK_STS_OK;
 	}
+}
 #endif
 	atomic_inc(&pxd_dev->fp.nslowPath);
 
