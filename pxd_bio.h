@@ -4,6 +4,8 @@
 struct pxd_device;
 struct fuse_req;
 
+#ifdef __PX_FASTPATH__
+
 int __fastpath_init(void);
 void __fastpath_cleanup(void);
 
@@ -51,5 +53,7 @@ static inline void fp_root_context_init(struct fp_root_context *fproot) {
 }
 
 #endif
+
+#endif /* __PX_FASTPATH__ */
 
 #endif /* _PXD_BIO_H_ */
