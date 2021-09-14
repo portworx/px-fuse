@@ -39,7 +39,6 @@ struct pxd_fastpath_extension {
 	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
-	struct workqueue_struct *wq;
 	struct pxd_sync_ws syncwi[MAX_PXD_BACKING_DEVS];
 	struct completion sync_complete;
 	atomic_t sync_done;
@@ -72,6 +71,8 @@ struct pxd_fastpath_extension {
 // global initialization during module init for fastpath
 int fastpath_init(void);
 void fastpath_cleanup(void);
+
+struct workqueue_struct* fastpath_workqueue(void);
 
 struct pxd_update_path_out;
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);

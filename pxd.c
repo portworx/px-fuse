@@ -988,7 +988,6 @@ static void pxd_rq_fn(struct request_queue *q)
 	struct pxd_device *pxd_dev = q->queuedata;
 	struct fuse_req *req;
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
-	struct fp_root_context *fproot;
 
 	for (;;) {
 		struct request *rq;
@@ -1021,16 +1020,18 @@ static void pxd_rq_fn(struct request_queue *q)
 		req->pxd_dev = pxd_dev;
 		req->rq = rq;
 		req->queue = q;
-		fproot = &req->fproot;
-		fp_root_context_init(fproot);
 
 #ifdef __PX_FASTPATH__
+{
+		struct fp_root_context *fproot = &req->fproot;
+		fp_root_context_init(fproot);
 		if (pxd_dev->fp.fastpath) {
 			// route through fastpath
-			queue_work(pxd_dev->fp.wq, &fproot->work);
+			queue_work(fastpath_workqueue(), &fproot->work);
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
+}
 #endif
 		atomic_inc(&pxd_dev->fp.nslowPath);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
@@ -1076,7 +1077,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct pxd_device *pxd_dev = rq->q->queuedata;
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
-	struct fp_root_context *fproot;
 
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
@@ -1089,8 +1089,6 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		rq->nr_phys_segments, rq->cmd_flags);
 
 	fuse_request_init(req);
-	fproot = &req->fproot;
-	fp_root_context_init(fproot);
 
 	blk_mq_start_request(rq);
 
@@ -1098,13 +1096,17 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	req->rq = rq;
 
 #ifdef __PX_FASTPATH__
+{
+	struct fp_root_context *fproot = &req->fproot;
+	fp_root_context_init(fproot);
 	if (pxd_dev->fp.fastpath) {
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
-		queue_work(pxd_dev->fp.wq, &fproot->work);
+		queue_work(fastpath_workqueue(), &fproot->work);
 		return BLK_STS_OK;
 	}
+}
 #endif
 	atomic_inc(&pxd_dev->fp.nslowPath);
 

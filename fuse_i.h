@@ -103,13 +103,13 @@ struct fuse_req {
 
 	/** Associate request queue */
 	struct request_queue *queue;
-#ifdef __PXD_BIO_BLKMQ__
+#if defined __PXD_BIO_BLKMQ__ && defined __PX_FASTPATH__
 	// Additional fastpath context
 	struct fp_root_context fproot;
 #endif
 };
 
-#ifdef __PXD_BIO_BLKMQ__
+#if defined __PXD_BIO_BLKMQ__ && defined __PX_FASTPATH__
 static inline
 struct pxd_device* fproot_to_pxd(struct fp_root_context *fproot)
 {
