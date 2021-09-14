@@ -12,6 +12,13 @@ int fastpath_init(void) { return 0; }
 static inline
 void fastpath_cleanup(void) {}
 
+static inline
+struct workqueue_struct* fastpath_workqueue(void)
+{
+	BUG_ON(!"unexpected");
+	return NULL;
+}
+
 /// common failover/fallback code path
 static inline
 int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
