@@ -2,10 +2,6 @@
 // registered through make_request() fn.
 #if defined __PXD_BIO_MAKEREQ__ && defined __PX_FASTPATH__
 
-#ifndef _PX_FASTPATH_
-#error "invalid compile option"
-#endif
-
 #include <linux/delay.h>
 #include <linux/genhd.h>
 #include <linux/types.h>
