@@ -1,3 +1,4 @@
+#ifdef __PX_FASTPATH__
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/delay.h>
@@ -32,30 +33,6 @@ void pxd_abortfailQ(struct pxd_device *pxd_dev)
 	spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
 	__pxd_abortfailQ(pxd_dev);
 	spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
-}
-
-static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
-{
-	if (!enable) {
-		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
-		pxd_dev->connected = false;
-		pxd_abortfailQ(pxd_dev);
-	} else {
-		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
-		pxd_dev->connected = true;
-	}
-}
-
-void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
-{
-	struct list_head *cur;
-	spin_lock(&ctx->lock);
-	list_for_each(cur, &ctx->list) {
-		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
-
-		_pxd_setup(pxd_dev, enable);
-	}
-	spin_unlock(&ctx->lock);
 }
 
 // background pxd syncer work function
@@ -555,3 +532,5 @@ int pxd_debug_switch_nativepath(struct pxd_device* pxd_dev)
 
 	return 0;
 }
+
+#endif /* __PX_FASTPATH__ */
