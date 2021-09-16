@@ -46,11 +46,15 @@
 #define PXD_IOC_WAKE_UP_SQO     _IO(PXD_IOCTL_MAGIC, 12)    /* 0x50580c */
 #define PXD_IOC_REGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 13)    /* 0x50580d */
 #define PXD_IOC_UNREGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 14)    /* 0x50580e */
+#define PXD_IOC_REGISTER_REGION   _IO(PXD_IOCTL_MAGIC, 15)
+#define PXD_IOC_UNREGISTER_REGION   _IO(PXD_IOCTL_MAGIC, 16)
+
 
 struct pxd_ioc_register_buffers {
 	void *base;
 	size_t len;
-	size_t max_len;
+#define INVALID_REGION (-1)
+	int region;
 };
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
