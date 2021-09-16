@@ -2239,20 +2239,20 @@ static int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
 
 static int sanitize_io_region(struct pxd_ioc_register_buffers *arg)
 {
-	if (!arg.base || !arg.len)
+	if (!arg->base || !arg->len)
 		return -EINVAL;
 
-	if (arg.len & ~PAGE_MASK) {
+	if (arg->len & ~PAGE_MASK) {
 		pr_err("%s: mapped len is not aligned", __func__);
 		return -EINVAL;
 	}
 
-	if ((uintptr_t)arg.base & ~PAGE_MASK) {
+	if ((uintptr_t)arg->base & ~PAGE_MASK) {
 		pr_err("%s: mapped addr is not aligned", __func__);
 		return -EINVAL;
 	}
 
-	if (arg.len > SZ_4G) {
+	if (arg->len > SZ_4G) {
 		pr_err("%s: region len greater than max allowed limit (4G)", __func__);
 		return -EINVAL;
 	}
@@ -2267,7 +2267,7 @@ static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
 	struct io_mapped_ubuf *imu;
 	int max_nr_pages;
 	struct pxd_ioc_register_buffers arg;
-	size_t size;
+	int ret;
 
 	if (copy_from_user(&arg, uarg, sizeof(arg)))
 		return -EFAULT;
@@ -2288,6 +2288,7 @@ static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
 
 	free_index = PXD_IO_MAX_USER_BUFS;
 	for (buf_index = 0; buf_index < PXD_IO_MAX_USER_BUFS; ++buf_index) {
+		imu = &ctx->user_bufs[buf_index];
 		if (imu->ubuf == 0) {
 			if (free_index == PXD_IO_MAX_USER_BUFS) {
 				free_index = buf_index;
@@ -2296,7 +2297,7 @@ static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
 		}
 		if (imu->ubuf < (uintptr_t) arg.base + arg.len &&
 			(uintptr_t) arg.base < imu->ubuf + imu->len) {
-			pr_info("%s: intersects with existing mapping (Region %d {%p, %lu}",
+			pr_info("%s: intersects with existing mapping (Region %d {%llu, %lu}",
 					__func__, buf_index, imu->ubuf, imu->len);
 			return -EEXIST;
 		}
@@ -2320,7 +2321,7 @@ static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
 		return -ENOMEM;
 	}
 
-	imu->ubuf = arg.base;
+	imu->ubuf = (uintptr_t) arg.base;
 	imu->len = arg.len;
 	imu->nr_bvecs = max_nr_pages;
 
@@ -2332,9 +2333,9 @@ static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
 // close a region that was opened previously
 static int io_sqe_unregister_region(struct io_ring_ctx *ctx, void __user *uarg)
 {
-	int buf_index;
 	struct io_mapped_ubuf *imu;
 	struct pxd_ioc_register_buffers arg;
+	int ret, j;
 
 	if (copy_from_user(&arg, uarg, sizeof(arg)))
 		return -EFAULT;
@@ -2348,15 +2349,15 @@ static int io_sqe_unregister_region(struct io_ring_ctx *ctx, void __user *uarg)
 		return -EINVAL;
 	}
 
-	imu = ctx->user_bufs[arg.region];
-	if (imu->ubuf != arg.base || imu->len != arg.len) {
+	imu = &ctx->user_bufs[arg.region];
+	if (imu->ubuf != (uint64_t)arg.base || imu->len != arg.len) {
 		pr_warn("%s: region range does not match", __func__);
 	}
 
 	BUG_ON(imu->bvec == NULL);
 
 	for (j=0; j<imu->nr_bvecs; j++) {
-		put_page(imu->bvec[j]);
+		put_page(imu->bvec[j].bv_page);
 	}
 	kfree(imu->bvec);
 	memset(imu, 0, sizeof(*imu));
@@ -2374,8 +2375,8 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 	int ret = -EINVAL;
 
 	struct io_mapped_ubuf *imu;
-	unsigned long off, start, end, ubuf;
-	int pret, nr_pages, max_nr_pages;
+	unsigned long start, end, ubuf;
+	int pret, nr_pages;
 	struct pxd_ioc_register_buffers arg;
 	size_t size;
 	long offset = 0;
@@ -2393,7 +2394,7 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 		pr_err("%s invalid region index %d", __func__, buf_index);
 		return -EINVAL;
 	}
-	imu = ctx->user_bufs[buf_index];
+	imu = &ctx->user_bufs[buf_index];
 	if (imu->ubuf == 0) {
 		BUG_ON(imu->len != 0);
 		BUG_ON(imu->bvec != NULL);
@@ -2493,6 +2494,9 @@ static int io_sqe_unregister_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 {
 	int buf_index, j;
 	int ret = -EINVAL;
+	long offset = 0;
+	unsigned long start, end, ubuf;
+	int nr_pages;
 
 	struct io_mapped_ubuf *imu;
 	struct pxd_ioc_register_buffers arg;
@@ -2510,7 +2514,7 @@ static int io_sqe_unregister_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 		pr_err("%s invalid region index %d", __func__, buf_index);
 		return -EINVAL;
 	}
-	imu = ctx->user_bufs[buf_index];
+	imu = &ctx->user_bufs[buf_index];
 	if (imu->ubuf == 0) {
 		BUG_ON(imu->len != 0);
 		BUG_ON(imu->bvec != NULL);
@@ -2898,12 +2902,10 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return io_sqe_register_buffers(ctx, (void *) arg);
 	case PXD_IOC_UNREGISTER_BUFFERS:
 		return io_sqe_unregister_buffers(ctx, (void*) arg);
-    case IORING_REGISTER_REGION:
-		ret = io_sqe_register_region(ctx, (void *)arg);
-		break;
-    case IORING_UNREGISTER_BUFFERS:
-		ret = io_sqe_unregister_region(ctx, (void*)arg);
-		break;
+    case PXD_IOC_REGISTER_REGION:
+		return io_sqe_register_region(ctx, (void *)arg);
+    case PXD_IOC_UNREGISTER_REGION:
+		return io_sqe_unregister_region(ctx, (void*)arg);
 	default:
 		return -ENOTTY;
 	}
