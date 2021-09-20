@@ -298,6 +298,7 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 		return -ENOMEM;
 	}
 
+	spin_lock_init(&ctx->io_lock);
 	init_waitqueue_head(&ctx->wait);
 	init_completion(&ctx->ctx_done);
 	mutex_init(&ctx->uring_lock);
@@ -1473,18 +1474,13 @@ static int io_req_defer(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	if (!io_sequence_defer(ctx, req) && list_empty(&ctx->defer_list))
 		return 0;
 
-	sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
-	if (!sqe_copy)
-		return -EAGAIN;
-
+	sqe_copy = &req->cached_sqe;
 	spin_lock_irq(&ctx->completion_lock);
 	if (!io_sequence_defer(ctx, req) && list_empty(&ctx->defer_list)) {
 		spin_unlock_irq(&ctx->completion_lock);
-		kfree(sqe_copy);
 		return 0;
 	}
 
-	memcpy(sqe_copy, sqe, sizeof(*sqe_copy));
 	req->submit.sqe = sqe_copy;
 
 	INIT_WORK(&req->work, io_sq_wq_submit_work);
@@ -1643,9 +1639,6 @@ restart:
 			io_put_req(req);
 		}
 
-		/* async context always use a copy of the sqe */
-		kfree(sqe);
-
 		if (!async_list)
 			break;
 		if (!list_empty(&req_list)) {
@@ -1754,6 +1747,8 @@ static int io_req_set_file(struct io_ring_ctx *ctx, const struct sqe_submit *s,
 	unsigned flags;
 	int fd;
 
+	memcpy(&req->cached_sqe, s->sqe, sizeof(*s->sqe));
+
 	flags = READ_ONCE(s->sqe->flags);
 	fd = READ_ONCE(s->sqe->fd);
 
@@ -1807,31 +1802,26 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct sqe_submit *s,
 
 	ret = __io_submit_sqe(ctx, req, s, true);
 	if (ret == -EAGAIN && !(req->flags & REQ_F_NOWAIT)) {
-		struct io_uring_sqe *sqe_copy;
+		struct io_uring_sqe *sqe_copy = &req->cached_sqe;
+		struct async_list *list;
 
-		sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
-		if (sqe_copy) {
-			struct async_list *list;
+		s->sqe = sqe_copy;
+		req->submit.sqe = sqe_copy;
 
-			memcpy(sqe_copy, s->sqe, sizeof(*sqe_copy));
-			s->sqe = sqe_copy;
-
-			memcpy(&req->submit, s, sizeof(*s));
-			list = io_async_list_from_sqe(ctx, s->sqe);
-			if (!io_add_to_prev_work(list, req)) {
-				if (list)
-					atomic_inc(&list->cnt);
-				INIT_WORK(&req->work, io_sq_wq_submit_work);
-				queue_work(ctx->sqo_wq, &req->work);
-			}
-
-			/*
-			 * Queued up for async execution, worker will release
-			 * submit reference when the iocb is actually
-			 * submitted.
-			 */
-			return 0;
+		list = io_async_list_from_sqe(ctx, s->sqe);
+		if (!io_add_to_prev_work(list, req)) {
+			if (list)
+				atomic_inc(&list->cnt);
+			INIT_WORK(&req->work, io_sq_wq_submit_work);
+			queue_work(ctx->sqo_wq, &req->work);
 		}
+
+		/*
+		 * Queued up for async execution, worker will release
+		 * submit reference when the iocb is actually
+		 * submitted.
+		 */
+		return 0;
 	}
 
 out:
@@ -1950,16 +1940,57 @@ static int io_submit_sqes(struct io_ring_ctx *ctx, struct sqe_submit *sqes,
 	return submitted;
 }
 
+static mm_segment_t io_sq_setup_user_mm(struct mm_struct *mm, bool *mm_fault)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+	mm_segment_t old_fs = force_uaccess_begin();
+#else
+	mm_segment_t old_fs = get_fs();
+#endif
+
+	*mm_fault = false;
+	if (mm) {
+		if (!mmget_not_zero(mm))  { *mm_fault = true; return old_fs; }
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+		use_mm(mm);
+		set_fs(USER_DS);
+#else
+		kthread_use_mm(mm);
+#endif
+	}
+
+	return old_fs;
+}
+
+static void io_sq_remove_user_mm(struct mm_struct *mm, mm_segment_t old_fs)
+{
+	if (mm) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+		unuse_mm(mm);
+		set_fs(old_fs);
+#else
+		kthread_unuse_mm(mm);
+#endif
+		mmput(mm);
+	}
+}
+
+static bool io_sqe_pending(struct io_ring_ctx *ctx)
+{
+	struct fuse_queue_cb *cb = ctx->requests_cb;
+	return (cb->r.read != smp_load_acquire(&cb->r.write));
+}
+
 static int io_sq_thread(void *data)
 {
 	struct sqe_submit sqes[IO_IOPOLL_BATCH];
 	struct io_ring_ctx *ctx = data;
 	struct mm_struct *cur_mm = NULL;
 	mm_segment_t old_fs;
-	DEFINE_WAIT(wait);
 	unsigned inflight;
 	unsigned long timeout;
-
+	bool mm_fault;
+	bool all_fixed;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	old_fs = force_uaccess_begin();
@@ -1971,25 +2002,23 @@ static int io_sq_thread(void *data)
 	pr_info("%s: started to %d", __func__, ctx->sq_thread_idle);
 
 	timeout = inflight = 0;
-	while (!kthread_should_park()) {
-		bool all_fixed, mm_fault = false;
+	while (!kthread_should_stop()) {
 		int i;
 
 		if (inflight) {
-			unsigned nr_events = inflight;
-
-			inflight -= nr_events;
-			if (!inflight)
-				timeout = jiffies + ctx->sq_thread_idle;
+			inflight = 0;
+			timeout = jiffies + ctx->sq_thread_idle;
 		}
 
+		spin_lock(&ctx->io_lock);
 		if (!io_get_sqring(ctx, &sqes[0])) {
+			spin_unlock(&ctx->io_lock);
 			/*
 			 * We're polling. If we're within the defined idle
 			 * period, then let us spin without work before going
 			 * to sleep.
 			 */
-			if (inflight || !time_after(jiffies, timeout)) {
+			if (!time_after(jiffies, timeout)) {
 				cpu_relax();
 				continue;
 			}
@@ -2001,40 +2030,27 @@ static int io_sq_thread(void *data)
 			 * may sleep.
 			 */
 			if (cur_mm) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-				unuse_mm(cur_mm);
-#else
-				kthread_unuse_mm(cur_mm);
-#endif
-				mmput(cur_mm);
+				io_sq_remove_user_mm(cur_mm, old_fs);
 				cur_mm = NULL;
 			}
 
-			prepare_to_wait(&ctx->sqo_wait, &wait,
-						TASK_INTERRUPTIBLE);
+			if (signal_pending(current))
+				flush_signals(current);
 
 			/* Tell userspace we may need a wakeup call */
-			ctx->requests_cb->w.need_wake_up =
-				IORING_SQ_NEED_WAKEUP;
-			/* make sure to read SQ tail after writing flags */
-			smp_mb();
+			atomic_inc(&ctx->requests_cb->r.need_wake_up);
+			wait_event_interruptible(ctx->sqo_wait,
+					(kthread_should_stop() || io_sqe_pending(ctx)));
+			atomic_dec(&ctx->requests_cb->r.need_wake_up);
 
-			if (!io_get_sqring(ctx, &sqes[0])) {
-				if (kthread_should_park()) {
-					finish_wait(&ctx->sqo_wait, &wait);
-					break;
+			if (kthread_should_stop()) {
+				if (cur_mm) {
+					io_sq_remove_user_mm(cur_mm, old_fs);
+					cur_mm = NULL;
 				}
-				if (signal_pending(current))
-					flush_signals(current);
-				schedule();
-				finish_wait(&ctx->sqo_wait, &wait);
-
-				ctx->requests_cb->w.need_wake_up = 0;
-				continue;
+				break;
 			}
-			finish_wait(&ctx->sqo_wait, &wait);
-
-			ctx->requests_cb->w.need_wake_up = 0;
+			continue;
 		}
 
 		i = 0;
@@ -2047,20 +2063,16 @@ static int io_sq_thread(void *data)
 			if (i == ARRAY_SIZE(sqes))
 				break;
 		} while (io_get_sqring(ctx, &sqes[i]));
+		spin_unlock(&ctx->io_lock);
 
 		/* Unless all new commands are FIXED regions, grab mm */
+		mm_fault = false;
 		if (!all_fixed && !cur_mm) {
-			mm_fault = !mmget_not_zero(ctx->sqo_mm);
-			if (!mm_fault) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-				use_mm(ctx->sqo_mm);
-#else
-				kthread_use_mm(ctx->sqo_mm);
-#endif
-				cur_mm = ctx->sqo_mm;
-			}
+			old_fs = io_sq_setup_user_mm(ctx->sqo_mm, &mm_fault);
+			cur_mm = ctx->sqo_mm;
 		}
 
+		if (io_sqe_pending(ctx)) wake_up(&ctx->sqo_wait);
 		inflight += io_submit_sqes(ctx, sqes, i, cur_mm != NULL,
 						mm_fault);
 
@@ -2068,21 +2080,9 @@ static int io_sq_thread(void *data)
 		io_commit_sqring(ctx);
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
-	force_uaccess_end(old_fs);
-#else
-	set_fs(old_fs);
-#endif
-	if (cur_mm) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-		unuse_mm(cur_mm);
-#else
-		kthread_unuse_mm(cur_mm);
-#endif
-		mmput(cur_mm);
+	if (cur_mm != NULL) {
+		io_sq_remove_user_mm(cur_mm, old_fs);
 	}
-
-	kthread_parkme();
 
 	return 0;
 }
@@ -2110,15 +2110,12 @@ static int io_sqe_files_unregister(struct io_ring_ctx *ctx)
 
 static void io_sq_thread_stop(struct io_ring_ctx *ctx)
 {
-	if (ctx->sqo_thread) {
-		/*
-		 * The park is a bit of a work-around, without it we get
-		 * warning spews on shutdown with SQPOLL set and affinity
-		 * set to a single CPU.
-		 */
-		kthread_park(ctx->sqo_thread);
-		kthread_stop(ctx->sqo_thread);
-		ctx->sqo_thread = NULL;
+	int i;
+	for (i=0; i<NSLAVES; i++) {
+		if (ctx->sqo_thread[i]) {
+			kthread_stop(ctx->sqo_thread[i]);
+			ctx->sqo_thread[i] = NULL;
+		}
 	}
 }
 
@@ -2247,6 +2244,8 @@ static int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
 static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *p)
 {
 	int ret;
+	int i;
+	uint32_t max_threads = min(p->sqo_threads, NSLAVES);
 
 	init_waitqueue_head(&ctx->sqo_wait);
 	mmgrab(current->mm);
@@ -2261,14 +2260,15 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 		if (!ctx->sq_thread_idle)
 			ctx->sq_thread_idle = HZ;
 
-		ctx->sqo_thread = kthread_create(io_sq_thread, ctx,
-			"pxd-io");
-		if (IS_ERR(ctx->sqo_thread)) {
-			ret = PTR_ERR(ctx->sqo_thread);
-			ctx->sqo_thread = NULL;
-			goto err;
+		for (i=0; i<max_threads; i++) {
+			ctx->sqo_thread[i] = kthread_create(io_sq_thread, ctx, "pxd-io-%d", i);
+			if (IS_ERR(ctx->sqo_thread[i])) {
+				ret = PTR_ERR(ctx->sqo_thread[i]);
+				ctx->sqo_thread[i] = NULL;
+				goto err;
+			}
+			wake_up_process(ctx->sqo_thread[i]);
 		}
-		wake_up_process(ctx->sqo_thread);
 	} else if (p->flags & IORING_SETUP_SQ_AFF) {
 		/* Can't have SQ_AFF without SQPOLL */
 		ret = -EINVAL;
@@ -2655,6 +2655,7 @@ static void io_ring_submit(struct io_ring_ctx *ctx)
 			statep = &state;
 		}
 
+		spin_lock(&ctx->io_lock);
 		for (i = 0; i < to_submit; i++) {
 			struct sqe_submit s;
 			int ret;
@@ -2670,6 +2671,7 @@ static void io_ring_submit(struct io_ring_ctx *ctx)
 			if (ret)
 				io_cqring_add_event(ctx, s.sqe->user_data, ret);
 		}
+		spin_unlock(&ctx->io_lock);
 		io_commit_sqring(ctx);
 
 		if (statep) {
@@ -2740,6 +2742,32 @@ static long io_ring_ioctl_init(struct io_ring_ctx *ctx, unsigned long arg)
 	return 0;
 }
 
+static long io_run_cmd(struct io_ring_ctx *ctx, unsigned long arg)
+{
+	struct io_uring_sqe entry;
+	struct sqe_submit s;
+	long ret;
+
+	if (copy_from_user(&entry, (void *)arg, sizeof(entry)))
+		return -EFAULT;
+
+	if (entry.flags & IOSQE_IO_DRAIN)
+		return -EINVAL;
+
+	s.sqe = &entry; // local var instead of a ring entry.
+	s.index = 0; // should be invalid, needed only for drain reqs
+
+	s.has_user = true;
+	s.needs_lock = false;
+	s.needs_fixed_file = false;
+
+	if (!percpu_ref_tryget(&ctx->refs))
+		return 0;
+	ret = io_submit_sqe(ctx, &s, NULL);
+	io_ring_drop_ctx_refs(ctx, 1);
+	return ret;
+}
+
 static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct io_ring_ctx *ctx = filp->private_data;
@@ -2750,6 +2778,8 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return 0;
 	case PXD_IOC_RUN_IO_QUEUE:
 		return io_run_queue(ctx);
+	case PXD_IOC_RUN_CMD:
+		return io_run_cmd(ctx, arg);
 	case PXD_IOC_REGISTER_FILE:
 		return io_sqe_register_file(ctx, arg);
 	case PXD_IOC_UNREGISTER_FILE:
