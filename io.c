@@ -2237,122 +2237,91 @@ static int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
 	return ret;
 }
 
+static int check_region(void *base, size_t len)
+{
+	if (len & ~PAGE_MASK) {
+		pr_err("%s: mapped len is not aligned", __func__);
+		return -EINVAL;
+	}
+
+	if ((uintptr_t)base & ~PAGE_MASK) {
+		pr_err("%s: mapped addr is not aligned", __func__);
+		return -EINVAL;
+	}
+
+	if (!len) {
+		pr_err("%s: zero length", __func__);
+		return -EINVAL;
+	}
+
+
+	if (!base) {
+		pr_err("%s: zero addr", __func__);
+		return -EINVAL;
+	}
+
+	if (len > SZ_4G) {
+		pr_err("%s: len too large", __func__);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 {
-	struct vm_area_struct **vmas = NULL;
 	struct page **pages = NULL;
-	int buf_index, j;
+	int j;
 	int ret = -EINVAL;
 
 	struct io_mapped_ubuf *imu;
 	unsigned long off, start, end, ubuf;
-	int pret, nr_pages, max_nr_pages;
+	int pret, nr_pages;
 	struct pxd_ioc_register_buffers arg;
 	size_t size;
-	bool existing = true;
 	long offset = 0;
 
 	ret = -EFAULT;
 	if (copy_from_user(&arg, uarg, sizeof(arg)))
 		goto err;
 
-	ret = -EINVAL;
-	if (arg.len & ~PAGE_MASK) {
-		pr_err("%s: mapped len is not aligned", __func__);
+	ret = check_region(arg.base, arg.len);
+	if (ret)
+		goto err;
+
+	if (arg.buf_index >= PXD_IO_MAX_USER_BUFS) {
+		pr_err("%s: invalid index", __func__);
+		ret = -EINVAL;
 		goto err;
 	}
 
-	if ((uintptr_t)arg.base & ~PAGE_MASK) {
-		pr_err("%s: mapped addr is not aligned", __func__);
+	imu = &ctx->user_bufs[arg.buf_index];
+	if (imu->ubuf > (uintptr_t) arg.base ||
+	    (uintptr_t) arg.base + arg.len > imu->ubuf + imu->len) {
+		pr_info("%s: address outside of mapped region", __func__);
+		ret = -ERANGE;
 		goto err;
 	}
-
-	if (arg.max_len & ~PAGE_MASK) {
-		pr_err("%s: mapped max len is not aligned", __func__);
-		goto err;
-	}
-
-	if (arg.max_len < arg.len) {
-		pr_err("%s: max len less than len", __func__);
-		goto err;
-	}
-
-	for (buf_index = 0; buf_index < PXD_IO_MAX_USER_BUFS; ++buf_index) {
-		imu = &ctx->user_bufs[buf_index];
-		if (imu->ubuf <= (uintptr_t) arg.base &&
-		    (uintptr_t) arg.base + arg.len <= imu->ubuf + imu->len) {
-			offset = ((uintptr_t)arg.base - imu->ubuf) >> PAGE_SHIFT;
-			pr_info("found existing mapping %d, off %ld", buf_index, offset);
-			break;
-		}
-		if (imu->ubuf < (uintptr_t) arg.base + arg.len &&
-			(uintptr_t) arg.base < imu->ubuf + imu->len) {
-			pr_info("%s: intersects with existing mapping", __func__);
-			ret = -EEXIST;
-			goto err;
-		}
-	}
-
-	if (buf_index == PXD_IO_MAX_USER_BUFS) {
-		existing = false;
-		for (buf_index = 0; buf_index < PXD_IO_MAX_USER_BUFS; ++buf_index) {
-			pr_info("new mapping %d, ", buf_index);
-			if (ctx->user_bufs[buf_index].ubuf == 0)
-				break;
-		}
-	}
-
-	if (buf_index == PXD_IO_MAX_USER_BUFS) {
-		pr_err("%s: all busy", __func__);
-		return -EBUSY;
-	}
-
-	imu = &ctx->user_bufs[buf_index];
-
-	/*
-         * Don't impose further limits on the size and buffer
-         * constraints here, we'll -EINVAL later when IO is
-         * submitted if they are wrong.
-         */
-	ret = -EFAULT;
-	if (!arg.base || !arg.len)
-		goto err;
-
-	/* arbitrary limit, but we need something */
-	if (arg.len > SZ_4G)
-		goto err;
 
 	ubuf = (unsigned long) arg.base;
 	end = (ubuf + arg.len) >> PAGE_SHIFT;
 	start = ubuf >> PAGE_SHIFT;
 	nr_pages = end - start;
-	max_nr_pages = arg.max_len >> PAGE_SHIFT;
+	offset = ((uintptr_t) arg.base - imu->ubuf) >> PAGE_SHIFT;
 
-	if (existing) {
-		for (j = 0; j < nr_pages; ++j) {
-			if (imu->bvec[j + offset].bv_page) {
-				pr_err("%s: trying to overwrite existing mapping", __func__);
-				ret = -EEXIST;
-				goto err;
-			}
+	for (j = 0; j < nr_pages; ++j) {
+		if (imu->bvec[j + offset].bv_page) {
+			pr_err("%s: trying to overwrite existing mapping", __func__);
+			ret = -EEXIST;
+			goto err;
 		}
 	}
 
 	ret = -ENOMEM;
 	pages = kvmalloc_array(nr_pages, sizeof(struct page *),
 		GFP_KERNEL);
-	vmas = kvmalloc_array(nr_pages, sizeof(struct vm_area_struct *),
-		GFP_KERNEL);
-	if (!pages || !vmas) {
+	if (!pages) {
 		goto err;
-	}
-
-	if (!existing) {
-		imu->bvec = kvmalloc_array(max_nr_pages, sizeof(struct bio_vec),
-			GFP_KERNEL | __GFP_ZERO);
-		if (!imu->bvec) {
-			goto err;
-		}
 	}
 
 	ret = 0;
@@ -2361,8 +2330,7 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 #else
 	down_read(&current->mm->mmap_lock);
 #endif
-	pret = get_user_pages(ubuf, nr_pages, FOLL_WRITE, pages, vmas);
-	pr_info("%s: %ld bytes %d pages", __func__, arg.len, nr_pages);
+	pret = get_user_pages(ubuf, nr_pages, FOLL_WRITE, pages, NULL);
 	if (pret < 0) {
 		ret = pret;
 	} else if (pret != nr_pages) {
@@ -2381,39 +2349,69 @@ static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
 			for (j = 0; j < pret; j++)
 				put_page(pages[j]);
 		}
-		if (!existing) {
-			kvfree(imu->bvec);
-			imu->bvec = NULL;
-		}
 		goto err;
 	}
 
-	off = ubuf & ~PAGE_MASK;
 	size = arg.len;
 	for (j = 0; j < nr_pages; j++) {
-		size_t vec_len;
-
-		vec_len = min_t(size_t, size, PAGE_SIZE - off);
 		imu->bvec[j + offset].bv_page = pages[j];
-		imu->bvec[j + offset].bv_len = vec_len;
-		imu->bvec[j + offset].bv_offset = off;
+		imu->bvec[j + offset].bv_len = PAGE_SIZE;
+		imu->bvec[j + offset].bv_offset = 0;
 		off = 0;
-		size -= vec_len;
-	}
-	/* store original address for later verification */
-	if (!existing) {
-		imu->ubuf = ubuf;
-		imu->len = arg.max_len;
-		imu->nr_bvecs = max_nr_pages;
-		ctx->nr_user_bufs++;
 	}
 
 	kvfree(pages);
-	kvfree(vmas);
-	return buf_index;
+	return 0;
 err:
 	kvfree(pages);
-	kvfree(vmas);
+	return ret;
+}
+
+static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
+{
+	struct pxd_ioc_register_region arg;
+	int buf_index;
+	struct io_mapped_ubuf *imu;
+	int ret;
+
+	ret = -EFAULT;
+	if (copy_from_user(&arg, uarg, sizeof(arg)))
+		goto err;
+
+	ret = check_region(arg.base, arg.len);
+	if (ret)
+		goto err;
+
+	for (buf_index = 0; buf_index < ctx->nr_user_bufs; ++buf_index) {
+		imu = &ctx->user_bufs[buf_index];
+		if (imu->ubuf < (uintptr_t) arg.base + arg.len &&
+			(uintptr_t) arg.base < imu->ubuf + imu->len) {
+			pr_info("%s: intersects with existing mapping", __func__);
+			ret = -EEXIST;
+			goto err;
+		}
+	}
+
+	ret = -EBUSY;
+	if (ctx->nr_user_bufs >= PXD_IO_MAX_USER_BUFS)
+		goto err;
+
+	buf_index = ctx->nr_user_bufs;
+
+	imu = &ctx->user_bufs[buf_index];
+
+	ret = -ENOMEM;
+	imu->bvec = kvmalloc_array(arg.len >> PAGE_SHIFT, sizeof(struct bio_vec),
+		GFP_KERNEL | __GFP_ZERO);
+	if (!imu->bvec)
+		goto err;
+
+	imu->ubuf = (u64)arg.base;
+	imu->len = arg.len;
+
+	++ctx->nr_user_bufs;
+	return buf_index;
+err:
 	return ret;
 }
 
@@ -2771,6 +2769,8 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return io_sqe_register_buffers(ctx, (void *) arg);
 	case PXD_IOC_UNREGISTER_BUFFERS:
 		return io_sqe_buffer_unregister(ctx);
+	case PXD_IOC_REGISTER_REGION:
+		return io_sqe_register_region(ctx, (void *) arg);
 	default:
 		return -ENOTTY;
 	}
