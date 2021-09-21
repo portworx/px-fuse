@@ -4,6 +4,8 @@
 struct pxd_device;
 struct fuse_req;
 
+#ifdef __PX_FASTPATH__
+
 int __fastpath_init(void);
 void __fastpath_cleanup(void);
 
@@ -20,12 +22,14 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio);
 #endif
 
 void __pxd_abortfailQ(struct pxd_device *pxd_dev);
-void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 
 void pxd_suspend_io(struct pxd_device *pxd_dev);
 void pxd_resume_io(struct pxd_device *pxd_dev);
 
 #ifdef __PXD_BIO_BLKMQ__
+// io entry point
+void fp_handle_io(struct work_struct *work);
+
 // structure is exported only so, it can be embedded within fuse_context.
 // Treat it as private outside fastpath
 struct fp_root_context {
@@ -43,11 +47,12 @@ static inline void fp_root_context_init(struct fp_root_context *fproot) {
   fproot->bio = NULL;
   fproot->clones = NULL;
   atomic_set(&fproot->nactive, 0);
-  // work struct should get initialized right before use
+  INIT_LIST_HEAD(&fproot->wait);
+  INIT_WORK(&fproot->work, fp_handle_io);
 }
 
-// io entry point
-void fp_handle_io(struct work_struct *work);
 #endif
+
+#endif /* __PX_FASTPATH__ */
 
 #endif /* _PXD_BIO_H_ */
