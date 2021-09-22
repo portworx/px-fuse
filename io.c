@@ -195,13 +195,6 @@ struct io_cq_ring {
 	struct io_uring_cqe	cqes[];
 };
 
-struct io_mapped_ubuf {
-	u64		ubuf;
-	size_t		len;
-	struct		bio_vec *bvec;
-	unsigned int	nr_bvecs;
-};
-
 #define IO_PLUG_THRESHOLD		2
 #define IO_IOPOLL_BATCH			8
 
@@ -2244,6 +2237,184 @@ static int io_sqe_files_register(struct io_ring_ctx *ctx, void __user *arg,
 	return ret;
 }
 
+static int check_region(void *base, size_t len)
+{
+	if (len & ~PAGE_MASK) {
+		pr_err("%s: mapped len is not aligned", __func__);
+		return -EINVAL;
+	}
+
+	if ((uintptr_t)base & ~PAGE_MASK) {
+		pr_err("%s: mapped addr is not aligned", __func__);
+		return -EINVAL;
+	}
+
+	if (!len) {
+		pr_err("%s: zero length", __func__);
+		return -EINVAL;
+	}
+
+
+	if (!base) {
+		pr_err("%s: zero addr", __func__);
+		return -EINVAL;
+	}
+
+	if (len > SZ_4G) {
+		pr_err("%s: len too large", __func__);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int io_sqe_register_buffers(struct io_ring_ctx *ctx, void __user *uarg)
+{
+	struct page **pages = NULL;
+	int j;
+	int ret = -EINVAL;
+
+	struct io_mapped_ubuf *imu;
+	unsigned long off, start, end, ubuf;
+	int pret, nr_pages;
+	struct pxd_ioc_register_buffers arg;
+	size_t size;
+	long offset = 0;
+
+	ret = -EFAULT;
+	if (copy_from_user(&arg, uarg, sizeof(arg)))
+		goto err;
+
+	ret = check_region(arg.base, arg.len);
+	if (ret)
+		goto err;
+
+	if (arg.buf_index >= PXD_IO_MAX_USER_BUFS) {
+		pr_err("%s: invalid index", __func__);
+		ret = -EINVAL;
+		goto err;
+	}
+
+	imu = &ctx->user_bufs[arg.buf_index];
+	if (imu->ubuf > (uintptr_t) arg.base ||
+	    (uintptr_t) arg.base + arg.len > imu->ubuf + imu->len) {
+		pr_info("%s: address outside of mapped region", __func__);
+		ret = -ERANGE;
+		goto err;
+	}
+
+	ubuf = (unsigned long) arg.base;
+	end = (ubuf + arg.len) >> PAGE_SHIFT;
+	start = ubuf >> PAGE_SHIFT;
+	nr_pages = end - start;
+	offset = ((uintptr_t) arg.base - imu->ubuf) >> PAGE_SHIFT;
+
+	for (j = 0; j < nr_pages; ++j) {
+		if (imu->bvec[j + offset].bv_page) {
+			pr_err("%s: trying to overwrite existing mapping", __func__);
+			ret = -EEXIST;
+			goto err;
+		}
+	}
+
+	ret = -ENOMEM;
+	pages = kvmalloc_array(nr_pages, sizeof(struct page *),
+		GFP_KERNEL);
+	if (!pages) {
+		goto err;
+	}
+
+	ret = 0;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	down_read(&current->mm->mmap_sem);
+#else
+	down_read(&current->mm->mmap_lock);
+#endif
+	pret = get_user_pages(ubuf, nr_pages, FOLL_WRITE, pages, NULL);
+	if (pret < 0) {
+		ret = pret;
+	} else if (pret != nr_pages) {
+		ret = -EFAULT;
+	}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+	up_read(&current->mm->mmap_sem);
+#else
+	up_read(&current->mm->mmap_lock);
+#endif
+	if (ret) {
+		/*
+                 * if we did partial map release any pages we did get
+                 */
+		if (pret > 0) {
+			for (j = 0; j < pret; j++)
+				put_page(pages[j]);
+		}
+		goto err;
+	}
+
+	size = arg.len;
+	for (j = 0; j < nr_pages; j++) {
+		imu->bvec[j + offset].bv_page = pages[j];
+		imu->bvec[j + offset].bv_len = PAGE_SIZE;
+		imu->bvec[j + offset].bv_offset = 0;
+		off = 0;
+	}
+
+	kvfree(pages);
+	return 0;
+err:
+	kvfree(pages);
+	return ret;
+}
+
+static int io_sqe_register_region(struct io_ring_ctx *ctx, void __user *uarg)
+{
+	struct pxd_ioc_register_region arg;
+	int buf_index;
+	struct io_mapped_ubuf *imu;
+	int ret;
+
+	ret = -EFAULT;
+	if (copy_from_user(&arg, uarg, sizeof(arg)))
+		goto err;
+
+	ret = check_region(arg.base, arg.len);
+	if (ret)
+		goto err;
+
+	for (buf_index = 0; buf_index < ctx->nr_user_bufs; ++buf_index) {
+		imu = &ctx->user_bufs[buf_index];
+		if (imu->ubuf < (uintptr_t) arg.base + arg.len &&
+			(uintptr_t) arg.base < imu->ubuf + imu->len) {
+			pr_info("%s: intersects with existing mapping", __func__);
+			ret = -EEXIST;
+			goto err;
+		}
+	}
+
+	ret = -EBUSY;
+	if (ctx->nr_user_bufs >= PXD_IO_MAX_USER_BUFS)
+		goto err;
+
+	buf_index = ctx->nr_user_bufs;
+
+	imu = &ctx->user_bufs[buf_index];
+
+	ret = -ENOMEM;
+	imu->bvec = kvmalloc_array(arg.len >> PAGE_SHIFT, sizeof(struct bio_vec),
+		GFP_KERNEL | __GFP_ZERO);
+	if (!imu->bvec)
+		goto err;
+
+	imu->ubuf = (u64)arg.base;
+	imu->len = arg.len;
+
+	++ctx->nr_user_bufs;
+	return buf_index;
+err:
+	return ret;
+}
+
 static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *p)
 {
 	int ret;
@@ -2302,187 +2473,25 @@ static int io_sqe_buffer_unregister(struct io_ring_ctx *ctx)
 {
 	int i, j;
 
-	if (!ctx->user_bufs)
-		return -ENXIO;
-
 	for (i = 0; i < ctx->nr_user_bufs; i++) {
 		struct io_mapped_ubuf *imu = &ctx->user_bufs[i];
 
 		for (j = 0; j < imu->nr_bvecs; j++)
-			put_page(imu->bvec[j].bv_page);
+			if (imu->bvec[j].bv_page)
+				put_page(imu->bvec[j].bv_page);
 
 		kvfree(imu->bvec);
 		imu->nr_bvecs = 0;
 	}
 
-	kfree(ctx->user_bufs);
-	ctx->user_bufs = NULL;
 	ctx->nr_user_bufs = 0;
-	return 0;
-}
-
-static int io_copy_iov(struct io_ring_ctx *ctx, struct iovec *dst,
-		       void __user *arg, unsigned index)
-{
-	struct iovec __user *src;
-
-#ifdef CONFIG_COMPAT
-	if (ctx->compat) {
-		struct compat_iovec __user *ciovs;
-		struct compat_iovec ciov;
-
-		ciovs = (struct compat_iovec __user *) arg;
-		if (copy_from_user(&ciov, &ciovs[index], sizeof(ciov)))
-			return -EFAULT;
-
-		dst->iov_base = (void __user *) (unsigned long) ciov.iov_base;
-		dst->iov_len = ciov.iov_len;
-		return 0;
-	}
-#endif
-	src = (struct iovec __user *) arg;
-	if (copy_from_user(dst, &src[index], sizeof(*dst)))
-		return -EFAULT;
 	return 0;
 }
 
 static int io_sqe_buffer_register(struct io_ring_ctx *ctx, void __user *arg,
 				  unsigned nr_args)
 {
-	struct vm_area_struct **vmas = NULL;
-	struct page **pages = NULL;
-	int i, j, got_pages = 0;
-	int ret = -EINVAL;
-
-	if (ctx->user_bufs)
-		return -EBUSY;
-	if (!nr_args || nr_args > UIO_MAXIOV)
-		return -EINVAL;
-
-	ctx->user_bufs = kcalloc(nr_args, sizeof(struct io_mapped_ubuf),
-					GFP_KERNEL);
-	if (!ctx->user_bufs)
-		return -ENOMEM;
-
-	for (i = 0; i < nr_args; i++) {
-		struct io_mapped_ubuf *imu = &ctx->user_bufs[i];
-		unsigned long off, start, end, ubuf;
-		int pret, nr_pages;
-		struct iovec iov;
-		size_t size;
-
-		ret = io_copy_iov(ctx, &iov, arg, i);
-		if (ret)
-			goto err;
-
-		/*
-		 * Don't impose further limits on the size and buffer
-		 * constraints here, we'll -EINVAL later when IO is
-		 * submitted if they are wrong.
-		 */
-		ret = -EFAULT;
-		if (!iov.iov_base || !iov.iov_len)
-			goto err;
-
-		/* arbitrary limit, but we need something */
-		if (iov.iov_len > SZ_1G)
-			goto err;
-
-		ubuf = (unsigned long) iov.iov_base;
-		end = (ubuf + iov.iov_len + PAGE_SIZE - 1) >> PAGE_SHIFT;
-		start = ubuf >> PAGE_SHIFT;
-		nr_pages = end - start;
-
-		ret = 0;
-		if (!pages || nr_pages > got_pages) {
-			kfree(vmas);
-			kfree(pages);
-			pages = kvmalloc_array(nr_pages, sizeof(struct page *),
-						GFP_KERNEL);
-			vmas = kvmalloc_array(nr_pages,
-					sizeof(struct vm_area_struct *),
-					GFP_KERNEL);
-			if (!pages || !vmas) {
-				ret = -ENOMEM;
-				goto err;
-			}
-			got_pages = nr_pages;
-		}
-
-		imu->bvec = kvmalloc_array(nr_pages, sizeof(struct bio_vec),
-						GFP_KERNEL);
-		ret = -ENOMEM;
-		if (!imu->bvec) {
-			goto err;
-		}
-
-		ret = 0;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-		down_read(&current->mm->mmap_sem);
-#else
-		down_read(&current->mm->mmap_lock);
-#endif
-		pret = get_user_pages(ubuf, nr_pages,
-					FOLL_WRITE,
-				      pages, vmas);
-		if (pret == nr_pages) {
-			/* don't support file backed memory */
-			for (j = 0; j < nr_pages; j++) {
-				struct vm_area_struct *vma = vmas[j];
-
-				if (vma->vm_file) {
-					ret = -EOPNOTSUPP;
-					break;
-				}
-			}
-		} else {
-			ret = pret < 0 ? pret : -EFAULT;
-		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-		up_read(&current->mm->mmap_sem);
-#else
-		up_read(&current->mm->mmap_lock);
-#endif
-		if (ret) {
-			/*
-			 * if we did partial map, or found file backed vmas,
-			 * release any pages we did get
-			 */
-			if (pret > 0) {
-				for (j = 0; j < pret; j++)
-					put_page(pages[j]);
-			}
-			kvfree(imu->bvec);
-			goto err;
-		}
-
-		off = ubuf & ~PAGE_MASK;
-		size = iov.iov_len;
-		for (j = 0; j < nr_pages; j++) {
-			size_t vec_len;
-
-			vec_len = min_t(size_t, size, PAGE_SIZE - off);
-			imu->bvec[j].bv_page = pages[j];
-			imu->bvec[j].bv_len = vec_len;
-			imu->bvec[j].bv_offset = off;
-			off = 0;
-			size -= vec_len;
-		}
-		/* store original address for later verification */
-		imu->ubuf = ubuf;
-		imu->len = iov.iov_len;
-		imu->nr_bvecs = nr_pages;
-
-		ctx->nr_user_bufs++;
-	}
-	kvfree(pages);
-	kvfree(vmas);
-	return 0;
-err:
-	kvfree(pages);
-	kvfree(vmas);
-	io_sqe_buffer_unregister(ctx);
-	return ret;
+	return -EINVAL;
 }
 
 static int io_eventfd_register(struct io_ring_ctx *ctx, void __user *arg)
@@ -2756,6 +2765,12 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return io_sqe_unregister_file(ctx, arg);
 	case PXD_IOC_INIT_IO:
 		return io_ring_ioctl_init(ctx, arg);
+	case PXD_IOC_REGISTER_BUFFERS:
+		return io_sqe_register_buffers(ctx, (void *) arg);
+	case PXD_IOC_UNREGISTER_BUFFERS:
+		return io_sqe_buffer_unregister(ctx);
+	case PXD_IOC_REGISTER_REGION:
+		return io_sqe_register_region(ctx, (void *) arg);
 	default:
 		return -ENOTTY;
 	}
