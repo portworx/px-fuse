@@ -305,8 +305,8 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 #endif
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
-		
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
 {
 		struct block_device *p = pxd_dev->disk->part0;
 		if (!p) return;
@@ -362,12 +362,12 @@ static void pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req)
 	  const struct bio* bio = req->bio;
 	  int statgrp = STAT_WRITE;
 	  size_t sz = BIO_SIZE(bio) / SECTOR_SIZE;
-	  
+
 	  if (!bio) statgrp = STAT_FLUSH;
 	  else if (!op_is_write(bio->bi_opf)) statgrp = STAT_READ;
 	  else if (op_is_flush(bio->bi_opf) && (sz == 0)) statgrp = STAT_FLUSH;
 	  else statgrp = STAT_WRITE;
-	  
+
 	  pxd_update_stats(req, statgrp, sz);
 	}
 #else
@@ -1064,7 +1064,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-	
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
 	revalidate_disk_size(pxd_dev->disk, true);
 #else
