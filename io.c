@@ -85,6 +85,10 @@
 #define IORING_MAX_ENTRIES	4096
 #define IORING_MAX_FIXED_FILES	4096
 
+#ifndef SZ_4G
+#define SZ_4G (1ULL << 32)
+#endif
+
 struct io_uring {
 	u32 head ____cacheline_aligned_in_smp;
 	u32 tail ____cacheline_aligned_in_smp;
