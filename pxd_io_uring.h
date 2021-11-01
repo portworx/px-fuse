@@ -135,6 +135,8 @@ struct io_uring_params {
 	__u32 resv[5];
 	struct io_sqring_offsets sq_off;
 	struct io_cqring_offsets cq_off;
+
+	__u32 work_queue_num_active;	/* number of active items in work queue */
 };
 
 /*
