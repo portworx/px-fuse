@@ -2452,7 +2452,8 @@ static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *
 
 	/* Do QD, or 2 * CPUS, whatever is smallest */
 	ctx->sqo_wq = alloc_workqueue("pxd-wq", WQ_UNBOUND | WQ_FREEZABLE,
-			2 * num_online_cpus());
+		p->work_queue_num_active == 0 ? 2 * num_online_cpus() :
+		min(p->work_queue_num_active, 2 * num_online_cpus()));
 	if (!ctx->sqo_wq) {
 		ret = -ENOMEM;
 		goto err;
