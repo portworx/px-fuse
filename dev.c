@@ -998,63 +998,6 @@ void fuse_user_complete(struct fuse_conn *fc, uint64_t unique, uint64_t user_dat
 	fuse_conn_wakeup(fc);
 }
 
-void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *ureq)
-{
-	struct fuse_req *req;
-	struct iov_iter iter;
-	int ret;
-
-	req = request_find(fc, ureq->unique);
-	if (!req) {
-		printk(KERN_ERR "%s: request %lld not found\n", __func__, ureq->unique);
-		fuse_user_complete(fc, ureq->unique, ureq->user_data, -ENOENT);
-		return;
-	}
-
-	ret = 0;
-	if (ureq->len > 0) {
-		struct iovec data_iov_inline[16];
-		struct iovec *data_iov = data_iov_inline;
-		size_t data_iov_len = sizeof(struct iovec) * ureq->len;
-		if (ureq->len > PXD_MAX_IO / PXD_LBS + 2) {
-			fuse_user_complete(fc, ureq->unique, ureq->user_data,
-					-EINVAL);
-			return;
-		}
-
-		if (ureq->len > ARRAY_SIZE(data_iov_inline)) {
-			data_iov = kmalloc(data_iov_len, GFP_KERNEL);
-			if (!data_iov) {
-				fuse_user_complete(fc, ureq->unique, ureq->user_data,
-					-ENOMEM);
-				return;
-			}
-		}
-
-		if (copy_from_user(data_iov, (void *)ureq->iov_addr, data_iov_len)) {
-			fuse_user_complete(fc, ureq->unique, ureq->user_data,
-				-EFAULT);
-			if (data_iov != data_iov_inline)
-				kfree(data_iov);
-			return;
-		}
-
-		iov_iter_init(&iter, READ, data_iov, ureq->len,
-			iov_length(data_iov, ureq->len));
-
-		ret = __fuse_dev_do_write(fc, req, &iter);
-		if (data_iov != data_iov_inline)
-			kfree(data_iov);
-	}
-
-	if (!ret)
-		request_end(fc, req, ureq->res);
-
-	/* user requests that need data copy and failed user requests need completions */
-	if (ureq->len > 0 || ret != 0)
-		fuse_user_complete(fc, ureq->unique, ureq->user_data, ret);
-}
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,0,0)
 static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 			      unsigned long nr_segs, loff_t pos)
@@ -1146,9 +1089,6 @@ static void fuse_conn_queues_init(struct fuse_conn_queues *queue)
 {
 	fuse_queue_init_cb(&queue->requests_cb);
 	memset(queue->requests, 0, sizeof(queue->requests));
-
-	fuse_queue_init_cb(&queue->user_requests_cb);
-	memset(queue->user_requests, 0, sizeof(queue->user_requests));
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
