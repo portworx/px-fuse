@@ -226,32 +226,6 @@ static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
 	return ret;
 }
 
-static long pxd_ioctl_run_user_queue(struct file *file)
-{
-	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
-	struct fuse_conn *fc = &ctx->fc;
-	struct fuse_queue_cb *cb = &fc->queue->user_requests_cb;
-
-	struct fuse_user_request *req;
-
-	uint32_t read = cb->r.read;
-	uint32_t write = smp_load_acquire(&cb->r.write);
-
-	while (read != write) {
-		for (; read != write; ++read) {
-			req = &fc->queue->user_requests[
-				read & (FUSE_REQUEST_QUEUE_SIZE - 1)];
-			fuse_process_user_request(fc, req);
-		}
-
-		smp_store_release(&cb->r.read, read);
-
-		write = smp_load_acquire(&cb->r.write);
-	}
-
-	return 0;
-}
-
 static void print_io_flusher_state(unsigned int new_flags,
 				   pid_t pid, pid_t ppid, char *comm)
 {
@@ -364,7 +338,7 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 	case PXD_IOC_INIT:
 		return pxd_ioctl_init(file, (void __user *)arg);
 	case PXD_IOC_RUN_USER_QUEUE:
-		return pxd_ioctl_run_user_queue(file);
+		return -ENOTTY;
 	case PXD_IOC_RESIZE:
 		return pxd_ioctl_resize(file, (void __user *)arg);
 	case PXD_IOC_FPCLEANUP:

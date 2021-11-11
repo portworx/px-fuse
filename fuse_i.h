@@ -214,10 +214,6 @@ struct ____cacheline_aligned fuse_conn_queues {
 	/** requests from kernel to user space */
 	struct fuse_queue_cb requests_cb;
 	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
-
-	/** requests from user space to kernel */
-	struct fuse_queue_cb user_requests_cb;
-	struct fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 #ifdef __KERNEL__
@@ -337,8 +333,6 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 void fuse_request_init(struct fuse_req *req);
 
 void fuse_convert_zero_writes(struct fuse_req *req);
-
-void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *ureq);
 
 void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 
