@@ -1224,7 +1224,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
 
-    q->limits.discard_granularity = PXD_LBS;
+    q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
 	q->limits.discard_alignment = PXD_LBS;
 	if (add->discard_size < SECTOR_SIZE)
 		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
