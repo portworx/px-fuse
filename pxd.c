@@ -1577,7 +1577,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0) || (defined(__EL8__) && defined(GD_READ_ONLY))
 	revalidate_disk_size(pxd_dev->disk, true);
 #else
 	err = revalidate_disk(pxd_dev->disk);
