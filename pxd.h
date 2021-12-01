@@ -62,6 +62,8 @@ struct pxd_ioc_register_region {
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
+#define PXD_MIN_DISCARD_GRANULARITY		PXD_LBS
+#define PXD_MAX_DISCARD_GRANULARITY		(64 * 1024)
 
 // NOTE: nvme devices can go upto 1023 queue depth
 #define MAX_CONGESTION_THRESHOLD (1024)
