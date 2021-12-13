@@ -9,6 +9,10 @@
 #include <linux/uio.h>
 #include <linux/pid_namespace.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0)
+#include <linux/part_stat.h>
+#endif
+
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
