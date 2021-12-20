@@ -568,11 +568,11 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->pxd_rdwr_in.size = size;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	req->pxd_rdwr_in.flags =
-		((flags & REQ_FUA) ? PXD_FLAGS_FLUSH : 0) |
-		((flags & REQ_PREFLUSH) ? PXD_FLAGS_FLUSH : 0) |
+		((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
+		((flags & REQ_PREFLUSH) ? PXD_FLAGS_PREFLUSH : 0) |
 		((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #else
-	req->pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_FLUSH : 0) |
+	req->pxd_rdwr_in.flags = ((flags & REQ_FLUSH) ? PXD_FLAGS_PREFLUSH : 0) |
 					  ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
 					  ((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #endif
