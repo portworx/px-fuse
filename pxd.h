@@ -103,7 +103,7 @@ enum pxd_opcode {
 #define PXD_FLAGS_PREFLUSH 0x1	/**< REQ_PREFLUSH set on bio */
 #define PXD_FLAGS_FUA	0x2	/**< REQ_FUA set on bio */
 #define PXD_FLAGS_META	0x4	/**< REQ_META set on bio */
-#define PXD_FLAGS_SYNC (PXD_FLAGS_PREFLUSH | PXD_FLAGS_FUA)
+#define PXD_FLAGS_SYNC PXD_FLAGS_FUA
 #define PXD_FLAGS_LAST PXD_FLAGS_META
 
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
