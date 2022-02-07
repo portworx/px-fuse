@@ -1114,6 +1114,9 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 	loff_t off = READ_ONCE(sqe->off);
 	loff_t bytes = READ_ONCE(sqe->len);
 
+	loff_t discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
+	loff_t discard_mask = discard_granularity - 1;
+
 	/* discard always requires a blocking context */
 	if (force_nonblock) {
 		return -EAGAIN;
@@ -1139,12 +1142,52 @@ static int io_discard(struct io_kiocb *req, const struct sqe_submit *s,
 
 		mapping = bdev->bd_inode->i_mapping;
 		truncate_inode_pages_range(mapping, off, off + bytes - 1);
-		ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE, bytes / SECTOR_SIZE,
-			GFP_KERNEL, 0);
-		if (ret < 0) {
-			pr_warn("%s: blkdev_issue_discard failed: ret %d", __func__, ret);
-			if (ret != -EINVAL && ret != -EOPNOTSUPP) {
-				ret = -EIO;
+		// handle unaligned discards
+		while (bytes != 0) {
+			loff_t aligned_off = (off + discard_mask) & ~discard_mask;
+			loff_t len = bytes & ~discard_mask;
+
+			if (bytes < discard_granularity) {
+				loff_t zerolen = bytes;
+				ret = blkdev_issue_zeroout(bdev, off / SECTOR_SIZE, zerolen / SECTOR_SIZE,
+							GFP_KERNEL, 0);
+				if (ret < 0) {
+					pr_warn("%s: blkdev_issue_zeroout(small unaligned discard) failed: ret %d", __func__, ret);
+					if (ret != -EINVAL && ret != -EOPNOTSUPP) {
+						ret = -EIO;
+					}
+					break;
+				}
+				bytes = 0;
+				off += zerolen;
+			} else if (aligned_off != off) {
+				loff_t zerolen = aligned_off - off;
+
+				ret = blkdev_issue_zeroout(bdev, off / SECTOR_SIZE, zerolen / SECTOR_SIZE,
+							GFP_KERNEL, 0);
+				if (ret < 0) {
+					pr_warn("%s: blkdev_issue_zeroout(unaligned discard offset) failed: ret %d", __func__, ret);
+					if (ret != -EINVAL && ret != -EOPNOTSUPP) {
+						ret = -EIO;
+					}
+					break;
+				}
+
+				bytes -= zerolen;
+				off += zerolen;
+			} else if (len > 0) {
+				ret = blkdev_issue_discard(bdev, off / SECTOR_SIZE, len / SECTOR_SIZE,
+							GFP_KERNEL, 0);
+				if (ret < 0) {
+					pr_warn("%s: blkdev_issue_discard failed: ret %d", __func__, ret);
+					if (ret != -EINVAL && ret != -EOPNOTSUPP) {
+						ret = -EIO;
+					}
+					break;
+				}
+
+				bytes -= len;
+				off += len;
 			}
 		}
 	} else if (unlikely(!req->file->f_op->fallocate)) {
