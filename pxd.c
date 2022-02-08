@@ -9,10 +9,6 @@
 #include <linux/uio.h>
 #include <linux/pid_namespace.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0)
-#include <linux/part_stat.h>
-#endif
-
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
@@ -738,35 +734,14 @@ static const struct blk_mq_ops pxd_mq_ops = {
 };
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-static struct lock_class_key pxd_init_lkclass;
-#endif
- 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
 {
-	struct gendisk *disk;
-	struct request_queue *q;
+	struct gendisk *disk = NULL;
+	struct request_queue *q = NULL;
 	int err = 0;
 
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
 		return -EINVAL;
-
-	/* Create gendisk info. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	disk = __alloc_disk_node(q, NUMA_NO_NODE, &pxd_init_lkclass);
-#else
-	disk = alloc_disk(1);
-#endif
-	if (!disk)
-		return -ENOMEM;
-
-	snprintf(disk->disk_name, sizeof(disk->disk_name),
-			PXD_DEV"%llu", pxd_dev->dev_id);
-	disk->major = pxd_dev->major;
-	disk->first_minor = pxd_dev->minor;
-	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
-	disk->fops = &pxd_bd_ops;
-	disk->private_data = pxd_dev;
 
 #ifndef __PX_FASTPATH__
 	if (pxd_dev->fastpath) {
@@ -786,8 +761,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		q = blk_alloc_queue(GFP_KERNEL);
 #endif
 		if (!q) {
-			err = -ENOMEM;
-			goto out_disk;
+			return -ENOMEM;
 		}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
@@ -806,16 +780,37 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
-	  if (err)
+	  if (err) {
 		goto out_disk;
+	  }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
+	  if (IS_ERR(disk)) {
+		err = PTR_ERR(disk);
+		blk_mq_free_tag_set(&pxd_dev->tag_set);
+		goto out_disk;
+	  }
+	  q = disk->queue;
+#else
+	  /* Create gendisk info. */
+	  disk = alloc_disk(1);
+	  if (!disk) {
+		return -ENOMEM;
+	  }
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
 		err = PTR_ERR(q);
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 		goto out_disk;
 	  }
+#endif
 #else
+	  /* Create gendisk info. */
+	  disk = alloc_disk(1); 
+	  if (!disk) {
+		return -ENOMEM;
+	  }
 	  q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 	  if (!q) {
 		err = -ENOMEM;
@@ -826,6 +821,16 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #ifdef __PX_FASTPATH__
 	}
 #endif
+	snprintf(disk->disk_name, sizeof(disk->disk_name),
+		 PXD_DEV"%llu", pxd_dev->dev_id); 
+	disk->major = pxd_dev->major;  
+	disk->minors = 256;
+	disk->first_minor = pxd_dev->minor;
+	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
+	disk->fops = &pxd_bd_ops;  
+	disk->private_data = pxd_dev;  
+	set_capacity(disk, add->size / SECTOR_SIZE);
+
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
@@ -833,8 +838,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
-
-	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	/* Enable discard support. */
 
@@ -859,32 +862,36 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	return 0;
 out_disk:
-	put_disk(disk);
+	if (disk) {
+		put_disk(disk);
+	}
 	return err;
 }
 
 static void pxd_free_disk(struct pxd_device *pxd_dev)
 {
 	struct gendisk *disk = pxd_dev->disk;
+	printk(KERN_ALERT "%s: ...", __func__);
 
-	if (!disk)
+	if (!disk) {
 		return;
+	}
 
 	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	if (disk_live(disk)) {
-#else	
-	if (disk->flags & GENHD_FL_UP) {
-#endif
+
+	if (disk) {
 		del_gendisk(disk);
-		if (disk->queue)
-			blk_cleanup_queue(disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+		blk_cleanup_disk(disk);
+#else
+		blk_cleanup_queue(disk->queue);
+#endif
 #ifdef __PX_BLKMQ__
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
+		put_disk(disk);
 	}
-	put_disk(disk);
 }
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
@@ -963,7 +970,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+	device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+#else
 	add_disk(pxd_dev->disk);
+#endif
 
 	return pxd_dev->minor;
 
@@ -1028,7 +1039,12 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	spin_unlock(&pxd_dev->lock);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+	// Not required
+#else
 	device_unregister(&pxd_dev->dev);
+#endif
+	pxd_free_disk(pxd_dev);
 
 	module_put(THIS_MODULE);
 
