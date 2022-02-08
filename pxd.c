@@ -886,11 +886,11 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		blk_cleanup_disk(disk);
 #else
 		blk_cleanup_queue(disk->queue);
+		put_disk(disk);
 #endif
 #ifdef __PX_BLKMQ__
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
-		put_disk(disk);
 	}
 }
 
