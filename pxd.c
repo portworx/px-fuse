@@ -799,9 +799,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	  }
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
-		err = PTR_ERR(q);
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
-		goto out_disk;
+		put_disk(disk);
+		return PTR_ERR(q);
 	  }
 #endif
 #else
@@ -812,8 +812,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	  }
 	  q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 	  if (!q) {
-		err = -ENOMEM;
-	  	goto out_disk;
+		put_disk(disk);
+		return -ENOMEM;
 	  }
 #endif
 
@@ -860,11 +860,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	pxd_dev->disk = disk;
 
 	return 0;
-out_disk:
-	if (disk) {
-		put_disk(disk);
-	}
-	return err;
 }
 
 static void pxd_free_disk(struct pxd_device *pxd_dev)
