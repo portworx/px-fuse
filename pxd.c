@@ -781,15 +781,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
 	  if (err) {
-		goto out_disk;
+		return err;
 	  }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 	  if (IS_ERR(disk)) {
-		err = PTR_ERR(disk);
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
-		goto out_disk;
+		return PTR_ERR(disk);
 	  }
 	  q = disk->queue;
 #else
@@ -871,7 +870,6 @@ out_disk:
 static void pxd_free_disk(struct pxd_device *pxd_dev)
 {
 	struct gendisk *disk = pxd_dev->disk;
-	printk(KERN_ALERT "%s: ...", __func__);
 
 	if (!disk) {
 		return;
@@ -882,12 +880,14 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 
 	if (disk) {
 		del_gendisk(disk);
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 		blk_cleanup_disk(disk);
 #else
 		blk_cleanup_queue(disk->queue);
 		put_disk(disk);
 #endif
+
 #ifdef __PX_BLKMQ__
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
