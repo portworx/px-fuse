@@ -76,8 +76,8 @@ endif
 endif
 endif
 
-# EL8 Specific kernel checks
-ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
+# EL8-9 Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9].*\.x86_64'; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
 endif
 
@@ -94,8 +94,8 @@ export KERNELPATH
 export OUTPATH
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
-# EL8 Specific kernel checks
-ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el8.*\.x86_64'; echo $$?),0)
+# EL8-9 Specific kernel checks - this check also exists above - JAR?
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9].*\.x86_64'; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
 else
 # 5.x kernel checks
