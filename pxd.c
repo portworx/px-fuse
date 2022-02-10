@@ -738,7 +738,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 {
 	struct gendisk *disk = NULL;
 	struct request_queue *q = NULL;
+#ifdef __PX_BLKMQ__
 	int err = 0;
+#endif
 
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
 		return -EINVAL;
