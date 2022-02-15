@@ -970,9 +970,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_unlock(&ctx->lock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
-    if (err)
-        goto out_disk;
+	device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #else
 	add_disk(pxd_dev->disk);
 #endif
