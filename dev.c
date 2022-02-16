@@ -25,6 +25,10 @@
 #include <linux/blkdev.h>
 #include "pxd_compat.h"
 
+#ifdef __PX_BLKMQ__
+#include <linux/blk-mq.h>
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
 #define PAGE_CACHE_RELEASE(page) put_page(page)

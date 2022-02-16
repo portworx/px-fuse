@@ -9,6 +9,10 @@
 #include <linux/uio.h>
 #include <linux/pid_namespace.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0) && !defined(part_stat_lock)
+#include <linux/part_stat.h>
+#endif
+
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
@@ -786,7 +790,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		return err;
 	  }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
@@ -808,7 +812,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #endif
 #else
 	  /* Create gendisk info. */
-	  disk = alloc_disk(1); 
+	  disk = alloc_disk(1);
 	  if (!disk) {
 		return -ENOMEM;
 	  }
@@ -823,13 +827,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	}
 #endif
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
-		 PXD_DEV"%llu", pxd_dev->dev_id); 
-	disk->major = pxd_dev->major;  
+		 PXD_DEV"%llu", pxd_dev->dev_id);
+	disk->major = pxd_dev->major;
 	disk->minors = 256;
 	disk->first_minor = pxd_dev->minor;
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
-	disk->fops = &pxd_bd_ops;  
-	disk->private_data = pxd_dev;  
+	disk->fops = &pxd_bd_ops;
+	disk->private_data = pxd_dev;
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
