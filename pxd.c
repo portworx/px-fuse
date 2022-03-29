@@ -11,7 +11,7 @@
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0) && !defined(part_stat_lock)
 #include <linux/part_stat.h>
 #endif
 
@@ -1134,10 +1134,6 @@ static const struct blk_mq_ops pxd_mq_ops = {
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_BLKMQ__ */
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-static struct lock_class_key pxd_init_lkclass;
-#endif
- 
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
 {
 	struct gendisk *disk;
@@ -1148,11 +1144,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		return -EINVAL;
 
 	/* Create gendisk info. */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	disk = __alloc_disk_node(q, NUMA_NO_NODE, &pxd_init_lkclass);
-#else
 	disk = alloc_disk(1);
-#endif
 	if (!disk)
 		return -ENOMEM;
 
@@ -1278,11 +1270,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 
 	pxd_fastpath_cleanup(pxd_dev);
 	pxd_dev->disk = NULL;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	if (disk_live(disk)) {
-#else	
 	if (disk->flags & GENHD_FL_UP) {
-#endif
 		del_gendisk(disk);
 		if (disk->queue)
 			blk_cleanup_queue(disk->queue);
