@@ -11,7 +11,7 @@
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0) && !defined(part_stat_lock)
 #include <linux/part_stat.h>
 #endif
 
@@ -1137,7 +1137,7 @@ static const struct blk_mq_ops pxd_mq_ops = {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 static struct lock_class_key pxd_init_lkclass;
 #endif
- 
+
 static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
 {
 	struct gendisk *disk;
@@ -1280,7 +1280,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	pxd_dev->disk = NULL;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 	if (disk_live(disk)) {
-#else	
+#else
 	if (disk->flags & GENHD_FL_UP) {
 #endif
 		del_gendisk(disk);
