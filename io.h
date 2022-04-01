@@ -60,6 +60,13 @@ struct async_list {
 	size_t			io_pages;
 };
 
+struct io_mapped_ubuf {
+	u64		ubuf;
+	size_t		len;
+	struct		bio_vec *bvec;
+	unsigned int	nr_bvecs;
+};
+
 struct io_ring_ctx {
 	struct {
 		struct percpu_ref	refs;
@@ -111,7 +118,8 @@ struct io_ring_ctx {
 
 	/* if used, fixed mapped user buffers */
 	unsigned		nr_user_bufs;
-	struct io_mapped_ubuf	*user_bufs;
+#define PXD_IO_MAX_USER_BUFS 16
+	struct io_mapped_ubuf   user_bufs[PXD_IO_MAX_USER_BUFS];
 
 	struct completion	ctx_done;
 

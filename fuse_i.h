@@ -73,13 +73,13 @@ struct fuse_req {
 	/** sequence number used for restart */
 	u64 sequence;
 
-#ifdef __PXD_BIO_BLKMQ__
+#if defined __PXD_BIO_BLKMQ__ && defined __PX_FASTPATH__
 	// Additional fastpath context
 	struct fp_root_context fproot;
 #endif
 };
 
-#ifdef __PXD_BIO_BLKMQ__
+#if defined __PXD_BIO_BLKMQ__ && defined __PX_FASTPATH__
 static inline
 struct pxd_device* fproot_to_pxd(struct fp_root_context *fproot)
 {
@@ -214,10 +214,6 @@ struct ____cacheline_aligned fuse_conn_queues {
 	/** requests from kernel to user space */
 	struct fuse_queue_cb requests_cb;
 	struct rdwr_in requests[FUSE_REQUEST_QUEUE_SIZE];
-
-	/** requests from user space to kernel */
-	struct fuse_queue_cb user_requests_cb;
-	struct fuse_user_request user_requests[FUSE_REQUEST_QUEUE_SIZE];
 };
 
 #ifdef __KERNEL__
@@ -328,6 +324,7 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc);
 int fuse_restart_requests(struct fuse_conn *fc);
 
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add);
+ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id);
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove);
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
 ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size);
@@ -336,8 +333,6 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter);
 void fuse_request_init(struct fuse_req *req);
 
 void fuse_convert_zero_writes(struct fuse_req *req);
-
-void fuse_process_user_request(struct fuse_conn *fc, struct fuse_user_request *ureq);
 
 void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 

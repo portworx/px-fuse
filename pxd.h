@@ -9,6 +9,11 @@
 #include <stdint.h>
 #include <sys/param.h>
 #include <string.h>
+
+// definitions needed for userspace
+// ref: include/linux/kdev_t.h
+#define MINORBITS	20
+#define MINORMASK	((1U << MINORBITS) - 1)
 #endif
 
 #include "fuse.h"
@@ -20,7 +25,8 @@
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
 #define PXD_DEV_PATH	"/dev/" PXD_DEV		/**< block device path prefix */
 
-#define PXD_VERSION 12				/**< driver version */
+#define PXD_VERSION 13				/**< driver version */
+#define PXD_FASTPATH_MINVERSION (12) /**< fastpath enabled min kernel version */
 
 #define PXD_NUM_CONTEXTS			11	/**< Total available control devices */
 #define PXD_NUM_CONTEXT_EXPORTED	1	/**< Available for external use */
@@ -38,10 +44,26 @@
 #define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 #define PXD_IOC_INIT_IO         _IO(PXD_IOCTL_MAGIC, 11)    /* 0x50580b */
 #define PXD_IOC_WAKE_UP_SQO     _IO(PXD_IOCTL_MAGIC, 12)    /* 0x50580c */
+#define PXD_IOC_REGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 13)    /* 0x50580d */
+#define PXD_IOC_UNREGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 14)    /* 0x50580e */
+#define PXD_IOC_REGISTER_REGION	_IO(PXD_IOCTL_MAGIC, 15)
+
+struct pxd_ioc_register_buffers {
+	void *base;
+	size_t len;
+	uint32_t buf_index;
+};
+
+struct pxd_ioc_register_region {
+	void *base;
+	size_t len;
+};
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
+#define PXD_MIN_DISCARD_GRANULARITY		PXD_LBS
+#define PXD_MAX_DISCARD_GRANULARITY		(64 * 1024)
 
 // NOTE: nvme devices can go upto 1023 queue depth
 #define MAX_CONGESTION_THRESHOLD (1024)
@@ -73,14 +95,15 @@ enum pxd_opcode {
 						  from kernel on a suspended device */
 	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
+	PXD_EXPORT_DEV,     /**< export the attached device to the kernel */
 	PXD_LAST,
 };
 
 /** flags set by driver */
-#define PXD_FLAGS_FLUSH 0x1	/**< REQ_FLUSH set on bio */
+#define PXD_FLAGS_PREFLUSH 0x1	/**< REQ_PREFLUSH set on bio */
 #define PXD_FLAGS_FUA	0x2	/**< REQ_FUA set on bio */
 #define PXD_FLAGS_META	0x4	/**< REQ_META set on bio */
-#define PXD_FLAGS_SYNC (PXD_FLAGS_FLUSH | PXD_FLAGS_FUA)
+#define PXD_FLAGS_SYNC (PXD_FLAGS_PREFLUSH | PXD_FLAGS_FUA)
 #define PXD_FLAGS_LAST PXD_FLAGS_META
 
 #define PXD_LBS (4 * 1024) 	/**< logical block size */
@@ -215,11 +238,12 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
  */
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
+#define PXD_FEATURE_ATTACH_OPTIMIZED (0x2)
 
 static inline
 int pxd_supported_features(void)
 {
-	int features = 0;
+	int features = PXD_FEATURE_ATTACH_OPTIMIZED;
 #ifdef __PX_FASTPATH__
 	features |= PXD_FEATURE_FASTPATH;
 #endif

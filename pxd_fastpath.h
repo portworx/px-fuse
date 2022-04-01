@@ -39,7 +39,6 @@ struct pxd_fastpath_extension {
 	bool fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
-	struct workqueue_struct *wq;
 	struct pxd_sync_ws syncwi[MAX_PXD_BACKING_DEVS];
 	struct completion sync_complete;
 	atomic_t sync_done;
@@ -65,9 +64,15 @@ struct pxd_fastpath_extension {
 	atomic_t nerror; // [global] total IO error
 };
 
+#ifndef __PX_FASTPATH__
+#include "pxd_fastpath_stub.h"
+#else
+
 // global initialization during module init for fastpath
 int fastpath_init(void);
 void fastpath_cleanup(void);
+
+struct workqueue_struct* fastpath_workqueue(void);
 
 struct pxd_update_path_out;
 int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
@@ -75,8 +80,6 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 // per device initialization for fastpath
 int pxd_fastpath_init(struct pxd_device *pxd_dev);
 void pxd_fastpath_cleanup(struct pxd_device *pxd_dev);
-
-void pxdctx_set_connected(struct pxd_context *ctx, bool enable);
 
 void enableFastPath(struct pxd_device *pxd_dev, bool force);
 void disableFastPath(struct pxd_device *pxd_dev, bool skipSync);
@@ -104,6 +107,7 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
 
 // handle IO reroutes and switch events
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
+void pxd_abortfailQ(struct pxd_device *pxd_dev);
 
 static inline
 struct block_device* get_bdev(struct file *fileh)
@@ -141,5 +145,6 @@ int remap_io_status(int status)
 
 	return -EIO;
 }
+#endif /* __PX_FASTPATH__ */
 
 #endif /* _PXD_FASTPATH_H_ */
