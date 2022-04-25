@@ -1042,10 +1042,10 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 	// Not required
+	pxd_free_disk(pxd_dev);
 #else
 	device_unregister(&pxd_dev->dev);
 #endif
-	pxd_free_disk(pxd_dev);
 
 	module_put(THIS_MODULE);
 
