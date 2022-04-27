@@ -564,10 +564,15 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	if (ret)
 		return ret;
 
+#if 0
 	/* advance the iterator if data is unaligned */
 	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
 		iov_iter_advance(&data_iter,
 				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#else
+	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
+		printk("REQ: unaligned IO %llu offset\n", req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#endif
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		ssize_t len = BVEC(bvec).bv_len;
@@ -631,9 +636,14 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 		return ret;
 
 	/* advance the iterator if data is unaligned */
+#if 0
 	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
 		iov_iter_advance(&data_iter,
 				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#else
+	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
+		printk("BIO: unaligned IO %llu offset\n", req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#endif
 
 	bio_for_each_segment(bvec, req->bio, bvec_iter) {
 		ssize_t len = BVEC(bvec).bv_len;

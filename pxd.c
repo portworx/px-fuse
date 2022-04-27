@@ -1157,6 +1157,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	struct gendisk *disk;
 	struct request_queue *q;
 	int err = 0;
+	unsigned segsize = SEGMENT_SIZE;
 
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
 		return -EINVAL;
@@ -1240,11 +1241,16 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_MAKEREQ__ */
 
-	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
-	blk_queue_max_segment_size(q, SEGMENT_SIZE);
+	/// If block size is less than optimal, then decrease max segment size to 
+	/// handle unaligned IOs.
+	/// limit to 256 vectors in iov.
+	segsize = min(add->block_size * 256, SEGMENT_SIZE);
+
+	blk_queue_max_hw_sectors(q, segsize / SECTOR_SIZE);
+	blk_queue_max_segment_size(q, segsize);
 
 	// set block size based on passed scale factor.
-	blk_queue_max_segments(q, (SEGMENT_SIZE / add->block_size));
+	blk_queue_max_segments(q, 256);
 	blk_queue_io_min(q, add->block_size);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, add->block_size);
