@@ -50,16 +50,6 @@
 #include <linux/miscdevice.h>
 #include "fuse_i.h"
 
-struct async_list {
-	spinlock_t		lock;
-	atomic_t		cnt;
-	struct list_head	list;
-
-	struct file		*file;
-	off_t			io_end;
-	size_t			io_pages;
-};
-
 struct io_mapped_ubuf {
 	u64		ubuf;
 	size_t		len;
@@ -140,8 +130,6 @@ struct io_ring_ctx {
 		struct list_head	poll_list;
 		struct list_head	cancel_list;
 	} ____cacheline_aligned_in_smp;
-
-	struct async_list	pending_async[2];
 
 	uint32_t context_id;
 };
