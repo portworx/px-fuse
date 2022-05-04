@@ -586,10 +586,12 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 				skipped = read_data_p->offset;
 			}
 		}
+
+
 		if (copied < len) {
 			size_t copy_this = copy_page_to_iter(BVEC(bvec).bv_page,
 				BVEC(bvec).bv_offset + copied,
-				len - copied, &data_iter);
+				min(len - copied, data_iter.iov[0].iov_len), &data_iter);
 			if (copy_this != len - copied) {
 				if (!iter->count)
 					return 0;
@@ -599,7 +601,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 					iov, &data_iter);
 				if (ret)
 					return ret;
-				len -= copied;
+				len -= (copied + copy_this);
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);

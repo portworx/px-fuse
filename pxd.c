@@ -1258,15 +1258,18 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
-	/* Enable discard support. */
-	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
+	// do not support discards on smaller block devices than PXD_LBS
+	if (add->block_size == PXD_LBS) {
+		/* Enable discard support. */
+		QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
 
-    q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
-    q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
-	if (add->discard_size < SECTOR_SIZE)
-		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
-	else
-		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
+    	q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
+    	q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
+		if (add->discard_size < SECTOR_SIZE)
+			q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
+		else
+			q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
+	}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
