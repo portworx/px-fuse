@@ -242,8 +242,6 @@ static size_t queue_size(struct io_ring_ctx *ctx)
 
 static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *params)
 {
-	int i;
-
 	memset(ctx, 0, sizeof(*ctx));
 
 	ctx->flags = params->flags;
@@ -299,11 +297,6 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 	init_completion(&ctx->ctx_done);
 	mutex_init(&ctx->uring_lock);
 	init_waitqueue_head(&ctx->cq_wait);
-	for (i = 0; i < ARRAY_SIZE(ctx->pending_async); i++) {
-		spin_lock_init(&ctx->pending_async[i].lock);
-		INIT_LIST_HEAD(&ctx->pending_async[i].list);
-		atomic_set(&ctx->pending_async[i].cnt, 0);
-	}
 	spin_lock_init(&ctx->completion_lock);
 	INIT_LIST_HEAD(&ctx->poll_list);
 	INIT_LIST_HEAD(&ctx->cancel_list);
@@ -654,47 +647,6 @@ static int io_import_iovec(struct io_ring_ctx *ctx, int rw,
 	return import_iovec(rw, buf, sqe_len, UIO_FASTIOV, iovec, iter);
 }
 
-/*
- * Make a note of the last file/offset/direction we punted to async
- * context. We'll use this information to see if we can piggy back a
- * sequential request onto the previous one, if it's still hasn't been
- * completed by the async worker.
- */
-static void io_async_list_note(int rw, struct io_kiocb *req, size_t len)
-{
-	struct async_list *async_list = &req->ctx->pending_async[rw];
-	struct kiocb *kiocb = &req->rw;
-	struct file *filp = kiocb->ki_filp;
-	off_t io_end = kiocb->ki_pos + len;
-
-	if (filp == async_list->file && kiocb->ki_pos == async_list->io_end) {
-		unsigned long max_pages;
-
-		/* Use 8x RA size as a decent limiter for both reads/writes */
-		max_pages = filp->f_ra.ra_pages;
-		if (!max_pages)
-			max_pages = SZ_128K / PAGE_SIZE;
-		max_pages *= 8;
-
-		/* If max pages are exceeded, reset the state */
-		len >>= PAGE_SHIFT;
-		if (async_list->io_pages + len <= max_pages) {
-			req->flags |= REQ_F_SEQ_PREV;
-			async_list->io_pages += len;
-		} else {
-			io_end = 0;
-			async_list->io_pages = 0;
-		}
-	}
-
-	/* New file? Reset state. */
-	if (async_list->file != filp) {
-		async_list->io_pages = 0;
-		async_list->file = filp;
-	}
-	async_list->io_end = io_end;
-}
-
 static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 		   bool force_nonblock)
 {
@@ -731,12 +683,6 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 		io_rw_done(kiocb, ret2);
 		ret = 0;
 	} else {
-		/*
-		 * If ->needs_lock is true, we're already in async
-		 * context.
-		 */
-		if (!s->needs_lock)
-			io_async_list_note(READ, req, iov_count);
 		ret = -EAGAIN;
 	}
 	kfree(iovec);
@@ -777,9 +723,6 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 	ret = -EAGAIN;
 	if (force_nonblock &&
 	    ((s->sqe->flags & IOSQE_FORCE_ASYNC) || !(kiocb->ki_flags & IOCB_DIRECT))) {
-		/* If ->needs_lock is true, we're already in async context. */
-		if (!s->needs_lock)
-			io_async_list_note(WRITE, req, iov_count);
 		goto out_free;
 	}
 
@@ -808,12 +751,6 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 		io_rw_done(kiocb, ret2);
 		ret = 0;
 	} else {
-		/*
-		 * If ->needs_lock is true, we're already in async
-		 * context.
-		 */
-		if (!s->needs_lock)
-			io_async_list_note(WRITE, req, iov_count);
 		ret = -EAGAIN;
 	}
 out_free:
@@ -1044,9 +981,6 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 	ret = -EAGAIN;
 	if (force_nonblock &&
 	    ((s->sqe->flags & IOSQE_FORCE_ASYNC) || !(kiocb->ki_flags & IOCB_DIRECT))) {
-		/* If ->needs_lock is true, we're already in async context. */
-		if (!s->needs_lock)
-			io_async_list_note(WRITE, req, iov_count);
 		goto out_free;
 	}
 
@@ -1076,12 +1010,6 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 			io_rw_done(kiocb, ret2);
 			ret = 0;
 		} else {
-			/*
-			 * If ->needs_lock is true, we're already in async
-			 * context.
-			 */
-			if (!s->needs_lock)
-				io_async_list_note(WRITE, req, iov_count);
 			ret = -EAGAIN;
 		}
 	} else {
@@ -1091,12 +1019,6 @@ static int io_switch(struct io_kiocb *req, const struct sqe_submit *s,
 			io_rw_done(kiocb, ret2);
 			ret = 0;
 		} else {
-			/*
-			 * If ->needs_lock is true, we're already in async
-			 * context.
-			 */
-			if (!s->needs_lock)
-				io_async_list_note(READ, req, iov_count);
 			ret = -EAGAIN;
 		}
 	}
@@ -1600,21 +1522,6 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	return ret;
 }
 
-static struct async_list *io_async_list_from_sqe(struct io_ring_ctx *ctx,
-						 const struct io_uring_sqe *sqe)
-{
-	switch (sqe->opcode) {
-	case IORING_OP_READV:
-	case IORING_OP_READ_FIXED:
-		return &ctx->pending_async[READ];
-	case IORING_OP_WRITEV:
-	case IORING_OP_WRITE_FIXED:
-		return &ctx->pending_async[WRITE];
-	default:
-		return NULL;
-	}
-}
-
 static inline bool io_sqe_needs_user(const struct io_uring_sqe *sqe)
 {
 	u8 opcode = READ_ONCE(sqe->opcode);
@@ -1628,114 +1535,62 @@ static void io_sq_wq_submit_work(struct work_struct *work)
 	struct io_kiocb *req = container_of(work, struct io_kiocb, work);
 	struct io_ring_ctx *ctx = req->ctx;
 	struct mm_struct *cur_mm = NULL;
-	struct async_list *async_list;
 	LIST_HEAD(req_list);
 	mm_segment_t old_fs;
 	int ret;
+	struct sqe_submit *s = &req->submit;
+	const struct io_uring_sqe *sqe = s->sqe;
 
-	async_list = io_async_list_from_sqe(ctx, req->submit.sqe);
-restart:
-	do {
-		struct sqe_submit *s = &req->submit;
-		const struct io_uring_sqe *sqe = s->sqe;
+	/* Ensure we clear previously set non-block flag */
+	req->rw.ki_flags &= ~IOCB_NOWAIT;
 
-		/* Ensure we clear previously set non-block flag */
-		req->rw.ki_flags &= ~IOCB_NOWAIT;
-
-		ret = 0;
-		if (io_sqe_needs_user(sqe) && !cur_mm) {
-			if (!mmget_not_zero(ctx->sqo_mm)) {
-				ret = -EFAULT;
-			} else {
-				cur_mm = ctx->sqo_mm;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
-				use_mm(cur_mm);
+	ret = 0;
+	if (io_sqe_needs_user(sqe) && !cur_mm) {
+		if (!mmget_not_zero(ctx->sqo_mm)) {
+			ret = -EFAULT;
+		} else {
+			cur_mm = ctx->sqo_mm;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+			use_mm(cur_mm);
 #else
-				kthread_use_mm(cur_mm);
+			kthread_use_mm(cur_mm);
 #endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
-				old_fs = force_uaccess_begin();
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+			old_fs = force_uaccess_begin();
 #else
-				old_fs = get_fs();
-				set_fs(USER_DS);
+			old_fs = get_fs();
+			set_fs(USER_DS);
 #endif
-			}
-		}
-
-		if (!ret) {
-			s->has_user = cur_mm != NULL;
-			s->needs_lock = true;
-			do {
-				ret = __io_submit_sqe(ctx, req, s, false);
-				/*
-				 * We can get EAGAIN for polled IO even though
-				 * we're forcing a sync submission from here,
-				 * since we can't wait for request slots on the
-				 * block side.
-				 */
-				if (ret != -EAGAIN)
-					break;
-				cond_resched();
-			} while (1);
-		}
-
-		/* drop submission reference */
-		io_put_req(req);
-
-		if (ret) {
-			io_cqring_add_event(ctx, sqe->user_data, ret);
-			io_put_req(req);
-		}
-
-		/* async context always use a copy of the sqe */
-		kfree(sqe);
-
-		if (!async_list)
-			break;
-		if (!list_empty(&req_list)) {
-			req = list_first_entry(&req_list, struct io_kiocb,
-						list);
-			list_del(&req->list);
-			continue;
-		}
-		if (list_empty(&async_list->list))
-			break;
-
-		req = NULL;
-		spin_lock(&async_list->lock);
-		if (list_empty(&async_list->list)) {
-			spin_unlock(&async_list->lock);
-			break;
-		}
-		list_splice_init(&async_list->list, &req_list);
-		spin_unlock(&async_list->lock);
-
-		req = list_first_entry(&req_list, struct io_kiocb, list);
-		list_del(&req->list);
-	} while (req);
-
-	/*
-	 * Rare case of racing with a submitter. If we find the count has
-	 * dropped to zero AND we have pending work items, then restart
-	 * the processing. This is a tiny race window.
-	 */
-	if (async_list) {
-		ret = atomic_dec_return(&async_list->cnt);
-		while (!ret && !list_empty(&async_list->list)) {
-			spin_lock(&async_list->lock);
-			atomic_inc(&async_list->cnt);
-			list_splice_init(&async_list->list, &req_list);
-			spin_unlock(&async_list->lock);
-
-			if (!list_empty(&req_list)) {
-				req = list_first_entry(&req_list,
-							struct io_kiocb, list);
-				list_del(&req->list);
-				goto restart;
-			}
-			ret = atomic_dec_return(&async_list->cnt);
 		}
 	}
+
+	if (!ret) {
+		s->has_user = cur_mm != NULL;
+		s->needs_lock = true;
+		do {
+			ret = __io_submit_sqe(ctx, req, s, false);
+			/*
+			 * We can get EAGAIN for polled IO even though
+			 * we're forcing a sync submission from here,
+			 * since we can't wait for request slots on the
+			 * block side.
+			 */
+			if (ret != -EAGAIN)
+				break;
+			cond_resched();
+		} while (1);
+	}
+
+	/* drop submission reference */
+	io_put_req(req);
+
+	if (ret) {
+		io_cqring_add_event(ctx, sqe->user_data, ret);
+		io_put_req(req);
+	}
+
+	/* async context always use a copy of the sqe */
+	kfree(sqe);
 
 	if (cur_mm) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
@@ -1750,33 +1605,6 @@ restart:
 #endif
 		mmput(cur_mm);
 	}
-}
-
-/*
- * See if we can piggy back onto previously submitted work, that is still
- * running. We currently only allow this if the new request is sequential
- * to the previous one we punted.
- */
-static bool io_add_to_prev_work(struct async_list *list, struct io_kiocb *req)
-{
-	bool ret = false;
-
-	if (!list)
-		return false;
-	if (!(req->flags & REQ_F_SEQ_PREV))
-		return false;
-	if (!atomic_read(&list->cnt))
-		return false;
-
-	ret = true;
-	spin_lock(&list->lock);
-	list_add_tail(&req->list, &list->list);
-	if (!atomic_read(&list->cnt)) {
-		list_del_init(&req->list);
-		ret = false;
-	}
-	spin_unlock(&list->lock);
-	return ret;
 }
 
 static bool io_op_needs_file(const struct io_uring_sqe *sqe)
@@ -1855,19 +1683,12 @@ static int io_submit_sqe(struct io_ring_ctx *ctx, struct sqe_submit *s,
 
 		sqe_copy = kmalloc(sizeof(*sqe_copy), GFP_KERNEL);
 		if (sqe_copy) {
-			struct async_list *list;
-
 			memcpy(sqe_copy, s->sqe, sizeof(*sqe_copy));
 			s->sqe = sqe_copy;
 
 			memcpy(&req->submit, s, sizeof(*s));
-			list = io_async_list_from_sqe(ctx, s->sqe);
-			if (!io_add_to_prev_work(list, req)) {
-				if (list)
-					atomic_inc(&list->cnt);
-				INIT_WORK(&req->work, io_sq_wq_submit_work);
-				queue_work(ctx->sqo_wq, &req->work);
-			}
+			INIT_WORK(&req->work, io_sq_wq_submit_work);
+			queue_work(ctx->sqo_wq, &req->work);
 
 			/*
 			 * Queued up for async execution, worker will release
