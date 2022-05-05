@@ -706,6 +706,10 @@ static int io_read(struct io_kiocb *req, const struct sqe_submit *s,
 	int ret;
 	ssize_t ret2;
 
+	if (force_nonblock && (s->sqe->flags & IOSQE_FORCE_ASYNC)) {
+		return -EAGAIN;
+	}
+
 	ret = io_prep_rw(req, s, force_nonblock);
 	if (ret)
 		return ret;
