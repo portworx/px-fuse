@@ -1254,6 +1254,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	printk("freezing device queue...\n");
+	blk_mq_freeze_queue(q);
+#endif
 
 	return 0;
 out_disk:
@@ -1435,12 +1439,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		}
 	}
 
-	err = pxd_bus_add_dev(pxd_dev);
-	if (err) {
-		spin_unlock(&ctx->lock);
-		goto out_disk;
-	}
-
 	list_add(&pxd_dev->node, &ctx->list);
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
@@ -1463,13 +1461,23 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
+	int err;
 
-	if (pxd_dev) {
-		add_disk(pxd_dev->disk);
-		return 0;
+	if (!pxd_dev)
+		return -ENOENT;
+
+	add_disk(pxd_dev->disk);
+	err = pxd_bus_add_dev(pxd_dev);
+	if (err) {
+		del_gendisk(pxd_dev->disk);
+		return err;
 	}
 
-	return -ENOENT;
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	printk("unfreezing device queue...\n");
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
+	return 0;
 }
 
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
