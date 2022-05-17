@@ -2171,6 +2171,13 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	struct fuse_conn *fc;
 	int rc;
 
+	if (strcmp(current->comm, PROC_PX_STORAGE) != 0 &&
+		strcmp(current->comm, PROC_PX_CONTROL) != 0 &&
+		strcmp(current->comm, PROC_PX_TOOL) != 0) {
+		printk_ratelimited(KERN_INFO "%s: invalid access comm=%s",
+			__func__, current->comm);
+		return -EACCES;
+	}
 	if (!((uintptr_t)pxd_contexts <= (uintptr_t)file->f_op &&
 		(uintptr_t)file->f_op < (uintptr_t)(pxd_contexts + pxd_num_contexts))) {
 		printk(KERN_ERR "%s: invalid fops struct\n", __func__);
