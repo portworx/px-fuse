@@ -58,6 +58,10 @@
 #define MAX_PXD_BACKING_DEVS (3)  /**< maximum number of replica targets for each user vol */
 #define MAX_PXD_DEVPATH_LEN (127) /**< device path length */
 
+#define PROC_PX_STORAGE		"px-storage"
+#define PROC_PX_CONTROL		"px"
+#define PROC_PX_TOOL		"pxd"
+
 /** fuse opcodes */
 enum pxd_opcode {
 	PXD_INIT = 8192,	/**< send on device open from kernel */
