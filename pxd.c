@@ -1244,7 +1244,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	/// If block size is less than optimal, then decrease max segment size to 
 	/// handle unaligned IOs.
 	/// limit to 256 vectors in iov.
-	segsize = min(add->block_size * 256, SEGMENT_SIZE);
+	segsize = SEGMENT_SIZE;
+	if (add->block_size != PXD_LBS) {
+		segsize >>= 1;
+	}
 
 	blk_queue_max_hw_sectors(q, segsize / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, segsize);
