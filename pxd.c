@@ -1249,8 +1249,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	blk_queue_max_hw_sectors(q, segsize / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, segsize);
 
+	if (add->block_size != PXD_LBS) {
+		// to accomodate unaligned start and end segments
+		blk_queue_max_segments(q, 254);
+	} else {
+		blk_queue_max_segments(q, 256);
+	}
+
 	// set block size based on passed scale factor.
-	blk_queue_max_segments(q, 256);
 	blk_queue_io_min(q, add->block_size);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, add->block_size);
