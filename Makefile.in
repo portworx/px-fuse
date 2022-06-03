@@ -1,7 +1,9 @@
 px-objs = pxd.o dev.o iov_iter.o px_version.o kiolib.o pxd_bio_makereq.o pxd_bio_blkmq.o pxd_fastpath.o
 obj-m = px.o
 
-KBUILD_CPPFLAGS := -D__KERNEL__
+### The below CONFIG_PREEMPT_RT/RT_FULL should come from kernel config during build.
+### I have hardcoded the env for RT KERNEL and explicitly called out related spin_xx apis.
+KBUILD_CPPFLAGS := -D__KERNEL__ -DCONFIG_PREEMPT_RT -DCONFIG_PREEMPT_RT_FULL
 KVERSION=$(shell uname -r)
 
 ifndef KERNELPATH

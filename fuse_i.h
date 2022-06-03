@@ -160,7 +160,7 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 struct ____cacheline_aligned fuse_queue_writer {
 	uint32_t write;         /** cached write index */
 	uint32_t read;		/** cached read index */
-	spinlock_t lock;	/** writer lock */
+	raw_spinlock_t lock;	/** writer lock */
 	uint32_t pad_0;
 	uint64_t sequence;        /** next request sequence number */
 	uint64_t pad[5];
@@ -244,7 +244,7 @@ struct ____cacheline_aligned fuse_conn_queues {
  */
 struct fuse_conn {
 	/** Lock protecting accessess to  members of this structure */
-	spinlock_t lock;
+	raw_spinlock_t lock;
 
 	/** Readers of the connection are waiting on this */
 	wait_queue_head_t waitq;

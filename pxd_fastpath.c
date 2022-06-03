@@ -48,9 +48,9 @@ struct workqueue_struct* fastpath_workqueue(void)
 void pxd_abortfailQ(struct pxd_device *pxd_dev)
 {
 	unsigned long flags;
-	spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+	raw_spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
 	__pxd_abortfailQ(pxd_dev);
-	spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+	raw_spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 }
 
 // background pxd syncer work function
@@ -387,7 +387,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	}
 
 	// failover init
-	spin_lock_init(&fp->fail_lock);
+	raw_spin_lock_init(&fp->fail_lock);
 	fp->active_failover = false;
 	fp->force_fail = false; // debug to force faspath failover
 	INIT_LIST_HEAD(&fp->failQ);

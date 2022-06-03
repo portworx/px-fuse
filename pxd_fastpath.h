@@ -44,7 +44,7 @@ struct pxd_fastpath_extension {
 	atomic_t sync_done;
 
 	// failover work item
-	spinlock_t  fail_lock;
+	raw_spinlock_t  fail_lock;
 	bool active_failover; // is failover active
 	bool force_fail; // debug
 	bool can_failover; // can device failover to userspace on any error

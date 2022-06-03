@@ -140,13 +140,13 @@ static u64 fuse_get_unique(struct fuse_conn *fc)
 	my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 
 	if (unlikely(my_ids->num_free_ids == 0)) {
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 		BUG_ON(fc->num_free_ids == 0);
 		num_alloc = min(fc->num_free_ids, (u32)FUSE_MAX_PER_CPU_IDS / 2);
 		memcpy(my_ids->free_ids, &fc->free_ids[fc->num_free_ids - num_alloc],
 			num_alloc * sizeof(u64));
 		fc->num_free_ids -= num_alloc;
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 
 		my_ids->num_free_ids = num_alloc;
 	}
@@ -174,13 +174,13 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 	if (unlikely(my_ids->num_free_ids == FUSE_MAX_PER_CPU_IDS)) {
 		num_free = FUSE_MAX_PER_CPU_IDS / 2;
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 		BUG_ON(fc->num_free_ids + num_free > FUSE_MAX_REQUEST_IDS);
 		memcpy(&fc->free_ids[fc->num_free_ids],
 			&my_ids->free_ids[my_ids->num_free_ids - num_free],
 			num_free * sizeof(u64));
 		fc->num_free_ids += num_free;
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 
 		my_ids->num_free_ids -= num_free;
 	}
@@ -221,10 +221,10 @@ __releases(fc->lock)
 	bool shouldfree = false;
 
 	if (likely(lock)) {
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 	}
 	list_del(&req->list);
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 	uid = req->in.h.unique;
 	if (req->end)
 		shouldfree = req->end(fc, req, req->out.h.error);
@@ -253,9 +253,9 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	rcu_read_lock();
 
 	if (fc->connected || fc->allow_disconnected) {
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 		fuse_request_send_nowait_locked(fc, req);
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 
 		rcu_read_unlock();
 
@@ -286,9 +286,9 @@ __acquires(fc->lock)
 		if (signal_pending(current))
 			break;
 
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 		schedule();
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 	}
 	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&fc->waitq, &wait);
@@ -417,7 +417,7 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 
 	INIT_LIST_HEAD(&tmp);
 
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	if (!request_pending(fc)) {
 		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
@@ -453,7 +453,7 @@ retry:
 
 	list_cut_position(&tmp, &fc->pending, last);
 	list_splice_tail(&tmp, &fc->processing);
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 
 	entry = first;
 	err = 0;
@@ -486,16 +486,16 @@ retry:
 	/* Check if more requests could be picked up */
 	if (remain && request_pending(fc)) {
 		INIT_LIST_HEAD(&tmp);
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 		if (request_pending(fc)) {
 			goto retry;
 		}
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 	}
 	return copied;
 
  err_unlock:
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 	return err;
 }
 
@@ -777,15 +777,15 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EFAULT;
 	}
 
-	spin_lock(&conn->lock);
+	raw_spin_lock(&conn->lock);
 	req = request_find(conn, read_data.unique);
 	if (!req) {
-		spin_unlock(&conn->lock);
+		raw_spin_unlock(&conn->lock);
 		printk(KERN_ERR "%s: request %lld not found\n", __func__,
 		       read_data.unique);
 		return -ENOENT;
 	}
-	spin_unlock(&conn->lock);
+	raw_spin_unlock(&conn->lock);
 
 	if (req->in.h.opcode != PXD_WRITE &&
 	    req->in.h.opcode != PXD_WRITE_SAME) {
@@ -1053,14 +1053,14 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 		return -ENOENT;
 	}
 
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	if (!fc->connected) {
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 		return err;
 	}
 
 	list_del_init(&req->list);
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 
 	req->out.h = oh;
 
@@ -1110,12 +1110,12 @@ static unsigned fuse_dev_poll(struct file *file, poll_table *wait)
 
 	poll_wait(file, &fc->waitq, wait);
 
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	if (!fc->connected)
 		mask = POLLERR;
 	else if (request_pending(fc))
 		mask |= POLLIN | POLLRDNORM;
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 
 	return mask;
 }
@@ -1134,7 +1134,7 @@ __acquires(fc->lock)
 		req = list_entry(head->next, struct fuse_req, list);
 		req->out.h.error = -ECONNABORTED;
 		request_end(fc, req, false);
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 	}
 }
 
@@ -1162,7 +1162,7 @@ int fuse_conn_init(struct fuse_conn *fc)
 	int cpu;
 
 	memset(fc, 0, sizeof(*fc));
-	spin_lock_init(&fc->lock);
+	raw_spin_lock_init(&fc->lock);
 	atomic_set(&fc->count, 1);
 	init_waitqueue_head(&fc->waitq);
 	INIT_LIST_HEAD(&fc->pending);
@@ -1242,24 +1242,24 @@ struct fuse_conn *fuse_conn_get(struct fuse_conn *fc)
  */
 void fuse_abort_conn(struct fuse_conn *fc)
 {
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	if (fc->connected) {
 		fc->connected = 0;
 		fuse_end_queued_requests(fc);
 		wake_up_all(&fc->waitq);
 		kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 	}
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 }
 
 int fuse_dev_release(struct inode *inode, struct file *file)
 {
 	struct fuse_conn *fc = fuse_get_conn(file);
 	if (fc) {
-		spin_lock(&fc->lock);
+		raw_spin_lock(&fc->lock);
 		fc->connected = 0;
 		fuse_end_queued_requests(fc);
-		spin_unlock(&fc->lock);
+		raw_spin_unlock(&fc->lock);
 		fuse_conn_put(fc);
 	}
 
@@ -1268,11 +1268,11 @@ int fuse_dev_release(struct inode *inode, struct file *file)
 
 void fuse_restart_requests(struct fuse_conn *fc)
 {
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	list_splice_init(&fc->processing, &fc->pending);
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 }
 
 static int fuse_dev_fasync(int fd, struct file *file, int on)

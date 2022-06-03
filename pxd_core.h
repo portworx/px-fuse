@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/miscdevice.h>
+#include <linux/spinlock.h>
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
 #endif
@@ -12,7 +13,7 @@
 #include "fuse_i.h"
 
 struct pxd_context {
-	spinlock_t lock;
+	raw_spinlock_t lock;
 	struct list_head list;
 	size_t num_devices;
 	struct fuse_conn fc;
@@ -36,7 +37,7 @@ struct pxd_device {
 	struct gendisk *disk;
 	struct device dev;
 	size_t size;
-	spinlock_t lock;
+	raw_spinlock_t lock;
 	spinlock_t qlock;
 	struct list_head node;
 	int open_count;

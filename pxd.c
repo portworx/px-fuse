@@ -83,21 +83,21 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 	int err = 0;
 
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	if (!READ_ONCE(fc->connected)) {
 		err = -ENXIO;
 	} else {
-		spin_lock(&pxd_dev->lock);
+		raw_spin_lock(&pxd_dev->lock);
 		if (pxd_dev->removing)
 			err = -EBUSY;
 		else
 			pxd_dev->open_count++;
-		spin_unlock(&pxd_dev->lock);
+		raw_spin_unlock(&pxd_dev->lock);
 
 		if (!err)
 			(void)get_device(&pxd_dev->dev);
 	}
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
 }
@@ -106,10 +106,10 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct pxd_device *pxd_dev = disk->private_data;
 
-	spin_lock(&pxd_dev->lock);
+	raw_spin_lock(&pxd_dev->lock);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	pxd_dev->open_count--;
-	spin_unlock(&pxd_dev->lock);
+	raw_spin_unlock(&pxd_dev->lock);
 
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
 	put_device(&pxd_dev->dev);
@@ -827,11 +827,11 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		// else fail IO to complete.
 		disableFastPath(pxd_dev, true);
 
-		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		raw_spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
 		list_splice(&pxd_dev->fp.failQ, &ios);
 		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
 		pxd_dev->fp.active_failover = false;
-		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+		raw_spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 	}
 
 	// reopen the suspended device
@@ -1282,14 +1282,14 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	struct pxd_device *pxd_dev_itr, *pxd_dev;
 
 	pxd_dev = NULL;
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == dev_id) {
 			pxd_dev = pxd_dev_itr;
 			break;
 		}
 	}
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	return pxd_dev;
 }
@@ -1371,7 +1371,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 
 	pxd_dev->magic = PXD_DEV_MAGIC;
 	pxd_dev->removing = false;
-	spin_lock_init(&pxd_dev->lock);
+	raw_spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
 	new_minor = ida_simple_get(&pxd_minor_ida,
@@ -1422,24 +1422,24 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		goto out_id;
 	}
 
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == add->dev_id) {
 			err = -EEXIST;
-			spin_unlock(&ctx->lock);
+			raw_spin_unlock(&ctx->lock);
 			goto out_disk;
 		}
 	}
 
 	err = pxd_bus_add_dev(pxd_dev);
 	if (err) {
-		spin_unlock(&ctx->lock);
+		raw_spin_unlock(&ctx->lock);
 		goto out_disk;
 	}
 
 	list_add(&pxd_dev->node, &ctx->list);
 	++ctx->num_devices;
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
@@ -1478,10 +1478,10 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int err;
 	struct pxd_device *pxd_dev;
 
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
 		if (pxd_dev->dev_id == remove->dev_id) {
-			spin_lock(&pxd_dev->lock);
+			raw_spin_lock(&pxd_dev->lock);
 			if (!pxd_dev->open_count || remove->force) {
 				list_del(&pxd_dev->node);
 				--ctx->num_devices;
@@ -1490,7 +1490,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 			break;
 		}
 	}
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	if (!found) {
 		err = -ENOENT;
@@ -1499,7 +1499,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	if (pxd_dev->open_count && !remove->force) {
 		err = -EBUSY;
-		spin_unlock(&pxd_dev->lock);
+		raw_spin_unlock(&pxd_dev->lock);
 		goto out;
 	}
 
@@ -1520,7 +1520,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 #endif
 	}
 
-	spin_unlock(&pxd_dev->lock);
+	raw_spin_unlock(&pxd_dev->lock);
 
 	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
@@ -1545,15 +1545,15 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	int err;
 	struct pxd_device *pxd_dev;
 
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
 		if ((pxd_dev->dev_id == update_size->dev_id) && !pxd_dev->removing) {
-			spin_lock(&pxd_dev->lock);
+			raw_spin_lock(&pxd_dev->lock);
 			found = true;
 			break;
 		}
 	}
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	if (!found) {
 		err = -ENOENT;
@@ -1561,7 +1561,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	}
 
 	if (update_size->size < pxd_dev->size) {
-		spin_unlock(&pxd_dev->lock);
+		raw_spin_unlock(&pxd_dev->lock);
 		err = -EINVAL;
 		goto out;
 	}
@@ -1573,7 +1573,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #endif
-	spin_unlock(&pxd_dev->lock);
+	raw_spin_unlock(&pxd_dev->lock);
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
@@ -1598,7 +1598,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	struct pxd_device *pxd_dev;
 	struct pxd_init_in pxd_init;
 
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 
 	pxd_init.num_devices = ctx->num_devices;
 	pxd_init.version = PXD_VERSION;
@@ -1630,7 +1630,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		copied += sizeof(id);
 	}
 
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 
 	printk(KERN_INFO "%s: pxd-control-%d init OK %d devs version %d\n", __func__,
 		ctx->id, pxd_init.num_devices, pxd_init.version);
@@ -1638,7 +1638,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	return copied;
 
 copy_error:
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 	return -EFAULT;
 }
 
@@ -1670,13 +1670,13 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 {
 	struct list_head *cur;
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	list_for_each(cur, &ctx->list) {
 		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
 
 		_pxd_setup(pxd_dev, enable);
 	}
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 }
 
 static struct bus_type pxd_bus_type = {
@@ -1749,12 +1749,12 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	if (!READ_ONCE(ctx->fc.connected)) {
 		cancel_delayed_work_sync(&ctx->abort_work);
 	}
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	pxd_timeout_secs = new_timeout_secs;
 	if (!READ_ONCE(ctx->fc.connected)) {
 		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	}
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	return count;
 }
@@ -1826,9 +1826,9 @@ static ssize_t pxd_congestion_set(struct device *dev, struct device_attribute *a
 		thresh = MAX_CONGESTION_THRESHOLD;
 	}
 
-	spin_lock(&pxd_dev->lock);
+	raw_spin_lock(&pxd_dev->lock);
 	pxd_dev->qdepth = thresh;
-	spin_unlock(&pxd_dev->lock);
+	raw_spin_unlock(&pxd_dev->lock);
 
 	return count;
 }
@@ -2026,13 +2026,13 @@ static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
 		return 0;
 	}
 
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	list_for_each(cur, &ctx->list) {
 		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
 
 		disableFastPath(pxd_dev, true);
 	}
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	return 0;
 }
@@ -2184,10 +2184,10 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	cancel_delayed_work_sync(&ctx->abort_work);
 	fuse_restart_requests(fc);
 
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 	WRITE_ONCE(fc->connected, 1);
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	WRITE_ONCE(fc->allow_disconnected, 1);
 	file->private_data = fc;
@@ -2211,7 +2211,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		return 0;
 	}
 
-	spin_lock(&ctx->lock);
+	raw_spin_lock(&ctx->lock);
 	if (READ_ONCE(ctx->fc.connected) == 0) {
 		pxd_printk("%s: not opened\n", __func__);
 	} else {
@@ -2219,7 +2219,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	}
 
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
-	spin_unlock(&ctx->lock);
+	raw_spin_unlock(&ctx->lock);
 
 	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
 		ctx->open_seq);
@@ -2253,9 +2253,9 @@ static void pxd_abort_context(struct work_struct *work)
 	/* Let other threads see the value of allow_disconnected. */
 	synchronize_rcu();
 
-	spin_lock(&fc->lock);
+	raw_spin_lock(&fc->lock);
 	fuse_end_queued_requests(fc);
-	spin_unlock(&fc->lock);
+	raw_spin_unlock(&fc->lock);
 	pxdctx_set_connected(ctx, false);
 }
 
@@ -2263,7 +2263,7 @@ int pxd_context_init(struct pxd_context *ctx, int i)
 {
 	int err;
 
-	spin_lock_init(&ctx->lock);
+	raw_spin_lock_init(&ctx->lock);
 	ctx->id = i;
 	ctx->open_seq = 0;
 	ctx->fops = fuse_dev_operations;
