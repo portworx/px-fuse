@@ -2164,6 +2164,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	if (strcmp(current->comm, PROC_PX_STORAGE) != 0 &&
 		strcmp(current->comm, PROC_PX_CONTROL) != 0 &&
+		strcmp(current->comm, PROC_PX_UT) != 0 &&
 		strcmp(current->comm, PROC_PX_TOOL) != 0) {
 		printk_ratelimited(KERN_INFO "%s: invalid access comm=%s",
 			__func__, current->comm);
