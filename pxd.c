@@ -849,6 +849,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
 
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	blk_mq_freeze_queue(q);
+#endif
+
 	return 0;
 out_disk:
 	put_disk(disk);
@@ -952,6 +956,9 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_unlock(&ctx->lock);
 
 	add_disk(pxd_dev->disk);
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
 
 	return pxd_dev->minor;
 
