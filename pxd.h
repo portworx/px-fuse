@@ -76,6 +76,7 @@ struct pxd_ioc_register_region {
 #define PROC_PX_STORAGE		"px-storage"
 #define PROC_PX_CONTROL		"px"
 #define PROC_PX_TOOL		"pxd"
+#define PROC_PX_UT			"t"
 
 /** fuse opcodes */
 enum pxd_opcode {
