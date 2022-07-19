@@ -1538,7 +1538,11 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-		blk_set_queue_dying(pxd_dev->disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0) & !defined(PF_USED_ASYNC)
+		blk_mark_disk_dead(pxd_dev->disk);
+#else
+		blk_set_queue_dying(pxd_dev->disk->queue);		
+#endif		
 #endif
 	}
 
