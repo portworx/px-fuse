@@ -831,7 +831,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->major = pxd_dev->major;
 	disk->minors = 256;
 	disk->first_minor = pxd_dev->minor;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0)
+	disk->flags |= GENHD_FL_NO_PART;
+#else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
+#endif
 	disk->fops = &pxd_bd_ops;
 	disk->private_data = pxd_dev;
 	set_capacity(disk, add->size / SECTOR_SIZE);
@@ -972,7 +976,10 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_unlock(&ctx->lock);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+	err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+	if (err) {
+	  goto out_disk;
+	}
 #else
 	add_disk(pxd_dev->disk);
 #endif
