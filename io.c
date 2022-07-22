@@ -2739,19 +2739,36 @@ struct file_operations io_ring_fops = {
 	.mmap = io_uring_mmap,
 };
 
-static struct miscdevice miscdev;
+#define IOR_NAME_MAX (16)
+static struct miscdevice miscdev[PXD_NUM_CONTEXTS];
+static char miscdevname[PXD_NUM_CONTEXTS][IOR_NAME_MAX];
 
-int io_ring_register_device()
+int io_ring_register_device(int i)
 {
-	miscdev.minor = MISC_DYNAMIC_MINOR;
-	miscdev.name = "pxd/pxd-io";
-	miscdev.fops = &io_ring_fops;
-	return misc_register(&miscdev);
+	struct miscdevice *pmisc = &miscdev[i];
+	if (i >= PXD_NUM_CONTEXTS)
+		return -EINVAL;
+
+	pmisc->minor = MISC_DYNAMIC_MINOR;
+	pmisc->name = miscdevname[i];
+	if (i != 0) {
+		sprintf(miscdevname[i], "pxd/pxd-io-%d", i);
+	} else {
+		sprintf(miscdevname[i], "pxd/pxd-io");
+	}
+	pmisc->fops = &io_ring_fops;
+	printk("registering %s\n", pmisc->name);
+	return misc_register(pmisc);
 }
 
-void io_ring_unregister_device()
+void io_ring_unregister_device(int i)
 {
-	misc_deregister(&miscdev);
+	struct miscdevice *pmisc = &miscdev[i];
+	if (i >= PXD_NUM_CONTEXTS)
+		return;
+
+	printk("unregistering %s\n", pmisc->name);
+	misc_deregister(pmisc);
 }
 
 #endif

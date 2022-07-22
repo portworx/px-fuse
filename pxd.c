@@ -2388,10 +2388,15 @@ int pxd_init(void)
 		goto out;
 	}
 
-	err = io_ring_register_device();
-	if (err) {
-		printk(KERN_ERR "pxd: failed to register io dev: %d\n", err);
-		goto out;
+	for (i = 0; i < pxd_num_contexts; ++i) {
+		err = io_ring_register_device(i);
+		if (err) {
+			printk(KERN_ERR "pxd: failed to register io dev: %d\n", err);
+			for (j=0; j < i; j++) {
+				io_ring_unregister_device(j);
+			}
+			goto out;
+		}
 	}
 #endif
 
@@ -2480,7 +2485,9 @@ void pxd_exit(void)
 	int i;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
-	io_ring_unregister_device();
+	for (i = 0; i < pxd_num_contexts; ++i) {
+		io_ring_unregister_device(i);
+	}
 #endif
 
 	fastpath_cleanup();

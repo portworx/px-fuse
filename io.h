@@ -191,7 +191,7 @@ extern struct kmem_cache *req_cachep;
 
 struct io_uring_params;
 
-int io_ring_register_device(void);
-void io_ring_unregister_device(void);
+int io_ring_register_device(int i);
+void io_ring_unregister_device(int i);
 
 #endif //PXFUSE_IO_H
