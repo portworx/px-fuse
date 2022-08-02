@@ -92,7 +92,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 		err = -ENXIO;
 	} else {
 		spin_lock(&pxd_dev->lock);
-		if (pxd_dev->removing)
+		if (READ_ONCE(pxd_dev->removing))
 			err = -EBUSY;
 		else
 			pxd_dev->open_count++;
@@ -1002,7 +1002,8 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
+		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected ||
+			READ_ONCE(pxd_dev->removing))) {
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
@@ -1082,7 +1083,8 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
-	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
+	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)
+		|| READ_ONCE(pxd_dev->removing))
 		return BLK_STS_IOERR;
 
 	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
@@ -1389,7 +1391,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_mem_printk("device %llu allocated at %px\n", add->dev_id, pxd_dev);
 
 	pxd_dev->magic = PXD_DEV_MAGIC;
-	pxd_dev->removing = false;
+	WRITE_ONCE(pxd_dev->removing, 0);
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
@@ -1525,7 +1527,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		goto out;
 	}
 
-	pxd_dev->removing = true;
+	WRITE_ONCE(pxd_dev->removing, 1);
 	wmb();
 	pr_info("removing device %llu", pxd_dev->dev_id);
 
@@ -1538,7 +1540,12 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+	// Not required
+	print(KERN_ERR "%s: SKIP set q dying\n", __func__);
+#else
 		blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
 #endif
 	}
 
@@ -1574,7 +1581,8 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if ((pxd_dev->dev_id == update_size->dev_id) && !pxd_dev->removing) {
+		if ((pxd_dev->dev_id == update_size->dev_id) &&
+			!READ_ONCE(pxd_dev->removing)) {
 			spin_lock(&pxd_dev->lock);
 			found = true;
 			break;
