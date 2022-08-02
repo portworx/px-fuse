@@ -1002,8 +1002,8 @@ static void pxd_rq_fn(struct request_queue *q)
 			break;
 
 		/* Filter out block requests we don't understand. */
-		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected ||
-			READ_ONCE(pxd_dev->removing))) {
+		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected) ||
+			READ_ONCE(pxd_dev->removing)) {
 			__blk_end_request_all(rq, 0);
 			continue;
 		}
