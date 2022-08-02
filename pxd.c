@@ -1542,7 +1542,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 #else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 	// Not required
-	print(KERN_ERR "%s: SKIP set q dying\n", __func__);
+	printk(KERN_ERR "%s: SKIP set q dying\n", __func__);
 #else
 		blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
