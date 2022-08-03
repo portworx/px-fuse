@@ -1554,6 +1554,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 	// Not required
 	pxd_free_disk(pxd_dev);
+	device_unregister(&pxd_dev->dev);
 #else
 	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
