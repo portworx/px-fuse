@@ -824,6 +824,11 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	struct list_head ios;
 	unsigned long flags;
 
+	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) == 0) {
+		return false;
+	}
+
+	pxd_dev->fp.switch_uid = 0;
 	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
 	printk("device %llu completed ioswitch %d with status %d\n",
@@ -843,9 +848,6 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 
 	// reopen the suspended device
 	pxd_request_resume_internal(pxd_dev);
-
-	BUG_ON(atomic_read(&pxd_dev->fp.ioswitch_active) == 0);
-	atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 
 	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
@@ -876,6 +878,8 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 	pxd_req_misc(req, 0, 0, pxd_dev->minor, PXD_FLAGS_SYNC);
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+
+	pxd_dev->fp.switch_uid = req->in.unique;
 	return 0;
 }
 
@@ -1530,7 +1534,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	spin_unlock(&pxd_dev->lock);
 
-	disableFastPath(pxd_dev, false);
+	pxd_fastpath_reset_device(pxd_dev);
 	device_unregister(&pxd_dev->dev);
 
 	module_put(THIS_MODULE);
@@ -1628,8 +1632,10 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.blkmq_device = 1;
 #endif
 		id.suspend = 0;
+		// resume from userspace IO suspends after px restarts
+		pxd_request_resume(pxd_dev);
 		if (pxd_dev->fp.fastpath) id.fastpath = 1;
-		if (atomic_read(&pxd_dev->fp.app_suspend)) id.suspend = 1;
+		BUG_ON(atomic_read(&pxd_dev->fp.app_suspend));
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -2038,7 +2044,7 @@ static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
 	list_for_each(cur, &ctx->list) {
 		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
 
-		disableFastPath(pxd_dev, true);
+		pxd_fastpath_reset_device(pxd_dev);
 	}
 	spin_unlock(&ctx->lock);
 

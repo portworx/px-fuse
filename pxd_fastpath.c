@@ -187,13 +187,13 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 {
 	int rc = 0;
 
-	if (atomic_read(&pxd_dev->fp.app_suspend) == 1) {
+	if (atomic_cmpxchg(&pxd_dev->fp.app_suspend, 0, 1) != 0) {
 		return -EBUSY;
 	}
 
 	rc = pxd_request_suspend_internal(pxd_dev, skip_flush, coe);
-	if (!rc) {
-		atomic_set(&pxd_dev->fp.app_suspend, 1);
+	if (rc) {
+		atomic_set(&pxd_dev->fp.app_suspend, 0);
 	}
 
 	return rc;
@@ -214,13 +214,13 @@ int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 int pxd_request_resume(struct pxd_device *pxd_dev)
 {
 	int rc;
-	if (atomic_read(&pxd_dev->fp.app_suspend) == 0) {
+	if (atomic_cmpxchg(&pxd_dev->fp.app_suspend, 1, 0) != 1) {
 		return -EINVAL;
 	}
 
 	rc = pxd_request_resume_internal(pxd_dev);
-	if (!rc) {
-		atomic_set(&pxd_dev->fp.app_suspend, 0);
+	if (rc) {
+		atomic_set(&pxd_dev->fp.app_suspend, 1);
 	}
 	return rc;
 }
@@ -513,6 +513,49 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 
 out:
 	disableFastPath(pxd_dev, false);
+}
+
+// reset device called during device cleanup actions from any internal state.
+// consider node wipe, device remove while suspended etc.
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
+{
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	struct pxd_context *ctx = pxd_dev->ctx;
+	struct fuse_conn *fc = &ctx->fc;
+	struct fuse_req *req;
+
+	if (!fastpath_enabled(pxd_dev)) {
+		return;
+	}
+
+	disableFastPath(pxd_dev, true);
+	// resume from userspace IO suspends after px restarts
+	pxd_request_resume(pxd_dev);
+
+	// abort any inflight ioswitch
+	if (atomic_read(&fp->ioswitch_active)) {
+		req = request_find(fc, pxd_dev->fp.switch_uid);
+		if (!IS_ERR_OR_NULL(req)) {
+			// overwrite switch request to fail all pending IOs
+			req->in.opcode = PXD_FAILOVER_TO_USERSPACE;
+			request_end(fc, req, -EIO);
+		}
+	}
+
+	// resume all suspended callstacks
+	while (atomic_read(&fp->suspend) > 0) {
+		pxd_resume_io(pxd_dev);
+	}
+
+#ifdef __PXD_BIO_BLKMQ__
+	BUG_ON(atomic_read(&fp->blkmq_frozen) != 0);
+#endif
+	BUG_ON(atomic_read(&fp->suspend) != 0);
+	BUG_ON(atomic_read(&fp->app_suspend) != 0);
+	BUG_ON(atomic_read(&fp->ioswitch_active) != 0);
+	BUG_ON(pxd_dev->fp.switch_uid != 0);
+
+	printk("pxd fastpath device %llu reset complete\n", pxd_dev->dev_id);
 }
 
 /*** debug routines */
