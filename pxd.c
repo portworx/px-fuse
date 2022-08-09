@@ -11,7 +11,7 @@
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0) && !defined(part_stat_lock)
 #include <linux/part_stat.h>
 #endif
 
