@@ -1189,7 +1189,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		return err;
 	  }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
