@@ -1151,9 +1151,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
 #ifdef __PXD_BIO_MAKEREQ__
 		pxd_printk("adding disk as makereq device %llu", pxd_dev->dev_id);
-		disk->fops = get_bd_fpops();
+		/* Create gendisk info. */
+		disk = alloc_disk(1);
+		if (!disk) {
+			return -ENOMEM;
+		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-	  q = blk_alloc_queue(NUMA_NO_NODE);
+	 	q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
@@ -1162,6 +1166,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		q = blk_alloc_queue(GFP_KERNEL);
 #endif
 		if (!q) {
+			put_disk(disk);
 			return -ENOMEM;
 		}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
@@ -1223,6 +1228,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_MAKEREQ__ */
 
+	// Disk and queue initialization
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
 		 PXD_DEV"%llu", pxd_dev->dev_id);
 	disk->major = pxd_dev->major;
@@ -1230,7 +1236,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->first_minor = pxd_dev->minor;
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
 #ifdef __PXD_BIO_MAKEREQ__
-		pxd_printk("adding disk as makereq device %llu", pxd_dev->dev_id);
 		disk->fops = get_bd_fpops();
 #else
 		disk->fops = &pxd_bd_ops;
