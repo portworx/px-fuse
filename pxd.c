@@ -1229,7 +1229,12 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->minors = 256;
 	disk->first_minor = pxd_dev->minor;
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
-	disk->fops = &pxd_bd_ops;
+#ifdef __PXD_BIO_MAKEREQ__
+		pxd_printk("adding disk as makereq device %llu", pxd_dev->dev_id);
+		disk->fops = get_bd_fpops();
+#else
+		disk->fops = &pxd_bd_ops;
+#endif
 	disk->private_data = pxd_dev;
 	set_capacity(disk, add->size / SECTOR_SIZE);
 
@@ -1287,9 +1292,13 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		del_gendisk(disk);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-		blk_cleanup_disk(disk);
+		if (disk->queue) {
+			blk_cleanup_disk(disk);
+		}
 #else
-		blk_cleanup_queue(disk->queue);
+		if (disk->queue) {
+			blk_cleanup_queue(disk->queue);
+		}
 		put_disk(disk);
 #endif
 
@@ -1484,7 +1493,10 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 
 	if (pxd_dev) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-		device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+		int rc = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+		if (rc) {
+			return rc;
+		}
 #else
 		add_disk(pxd_dev->disk);
 #endif
