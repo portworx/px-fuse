@@ -15,6 +15,14 @@
 #include <linux/part_stat.h>
 #endif
 
+#ifndef READ_ONCE
+#define READ_ONCE(x) x
+#endif
+
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, val) x = val
+#endif
+
 #define CREATE_TRACE_POINTS
 #undef TRACE_INCLUDE_PATH
 #define TRACE_INCLUDE_PATH .
@@ -1194,7 +1202,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		return err;
 	  }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
@@ -1234,7 +1242,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->major = pxd_dev->major;
 	disk->minors = 256;
 	disk->first_minor = pxd_dev->minor;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0)
+	disk->flags |= GENHD_FL_NO_PART;
+#else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
+#endif
+
 #ifdef __PXD_BIO_MAKEREQ__
 		disk->fops = get_bd_fpops();
 #else
