@@ -337,5 +337,9 @@ void fuse_convert_zero_writes(struct fuse_req *req);
 void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 
 struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique);
+
+// request lookups.
+struct fuse_req *request_find(struct fuse_conn *fc, u64 unique);
+void request_end(struct fuse_conn *fc, struct fuse_req *req, int status);
 #endif
 #endif /* _FS_FUSE_I_H */

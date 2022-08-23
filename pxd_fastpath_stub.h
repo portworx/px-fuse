@@ -84,6 +84,9 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	return -EINVAL;
 }
 
+static inline
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev) {}
+
 /// debug routines
 static inline
 int pxd_debug_switch_fastpath(struct pxd_device *pxd_dev) { return 0; }
