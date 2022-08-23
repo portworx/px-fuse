@@ -1511,11 +1511,13 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
 	if (pxd_dev) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 		int rc = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 		if (rc) {
 			return rc;
 		}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+		device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #else
 		add_disk(pxd_dev->disk);
 #endif
