@@ -1565,6 +1565,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
+		blk_mq_freeze_queue(pxd_dev->disk->queue);
 		blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
 	}
@@ -1575,6 +1576,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	if (cleanup) {
 		pxd_fastpath_reset_device(pxd_dev);
+		pxd_free_disk(pxd_dev);
 		device_unregister(&pxd_dev->dev);
 
 		module_put(THIS_MODULE);
