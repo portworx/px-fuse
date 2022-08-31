@@ -63,6 +63,11 @@ extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
+static DEFINE_MUTEX(pxd_ctl_mutex);
+
+#define MINOR_GET()  ida_simple_get(&pxd_minor_ida, 1, 1 << MINORBITS, GFP_KERNEL)
+#define MINOR_PUT(m) ida_simple_remove(&pxd_minor_ida, m)
+
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -88,9 +93,20 @@ struct pxd_context* find_context(unsigned ctx)
 
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
-	struct pxd_device *pxd_dev = bdev->bd_disk->private_data;
-	struct fuse_conn *fc = &pxd_dev->ctx->fc;
+	struct pxd_device *pxd_dev;
+	struct fuse_conn *fc;
 	int err = 0;
+
+	err = mutex_lock_killable(&pxd_ctl_mutex);
+	if (err)
+		return err;
+
+	pxd_dev = bdev->bd_disk->private_data;
+	if (!pxd_dev) {
+		mutex_unlock(&pxd_ctl_mutex);
+		return -ENXIO;
+	}
+	fc = &pxd_dev->ctx->fc;
 
 	spin_lock(&fc->lock);
 	if (!READ_ONCE(fc->connected)) {
@@ -107,6 +123,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 			(void)get_device(&pxd_dev->dev);
 	}
 	spin_unlock(&fc->lock);
+	mutex_unlock(&pxd_ctl_mutex);
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
 }
@@ -114,6 +131,9 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 static void pxd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct pxd_device *pxd_dev = disk->private_data;
+
+	if (!pxd_dev)
+		return;
 
 	spin_lock(&pxd_dev->lock);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
@@ -1267,16 +1287,27 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 		return;
 
 	pxd_fastpath_cleanup(pxd_dev);
-	pxd_dev->disk = NULL;
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
-		if (disk->queue)
+
+	    disk->private_data = NULL;
+	    pxd_dev->disk = NULL;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+		if (disk->queue) {
+			blk_cleanup_disk(disk);
+		}
+#else
+		if (disk->queue) {
 			blk_cleanup_queue(disk->queue);
+		}
+		put_disk(disk);
+#endif
+	}
+
 #if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 #endif
-	}
-	put_disk(disk);
 }
 
 struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
@@ -1565,8 +1596,12 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-		blk_mq_freeze_queue(pxd_dev->disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+		// Do not mark queue dead, del_gendisk will try to
+		// submit all outstanding IOs on this device
+#else
 		blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
 #endif
 	}
 
@@ -1575,9 +1610,13 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&pxd_dev->lock);
 
 	if (cleanup) {
+
 		pxd_fastpath_reset_device(pxd_dev);
+
+		mutex_lock(&pxd_ctl_mutex);
 		pxd_free_disk(pxd_dev);
 		device_unregister(&pxd_dev->dev);
+		mutex_unlock(&pxd_ctl_mutex);
 
 		module_put(THIS_MODULE);
 	}
