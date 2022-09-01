@@ -94,7 +94,6 @@ struct pxd_context* find_context(unsigned ctx)
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev;
-	struct fuse_conn *fc;
 	int err = 0;
 
 	err = mutex_lock_killable(&pxd_ctl_mutex);
@@ -106,23 +105,20 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 		mutex_unlock(&pxd_ctl_mutex);
 		return -ENXIO;
 	}
-	fc = &pxd_dev->ctx->fc;
 
-	spin_lock(&fc->lock);
-	if (!READ_ONCE(fc->connected)) {
+	spin_lock(&pxd_dev->lock);
+	if (!pxd_dev->connected) {
 		err = -ENXIO;
 	} else {
-		spin_lock(&pxd_dev->lock);
 		if (pxd_dev->removing)
 			err = -EBUSY;
 		else
 			pxd_dev->open_count++;
-		spin_unlock(&pxd_dev->lock);
 
 		if (!err)
 			(void)get_device(&pxd_dev->dev);
 	}
-	spin_unlock(&fc->lock);
+	spin_unlock(&pxd_dev->lock);
 	mutex_unlock(&pxd_ctl_mutex);
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
@@ -130,10 +126,15 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 
 static void pxd_release(struct gendisk *disk, fmode_t mode)
 {
-	struct pxd_device *pxd_dev = disk->private_data;
+	struct pxd_device *pxd_dev;
 
-	if (!pxd_dev)
+	mutex_lock(&pxd_ctl_mutex);
+
+	pxd_dev = disk->private_data;
+	if (!pxd_dev) {
+		mutex_unlock(&pxd_ctl_mutex);
 		return;
+	}
 
 	spin_lock(&pxd_dev->lock);
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
@@ -142,7 +143,10 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
 	put_device(&pxd_dev->dev);
+
+	mutex_unlock(&pxd_ctl_mutex);
 }
+
 
 static long pxd_ioctl_dump_fc_info(void)
 {
@@ -1755,11 +1759,15 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 {
 	if (!enable) {
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
+		spin_lock(&pxd_dev->lock);
 		pxd_dev->connected = false;
+		spin_unlock(&pxd_dev->lock);
 		pxd_fastpath_reset_device(pxd_dev);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
+		spin_lock(&pxd_dev->lock);
 		pxd_dev->connected = true;
+		spin_unlock(&pxd_dev->lock);
 	}
 }
 
