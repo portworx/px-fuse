@@ -1294,7 +1294,6 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk->flags & GENHD_FL_UP) {
 		del_gendisk(disk);
 
-	    disk->private_data = NULL;
 	    pxd_dev->disk = NULL;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
