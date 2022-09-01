@@ -354,6 +354,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 			fp->file[i] = NULL;
 		}
 	}
+	fp->nfd = 0;
 	pxd_dev->fp.fastpath = false;
 	pxd_dev->fp.can_failover = false;
 
