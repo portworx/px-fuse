@@ -65,9 +65,6 @@ static DEFINE_IDA(pxd_minor_ida);
 
 static DEFINE_MUTEX(pxd_ctl_mutex);
 
-#define MINOR_GET()  ida_simple_get(&pxd_minor_ida, 1, 1 << MINORBITS, GFP_KERNEL)
-#define MINOR_PUT(m) ida_simple_remove(&pxd_minor_ida, m)
-
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -1591,33 +1588,33 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	wmb();
 	pr_info("removing device %llu", pxd_dev->dev_id);
 
-	/* Make sure the req_fn isn't called anymore even if the device hangs around */
-	if (pxd_dev->exported && pxd_dev->disk && pxd_dev->disk->queue){
-#ifndef __PX_BLKMQ__
-		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
-
-		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
-
-		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
-#else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-		// Do not mark queue dead, del_gendisk will try to
-		// submit all outstanding IOs on this device
-#else
-		blk_set_queue_dying(pxd_dev->disk->queue);
-#endif
-#endif
-	}
-
 	cleanup = pxd_dev->exported;
 	pxd_dev->exported = false;
 	spin_unlock(&pxd_dev->lock);
 
+	/// perform all below actions on the kernel object if device got exported.
 	if (cleanup) {
-
 		pxd_fastpath_reset_device(pxd_dev);
 
 		mutex_lock(&pxd_ctl_mutex);
+		/* Make sure the req_fn isn't called anymore even if the device hangs around */
+		if (pxd_dev->disk && pxd_dev->disk->queue){
+#ifndef __PX_BLKMQ__
+			mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
+
+			QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+
+			mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+			// Do not mark queue dead, del_gendisk will try to
+			// submit all outstanding IOs on this device
+#else
+			blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
+#endif
+		}
+
 		pxd_free_disk(pxd_dev);
 		device_unregister(&pxd_dev->dev);
 		mutex_unlock(&pxd_ctl_mutex);
