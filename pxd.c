@@ -133,6 +133,7 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	pxd_dev = disk->private_data;
 	if (!pxd_dev) {
 		mutex_unlock(&pxd_ctl_mutex);
+		printk(KERN_WARNING"pxd empty device context\n");
 		return;
 	}
 
