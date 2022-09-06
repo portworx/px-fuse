@@ -2,7 +2,16 @@
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/delay.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
+#include <linux/kdev_t.h>
+#include <linux/uuid.h>
+#include <linux/blk_types.h>
+#include <linux/device.h>
+#include <linux/xarray.h>
+#include <linux/printk.h>
+#else
 #include <linux/genhd.h>
+#endif
 #include <linux/workqueue.h>
 
 #include "pxd_bio.h"
