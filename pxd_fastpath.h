@@ -50,6 +50,8 @@ struct pxd_fastpath_extension {
 	bool can_failover; // can device failover to userspace on any error
 	struct list_head failQ; // protected by fail_lock
 
+	uint64_t switch_uid;
+
 	char device_path[MAX_PXD_BACKING_DEVS][MAX_PXD_DEVPATH_LEN+1];
 	atomic_t nio_discard;
 	atomic_t nio_preflush;

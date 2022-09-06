@@ -46,12 +46,15 @@ struct pxd_device {
 	bool connected;
 	mode_t mode;
 	bool fastpath; // this is persistent, how the block device registered with kernel
+	unsigned int queue_depth; // sysfs attribute bdev io queue depth
+	unsigned int discard_size;
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
 	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
-	unsigned int qdepth;
+	unsigned int qdepth; // congestion control
 	atomic_t congested;
+	bool exported; //  [pxd_dev->lock protected] whether pxd_device exported to kernel
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
