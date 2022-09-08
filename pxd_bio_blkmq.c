@@ -177,7 +177,9 @@ void pxd_resume_io(struct pxd_device *pxd_dev) {
         wakeup = (curr == 0);
         if (wakeup) {
                 if (atomic_read(&fp->blkmq_frozen) && pxd_dev->disk && pxd_dev->disk->queue) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
                         blk_mq_unquiesce_queue(pxd_dev->disk->queue);
+#endif
                         blk_mq_unfreeze_queue(pxd_dev->disk->queue);
                         atomic_set(&fp->blkmq_frozen, 0);
                 }
@@ -347,7 +349,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
 
         if (!fproot->bio) { // can only be flush request
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
-	clone_bio = bio_alloc_bioset(NULL, 0, 0, GFP_KERNEL, get_fpbioset());			
+	clone_bio = bio_alloc_bioset(NULL, 0, 0, GFP_KERNEL, get_fpbioset());
 #else
 	clone_bio = bio_alloc_bioset(GFP_KERNEL, 0, get_fpbioset());
 #endif
@@ -604,7 +606,7 @@ static void fp_handle_specialops(struct work_struct *work) {
         if (blk_queue_discard(q)) { // discard supported
 	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0)	  
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0)
 	  } else if (bdev_write_same(bdev)) {
 	        struct page *pg = ZERO_PAGE(0); // global shared zero page
 
