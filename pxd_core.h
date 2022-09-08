@@ -82,8 +82,8 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 #define pxd_io_printk(args...)
 //#define pxd_io_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
 //
-#define pxd_mem_printk(args...)
-//#define pxd_mem_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
+//#define pxd_mem_printk(args...)
+#define pxd_mem_printk(args, ...) printk(KERN_ERR args, ##__VA_ARGS__)
 
 #ifndef SECTOR_SIZE
 #define SECTOR_SIZE 512

@@ -101,12 +101,15 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 
 	pxd_dev = bdev->bd_disk->private_data;
 	if (!pxd_dev) {
+		printk(KERN_ERR "%s: open failed, invalid dev\n", __func__);
 		mutex_unlock(&pxd_ctl_mutex);
 		return -ENXIO;
 	}
 
 	spin_lock(&pxd_dev->lock);
 	if (!pxd_dev->connected) {
+		pxd_mem_printk("open failed dev %llu pxd device %px open_count: %d removing: %d magic: %x conn: %d mode: %#x\n",
+			pxd_dev->dev_id, pxd_dev, pxd_dev->open_count, pxd_dev->removing, pxd_dev->magic, pxd_dev->connected, pxd_dev->mode);
 		err = -ENXIO;
 	} else {
 		if (pxd_dev->removing)
@@ -152,6 +155,7 @@ static long pxd_ioctl_dump_fc_info(void)
 {
 	int i;
 	struct pxd_context *ctx;
+	struct pxd_device *pxd_dev;
 
 	for (i = 0; i < pxd_num_contexts; ++i) {
 		ctx = &pxd_contexts[i];
@@ -161,6 +165,13 @@ static long pxd_ioctl_dump_fc_info(void)
 		printk(KERN_INFO "%s: pxd_ctx: %s ndevices: %lu",
 			__func__, ctx->name, ctx->num_devices);
 		printk(KERN_INFO "\tFC: connected: %d", READ_ONCE(ctx->fc.connected));
+		printk(KERN_INFO "%s: dumping fc devices\n", __func__);
+		spin_lock(&ctx->lock);
+		list_for_each_entry(pxd_dev, &ctx->list, node) {
+			printk(KERN_INFO "dev %llu pxd device %px open_count: %d removing: %d magic: %x conn: %d mode: %#x\n",
+				pxd_dev->dev_id, pxd_dev, pxd_dev->open_count, pxd_dev->removing, pxd_dev->magic, pxd_dev->connected, pxd_dev->mode);
+		}
+		spin_unlock(&ctx->lock);
 	}
 	return 0;
 }
@@ -1545,6 +1556,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 		blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
+	pxd_mem_printk("device %llu exported at %px\n", dev_id, pxd_dev);
 		return 0;
 	}
 
