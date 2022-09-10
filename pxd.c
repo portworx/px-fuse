@@ -67,6 +67,34 @@ static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 static DEFINE_MUTEX(pxd_ctl_mutex);
 
+#define ID_WINDOW (256)
+static atomic_t curr_pos = ATOMIC_INIT(0);
+
+#if 1
+static inline
+int __minor_get(void)
+{
+    int pos;
+
+    do {
+        pos = atomic_add_return(1, &curr_pos);
+        if (pos > ID_WINDOW) {
+            atomic_cmpxchg(&curr_pos, pos, 0);
+        }
+    } while (pos > ID_WINDOW);
+
+    return ida_simple_get(&pxd_minor_ida, pos, 1 << MINORBITS, GFP_KERNEL);
+}
+
+#define MINOR_GET() __minor_get()
+#define MINOR_PUT(m) ida_simple_remove(&pxd_minor_ida, m)
+#else
+
+#define MINOR_GET()  ida_simple_get(&pxd_minor_ida, 1, 1 << MINORBITS, GFP_KERNEL)
+#define MINOR_PUT(m) ida_simple_remove(&pxd_minor_ida, m)
+#endif
+
+
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -95,13 +123,18 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	struct pxd_device *pxd_dev;
 	int err = 0;
 
+printk(KERN_ERR"%s enter\n", __func__);
+
 	err = mutex_lock_killable(&pxd_ctl_mutex);
-	if (err)
+	if (err) {
+		printk(KERN_ERR"%s mutex fail err = %d\n", __func__, err);
 		return err;
+	}
 
 	pxd_dev = bdev->bd_disk->private_data;
 	if (!pxd_dev) {
 		mutex_unlock(&pxd_ctl_mutex);
+		printk(KERN_ERR"%s fail nodev\n", __func__);
 		return -ENXIO;
 	}
 
@@ -121,6 +154,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	mutex_unlock(&pxd_ctl_mutex);
 
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
+	printk(KERN_ERR"%s finish with err %d\n",  __func__, err);
 	return err;
 }
 
@@ -1159,16 +1193,13 @@ static const struct blk_mq_ops pxd_mq_ops = {
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_BLKMQ__ */
 
-static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add)
+static int pxd_init_disk(struct pxd_device *pxd_dev)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
 #ifdef __PX_BLKMQ__
 	int err = 0;
 #endif
-
-	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH)
-		return -EINVAL;
 
 	// only fastpath uses direct block io process bypassing request queuing
 #ifndef __PX_FASTPATH__
@@ -1212,7 +1243,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
-	  pxd_dev->tag_set.queue_depth = add->queue_depth;
+	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 	  pxd_dev->tag_set.nr_hw_queues = 8;
@@ -1276,7 +1307,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		disk->fops = &pxd_bd_ops;
 #endif
 	disk->private_data = pxd_dev;
-	set_capacity(disk, add->size / SECTOR_SIZE);
+	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
@@ -1291,10 +1322,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
-	if (add->discard_size < SECTOR_SIZE)
-		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
-	else
-		q->limits.max_discard_sectors = add->discard_size / SECTOR_SIZE;
+	q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
@@ -1311,10 +1339,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
-
-#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-	blk_mq_freeze_queue(q);
-#endif
 
 	return 0;
 }
@@ -1392,10 +1416,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	dev_t kdev;
 #endif
 
-	err = -ENODEV;
-	if (!try_module_get(THIS_MODULE))
-		goto out;
-
 	err = -ENOMEM;
 	if (ctx->num_devices >= PXD_MAX_DEVICES) {
 		printk(KERN_ERR "Too many devices attached..\n");
@@ -1405,13 +1425,12 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	// if device already exists, then return it
 	pxd_dev = find_pxd_device(ctx, add->dev_id);
 	if (pxd_dev) {
-		module_put(THIS_MODULE);
-
 		if (add->enable_fp && add->paths.count > 0) {
 			__pxd_update_path(pxd_dev, &add->paths);
 		} else {
 			disableFastPath(pxd_dev, false);
 		}
+		printk(KERN_ERR"%s dev %llu good case - readd\n", __func__, pxd_dev->dev_id);
 		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 	}
 
@@ -1445,9 +1464,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
-	new_minor = ida_simple_get(&pxd_minor_ida,
-					1, 1 << MINORBITS,
-					GFP_KERNEL);
+	new_minor = MINOR_GET();
 	if (new_minor < 0) {
 		err = new_minor;
 		goto out_module;
@@ -1461,6 +1478,18 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->fastpath = add->enable_fp;
+	pxd_dev->exported = false;
+
+    pxd_dev->queue_depth = add->queue_depth;
+    if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH) {
+        err = -EINVAL;
+        goto out_module;
+    }
+
+    if (add->discard_size < SECTOR_SIZE)
+        pxd_dev->discard_size = SEGMENT_SIZE / SECTOR_SIZE;
+    else
+        pxd_dev->discard_size = add->discard_size / SECTOR_SIZE;
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -1487,12 +1516,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		}
 	}
 
-	err = pxd_init_disk(pxd_dev, add);
-	if (err) {
-		pxd_fastpath_cleanup(pxd_dev);
-		goto out_id;
-	}
-
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == add->dev_id) {
@@ -1500,12 +1523,6 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 			spin_unlock(&ctx->lock);
 			goto out_disk;
 		}
-	}
-
-	err = pxd_bus_add_dev(pxd_dev);
-	if (err) {
-		spin_unlock(&ctx->lock);
-		goto out_disk;
 	}
 
 	list_add(&pxd_dev->node, &ctx->list);
@@ -1517,12 +1534,12 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 out_disk:
 	pxd_free_disk(pxd_dev);
 out_id:
-	ida_simple_remove(&pxd_minor_ida, new_minor);
+	MINOR_PUT(new_minor);
 out_module:
+	printk(KERN_ERR"%s dev %llu fail case - err %d\n", __func__, pxd_dev ? pxd_dev->dev_id: 0 , err);
 	if (pxd_dev)
 		kfree(pxd_dev);
-	module_put(THIS_MODULE);
-out:
+
 	return err;
 }
 
@@ -1530,25 +1547,76 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
+	int err = 0;
 
 	if (pxd_dev) {
+        spin_lock(&pxd_dev->lock);
+        if (pxd_dev->exported) {
+            spin_unlock(&pxd_dev->lock);
+	printk(KERN_ERR"%s dev %llu bad case - reexport \n", __func__, pxd_dev->dev_id);
+            return 0;
+        }
+
+        if (!try_module_get(THIS_MODULE)) {
+            spin_unlock(&pxd_dev->lock);
+            err = -ENODEV;
+            goto cleanup;
+        }
+
+        err = pxd_init_disk(pxd_dev);
+        if (err) {
+            spin_unlock(&pxd_dev->lock);
+            module_put(THIS_MODULE);
+            goto cleanup;
+        }
+
+        err = pxd_bus_add_dev(pxd_dev);
+        if (err) {
+            pxd_free_disk(pxd_dev);
+            spin_unlock(&pxd_dev->lock);
+            module_put(THIS_MODULE);
+            goto cleanup;
+        }
+
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-		int rc = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
-		if (rc) {
-			return rc;
+		err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+		if (err) {
+			device_unregister(&pxd_dev->dev);
+			pxd_free_disk(pxd_dev);
+			spin_unlock(&pxd_dev->lock);
+			module_put(THIS_MODULE);
+			goto cleanup;
 		}
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
 		device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #else
 		add_disk(pxd_dev->disk);
 #endif
-#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-		blk_mq_unfreeze_queue(pxd_dev->disk->queue);
-#endif
+		pxd_dev->exported = true;
+		spin_unlock(&pxd_dev->lock);
+
+		printk(KERN_ERR"%s dev %llu good case - reexport \n", __func__, pxd_dev->dev_id);
+
 		return 0;
 	}
 
 	return -ENOENT;
+
+cleanup:
+	printk(KERN_ERR"%s dev %llu bad case - failed %d \n", __func__, pxd_dev->dev_id, err);
+
+    spin_lock(&ctx->lock);
+    spin_lock(&pxd_dev->lock);
+    list_del(&pxd_dev->node);
+    --ctx->num_devices;
+    MINOR_PUT(pxd_dev->minor);
+    spin_unlock(&pxd_dev->lock);
+    spin_unlock(&ctx->lock);
+
+    kfree(pxd_dev);
+
+    return err;
 }
 
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
@@ -1557,6 +1625,8 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	int found = false;
 	int err;
 	struct pxd_device *pxd_dev;
+	bool cleanup;
+
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -1587,6 +1657,15 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	wmb();
 	pr_info("removing device %llu", pxd_dev->dev_id);
 
+	cleanup = pxd_dev->exported;
+	pxd_dev->exported = false;
+	spin_unlock(&pxd_dev->lock);
+
+	if (cleanup) {
+		printk(KERN_ERR"%s dev %llu good case - perfroming cleanup \n", __func__, pxd_dev->dev_id);
+		pxd_fastpath_cleanup(pxd_dev);
+
+	mutex_lock(&pxd_ctl_mutex);
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
 #ifndef __PX_BLKMQ__
@@ -1605,17 +1684,14 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 #endif
 	}
 
-	spin_unlock(&pxd_dev->lock);
-
-	mutex_lock(&pxd_ctl_mutex);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
 	pxd_free_disk(pxd_dev);
 #endif
-	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
 	mutex_unlock(&pxd_ctl_mutex);
 
 	module_put(THIS_MODULE);
+	}
 
 	return 0;
 out:
@@ -2208,7 +2284,7 @@ static void pxd_dev_device_release(struct device *dev)
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	pxd_free_disk(pxd_dev);
-	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
+	MINOR_PUT(pxd_dev->minor);
 	pxd_mem_printk("freeing dev %llu pxd device %px\n", pxd_dev->dev_id, pxd_dev);
 	pxd_dev->magic = PXD_POISON;
 	kfree(pxd_dev);

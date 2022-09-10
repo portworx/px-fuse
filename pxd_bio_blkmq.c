@@ -149,7 +149,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
                 // it is possible to call suspend during initial creation with
                 // no disk, ignore as in any case, no IO can flow through.
                 if (pxd_dev->disk && pxd_dev->disk->queue) {
-                        blk_mq_freeze_queue(pxd_dev->disk->queue);
+                        blk_freeze_queue_start(pxd_dev->disk->queue);
                         blk_mq_quiesce_queue(pxd_dev->disk->queue);
                         atomic_set(&fp->blkmq_frozen, 1);
                 }
