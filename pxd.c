@@ -1441,7 +1441,13 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
 
-	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
+	add_disk(pxd_dev->disk);
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
+
+	return pxd_dev->minor;
+	//return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
 out_disk:
 	pxd_free_disk(pxd_dev);
@@ -1457,6 +1463,7 @@ out:
 
 ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
+#if 0
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
@@ -1467,7 +1474,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 #endif
 		return 0;
 	}
-
+#endif
 	return -ENOENT;
 }
 
@@ -1577,7 +1584,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
 	revalidate_disk_size(pxd_dev->disk, true);
 #else
 	err = revalidate_disk(pxd_dev->disk);
