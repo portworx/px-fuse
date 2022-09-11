@@ -1389,6 +1389,7 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
+#if 0
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 typedef struct block_device* (*lookup_bdev_wrapper_fn)(char *dev, int mask);
 // This hack is needed because in ubuntu lookup_bdev is defined with 2 arg.
@@ -1400,6 +1401,7 @@ typedef struct block_device* (*lookup_bdev_wrapper_fn)(char *dev, int mask);
 // This satisfies the compilation.
 static lookup_bdev_wrapper_fn lookup_bdev_wrapper = (lookup_bdev_wrapper_fn)lookup_bdev;
 #endif
+#endif
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
@@ -1409,11 +1411,14 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
+
+#if 0
 	char devfile[128];
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	struct block_device *bdev;
 #else
 	dev_t kdev;
+#endif
 #endif
 
 	err = -ENOMEM;
@@ -1434,6 +1439,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 	}
 
+#if 0
 	/* pre-check to detect if prior instance is removed */
 	sprintf(devfile, "/dev/pxd/pxd%llu", add->dev_id);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
@@ -1451,6 +1457,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		err = -EEXIST;
 		goto out_module;
 	}
+#endif
 #endif
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
@@ -1553,7 +1560,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
         spin_lock(&pxd_dev->lock);
         if (pxd_dev->exported) {
             spin_unlock(&pxd_dev->lock);
-	printk(KERN_ERR"%s dev %llu bad case - reexport \n", __func__, pxd_dev->dev_id);
+			printk(KERN_ERR"%s dev %llu bad case - reexport \n", __func__, pxd_dev->dev_id);
             return 0;
         }
 
@@ -1565,6 +1572,14 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 
         err = pxd_init_disk(pxd_dev);
         if (err) {
+            spin_unlock(&pxd_dev->lock);
+            module_put(THIS_MODULE);
+            goto cleanup;
+        }
+
+        err = pxd_bus_add_dev(pxd_dev);
+        if (err) {
+            pxd_free_disk(pxd_dev);
             spin_unlock(&pxd_dev->lock);
             module_put(THIS_MODULE);
             goto cleanup;
@@ -1585,19 +1600,10 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		add_disk(pxd_dev->disk);
 #endif
 
-        err = pxd_bus_add_dev(pxd_dev);
-        if (err) {
-            pxd_free_disk(pxd_dev);
-            spin_unlock(&pxd_dev->lock);
-            module_put(THIS_MODULE);
-            goto cleanup;
-        }
-
-
 		pxd_dev->exported = true;
 		spin_unlock(&pxd_dev->lock);
 
-		printk(KERN_ERR"%s dev %llu good case - reexport \n", __func__, pxd_dev->dev_id);
+		printk(KERN_ERR"%s dev %llu good case - export \n", __func__, pxd_dev->dev_id);
 
 		return 0;
 	}
