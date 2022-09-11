@@ -1570,15 +1570,6 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
             goto cleanup;
         }
 
-        err = pxd_bus_add_dev(pxd_dev);
-        if (err) {
-            pxd_free_disk(pxd_dev);
-            spin_unlock(&pxd_dev->lock);
-            module_put(THIS_MODULE);
-            goto cleanup;
-        }
-
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 		err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 		if (err) {
@@ -1593,6 +1584,16 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 #else
 		add_disk(pxd_dev->disk);
 #endif
+
+        err = pxd_bus_add_dev(pxd_dev);
+        if (err) {
+            pxd_free_disk(pxd_dev);
+            spin_unlock(&pxd_dev->lock);
+            module_put(THIS_MODULE);
+            goto cleanup;
+        }
+
+
 		pxd_dev->exported = true;
 		spin_unlock(&pxd_dev->lock);
 
