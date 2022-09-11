@@ -225,7 +225,8 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 static inline
 int pxd_supported_features(void)
 {
-    int features = PXD_FEATURE_ATTACH_OPTIMIZED;
+    //int features = PXD_FEATURE_ATTACH_OPTIMIZED;
+    int features = 0;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif
