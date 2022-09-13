@@ -1261,7 +1261,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
 		 PXD_DEV"%llu", pxd_dev->dev_id);
 	disk->major = pxd_dev->major;
-	disk->minors = 256;
+	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0)
