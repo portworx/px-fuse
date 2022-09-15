@@ -158,8 +158,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
                 // it is possible to call suspend during initial creation with
                 // no disk, ignore as in any case, no IO can flow through.
                 if (pxd_dev->disk && pxd_dev->disk->queue) {
-                        blk_mq_freeze_queue(pxd_dev->disk->queue);
-                        blk_mq_quiesce_queue(pxd_dev->disk->queue);
+                        blk_freeze_queue_start(pxd_dev->disk->queue);
                         atomic_set(&fp->blkmq_frozen, 1);
                 }
                 printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
@@ -176,11 +175,10 @@ void pxd_resume_io(struct pxd_device *pxd_dev) {
 
         wakeup = (curr == 0);
         if (wakeup) {
-                if (atomic_read(&fp->blkmq_frozen) && pxd_dev->disk && pxd_dev->disk->queue) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
-                        blk_mq_unquiesce_queue(pxd_dev->disk->queue);
-#endif
-                        blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+                if (atomic_read(&fp->blkmq_frozen)) {
+                        if (pxd_dev->disk && pxd_dev->disk->queue) {
+                                blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+                        }
                         atomic_set(&fp->blkmq_frozen, 0);
                 }
                 printk("For pxd device %llu IO resumed\n", pxd_dev->dev_id);
@@ -296,9 +294,9 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         } else {
                 if (blk_rq_bytes(rq) != 0) {
                         rq_for_each_segment(bv, rq, rq_iter) {
-                                unsigned len =
-                                    bio_add_page(bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
-                                         BVEC(bv).bv_offset);
+                                unsigned len = bio_add_page(
+                                    bio, BVEC(bv).bv_page, BVEC(bv).bv_len,
+                                    BVEC(bv).bv_offset);
                                 BUG_ON(len != BVEC(bv).bv_len);
                         }
                 }
