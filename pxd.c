@@ -1223,7 +1223,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		return err;
 	  }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
@@ -1331,7 +1331,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk) {
 		del_gendisk(disk);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 		if (disk->queue) {
 			blk_cleanup_disk(disk);
 		}
