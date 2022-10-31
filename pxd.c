@@ -1532,6 +1532,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
 	if (pxd_dev) {
+#if 0
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
 		int rc = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 		if (rc) {
@@ -1542,6 +1543,16 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 #else
 		add_disk(pxd_dev->disk);
 #endif
+#endif
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50)
+		int rc = add_disk(pxd_dev->disk);
+		if (rc) {
+			return rc;
+		}
+#else
+		add_disk(pxd_dev->disk);
+#endif
+
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 		blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
