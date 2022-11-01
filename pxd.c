@@ -1532,18 +1532,6 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
 	if (pxd_dev) {
-#if 0
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-		int rc = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
-		if (rc) {
-			return rc;
-		}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-		device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
-#else
-		add_disk(pxd_dev->disk);
-#endif
-#endif
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50)
 		int rc = add_disk(pxd_dev->disk);
 		if (rc) {
@@ -1619,9 +1607,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&pxd_dev->lock);
 
 	mutex_lock(&pxd_ctl_mutex);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-	pxd_free_disk(pxd_dev);
-#endif
 	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
 	mutex_unlock(&pxd_ctl_mutex);
