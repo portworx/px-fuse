@@ -128,12 +128,9 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct pxd_device *pxd_dev;
 
-	mutex_lock(&pxd_ctl_mutex);
-
 	pxd_dev = disk->private_data;
 	if (!pxd_dev) {
 		printk(KERN_WARNING"pxd empty device context\n");
-		mutex_unlock(&pxd_ctl_mutex);
 		return;
 	}
 
@@ -144,8 +141,6 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
 	put_device(&pxd_dev->dev);
-
-	mutex_unlock(&pxd_ctl_mutex);
 }
 
 static long pxd_ioctl_dump_fc_info(void)
@@ -1607,6 +1602,9 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&pxd_dev->lock);
 
 	mutex_lock(&pxd_ctl_mutex);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+	pxd_free_disk(pxd_dev);
+#endif
 	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
 	mutex_unlock(&pxd_ctl_mutex);
