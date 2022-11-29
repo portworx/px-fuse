@@ -128,12 +128,9 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct pxd_device *pxd_dev;
 
-	mutex_lock(&pxd_ctl_mutex);
-
 	pxd_dev = disk->private_data;
 	if (!pxd_dev) {
 		printk(KERN_WARNING"pxd empty device context\n");
-		mutex_unlock(&pxd_ctl_mutex);
 		return;
 	}
 
@@ -144,8 +141,6 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
 	put_device(&pxd_dev->dev);
-
-	mutex_unlock(&pxd_ctl_mutex);
 }
 
 static long pxd_ioctl_dump_fc_info(void)
@@ -1229,7 +1224,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 		return err;
 	  }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
@@ -1339,7 +1334,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk) {
 		del_gendisk(disk);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 		if (disk->queue) {
 			blk_cleanup_disk(disk);
 		}
@@ -1540,16 +1535,15 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
 	if (pxd_dev) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-		int rc = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50)
+		int rc = add_disk(pxd_dev->disk);
 		if (rc) {
 			return rc;
 		}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-		device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #else
 		add_disk(pxd_dev->disk);
 #endif
+
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 		blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
