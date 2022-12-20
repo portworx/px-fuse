@@ -1401,9 +1401,9 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	}
 
 	if (add->discard_size < SECTOR_SIZE)
-		pxd_dev->discard_size = SEGMENT_SIZE / SECTOR_SIZE;
+		pxd_dev->discard_size = SEGMENT_SIZE;
 	else
-		pxd_dev->discard_size = add->discard_size / SECTOR_SIZE;
+		pxd_dev->discard_size = add->discard_size;
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -1414,8 +1414,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->nr_congestion_off = 0;
 	atomic_set(&pxd_dev->ncount, 0);
 
-	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
-			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
+	printk(KERN_INFO"Device %llu (discard %d) added %px with mode %#x fastpath %d npath %lu\n",
+			add->dev_id, pxd_dev->discard_size, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
 
 	// initializes fastpath context part of pxd_dev
 	err = pxd_fastpath_init(pxd_dev);
