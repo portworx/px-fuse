@@ -163,7 +163,7 @@ docker-build: docker-build-dev
 	portworx/px-fuse:dev make
 
 px_version.c:
-	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD):$(shell git rev-parse HEAD)\";" > $@
+	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD | sed 's/remotes\/origin\///g'):$(shell git rev-parse HEAD)\";" > $@
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
