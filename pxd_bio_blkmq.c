@@ -248,7 +248,9 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         struct bio *bio;
         int nr_bvec = 0;
         bool specialops = rq_is_special(rq);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0) /// to sync up with the usage of newer bio_alloc_bioset.
         unsigned int op_flags = get_op_flags(rq->bio);
+#endif
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
