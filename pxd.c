@@ -63,8 +63,6 @@ extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
 
-static DEFINE_MUTEX(pxd_ctl_mutex);
-
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
@@ -93,13 +91,8 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	struct pxd_device *pxd_dev;
 	int err = 0;
 
-	err = mutex_lock_killable(&pxd_ctl_mutex);
-	if (err)
-		return err;
-
 	pxd_dev = bdev->bd_disk->private_data;
 	if (!pxd_dev) {
-		mutex_unlock(&pxd_ctl_mutex);
 		return -ENXIO;
 	}
 
@@ -116,7 +109,6 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 			(void)get_device(&pxd_dev->dev);
 	}
 	spin_unlock(&pxd_dev->lock);
-	mutex_unlock(&pxd_ctl_mutex);
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
 }
@@ -125,11 +117,8 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 {
 	struct pxd_device *pxd_dev;
 
-	mutex_lock(&pxd_ctl_mutex);
-
 	pxd_dev = disk->private_data;
 	if (!pxd_dev) {
-		mutex_unlock(&pxd_ctl_mutex);
 		printk(KERN_WARNING"pxd empty device context\n");
 		return;
 	}
@@ -141,8 +130,6 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
 	put_device(&pxd_dev->dev);
-
-	mutex_unlock(&pxd_ctl_mutex);
 }
 
 
@@ -1596,7 +1583,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	if (cleanup) {
 		pxd_fastpath_reset_device(pxd_dev);
 
-		mutex_lock(&pxd_ctl_mutex);
 		/* Make sure the req_fn isn't called anymore even if the device hangs around */
 		if (pxd_dev->disk && pxd_dev->disk->queue){
 #ifndef __PX_BLKMQ__
@@ -1617,7 +1603,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 		pxd_free_disk(pxd_dev);
 		device_unregister(&pxd_dev->dev);
-		mutex_unlock(&pxd_ctl_mutex);
 
 		module_put(THIS_MODULE);
 	}
