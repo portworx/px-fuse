@@ -65,7 +65,6 @@
 extern const char *gitversion;
 static dev_t pxd_major;
 static DEFINE_IDA(pxd_minor_ida);
-static DEFINE_MUTEX(pxd_ctl_mutex);
 
 struct pxd_context *pxd_contexts;
 uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
@@ -95,13 +94,8 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	struct pxd_device *pxd_dev;
 	int err = 0;
 
-	err = mutex_lock_killable(&pxd_ctl_mutex);
-	if (err)
-		return err;
-
 	pxd_dev = bdev->bd_disk->private_data;
 	if (!pxd_dev) {
-		mutex_unlock(&pxd_ctl_mutex);
 		return -ENXIO;
 	}
 
@@ -118,7 +112,6 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 			(void)get_device(&pxd_dev->dev);
 	}
 	spin_unlock(&pxd_dev->lock);
-	mutex_unlock(&pxd_ctl_mutex);
 
 	trace_pxd_open(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode, err);
 	return err;
@@ -1601,13 +1594,11 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	spin_unlock(&pxd_dev->lock);
 
-	mutex_lock(&pxd_ctl_mutex);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
 	pxd_free_disk(pxd_dev);
 #endif
 	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
-	mutex_unlock(&pxd_ctl_mutex);
 
 	module_put(THIS_MODULE);
 
