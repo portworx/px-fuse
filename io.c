@@ -81,6 +81,7 @@
 #include "pxd_compat.h"
 
 #include <uapi/linux/eventpoll.h>
+#include <linux/net.h>
 
 #define IORING_MAX_ENTRIES	4096
 #define IORING_MAX_FIXED_FILES	4096
@@ -301,6 +302,7 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 	INIT_LIST_HEAD(&ctx->poll_list);
 	INIT_LIST_HEAD(&ctx->cancel_list);
 	INIT_LIST_HEAD(&ctx->defer_list);
+	INIT_LIST_HEAD(&ctx->sock_poll_list);
 
 	return 0;
 }
@@ -523,7 +525,6 @@ static int io_prep_rw(struct io_kiocb *req, const struct sqe_submit *s,
 	int ret;
 
 	if (!req->file) {
-		pr_info("%s: file is null", __func__);
 		return -EBADF;
 	}
 
@@ -1251,6 +1252,33 @@ static void io_poll_remove_all(struct io_ring_ctx *ctx)
 	spin_unlock_irq(&ctx->completion_lock);
 }
 
+static void io_sock_poll_remove_all(struct io_ring_ctx *ctx)
+{
+	struct io_kiocb *req;
+	struct socket *sock;
+
+	spin_lock_irq(&ctx->completion_lock);
+	while (!list_empty(&ctx->sock_poll_list)) {
+		req = list_first_entry(&ctx->sock_poll_list, struct io_kiocb, list);
+		list_del_init(&req->list);
+		spin_unlock_irq(&ctx->completion_lock);
+
+		sock = req->file->private_data;
+
+		write_lock_bh(&sock->sk->sk_callback_lock);
+		sock->sk->sk_user_data = NULL;
+		sock->sk->sk_data_ready = req->sock_poll.data_ready;
+		sock->sk->sk_write_space = req->sock_poll.write_space;
+		sock->sk->sk_state_change = req->sock_poll.state_change;
+		write_unlock_bh(&sock->sk->sk_callback_lock);
+
+		io_put_req(req);
+
+		spin_lock_irq(&ctx->completion_lock);
+	}
+	spin_unlock_irq(&ctx->completion_lock);
+}
+
 /*
  * Find a running poll command that matches one specified in sqe->addr,
  * and remove it if found.
@@ -1459,6 +1487,262 @@ static int io_req_defer(struct io_ring_ctx *ctx, struct io_kiocb *req,
 	return -EIOCBQUEUED;
 }
 
+static void poll_server_data_ready(struct sock *sk)
+{
+	struct io_kiocb *req;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	req = sk->sk_user_data;
+	if (req == NULL) {
+		goto out;
+	}
+
+	if (sk->sk_state == TCP_LISTEN) {
+		io_cqring_add_event(req->ctx, req->user_data, POLLIN);
+	}
+out:
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static int io_poll_server(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	struct socket *sock;
+
+	if (req->file == NULL) {
+		return -EBADF;
+	}
+	if (!S_ISSOCK(req->file->f_inode->i_mode)) {
+		return -ENOTSOCK;
+	}
+
+	spin_lock_irq(&req->ctx->completion_lock);
+	list_add_tail(&req->list, &req->ctx->sock_poll_list);
+	spin_unlock_irq(&req->ctx->completion_lock);
+
+	sock = req->file->private_data;
+
+	write_lock_bh(&sock->sk->sk_callback_lock);
+	req->sock_poll.data_ready = sock->sk->sk_data_ready;
+	req->sock_poll.write_space = sock->sk->sk_state_change;
+	req->sock_poll.state_change = sock->sk->sk_state_change;
+	sock->sk->sk_user_data = req;
+	sock->sk->sk_data_ready = poll_server_data_ready;
+	write_unlock_bh(&sock->sk->sk_callback_lock);
+
+	return 0;
+}
+
+static void poll_connection_data_ready(struct sock *sk)
+{
+	struct io_kiocb *req;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	req = sk->sk_user_data;
+	if (req == NULL) {
+		goto out;
+	}
+	if (!atomic_fetch_or(POLLIN, &req->sock_poll.sent_events)) {
+		io_cqring_add_event(req->ctx, req->user_data, POLLIN);
+	}
+out:
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static void poll_connection_write_space(struct sock *sk)
+{
+	struct io_kiocb *req;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	req = sk->sk_user_data;
+	if (unlikely(!req)) {
+		goto out;
+	}
+
+	if (sk_stream_is_writeable(sk)) {
+		clear_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+		io_cqring_add_event(req->ctx, req->user_data, POLLOUT);
+	}
+out:
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static void poll_connection_state_change(struct sock *sk)
+{
+	struct io_kiocb *req;
+
+	read_lock_bh(&sk->sk_callback_lock);
+	req = sk->sk_user_data;
+	if (req == NULL) {
+		goto out;
+	}
+
+	switch (sk->sk_state) {
+	case TCP_ESTABLISHED:
+		io_cqring_add_event(req->ctx, req->user_data, POLLIN | POLLOUT);
+		break;
+	case TCP_FIN_WAIT2:
+	case TCP_LAST_ACK:
+		break;
+	case TCP_FIN_WAIT1:
+	case TCP_CLOSE_WAIT:
+	case TCP_CLOSE:
+		/* FALLTHRU */
+		atomic_andnot(POLLIN, &req->sock_poll.sent_events);
+		io_cqring_add_event(req->ctx, req->user_data, POLLHUP);
+		break;
+	default:
+		pr_warn("%s: unhandled state %d\n", __func__, sk->sk_state);
+	}
+out:
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+
+static int io_poll_connection(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	struct socket *sock;
+
+	if (req->file == NULL) {
+		return -EBADF;
+	}
+	if (!S_ISSOCK(req->file->f_inode->i_mode)) {
+		return -ENOTSOCK;
+	}
+
+	spin_lock_irq(&req->ctx->completion_lock);
+	list_add_tail(&req->list, &req->ctx->sock_poll_list);
+	spin_unlock_irq(&req->ctx->completion_lock);
+
+	sock = req->file->private_data;
+	req->sock_poll.sent_events.counter = 0;
+
+	write_lock_bh(&sock->sk->sk_callback_lock);
+	req->sock_poll.data_ready = sock->sk->sk_data_ready;
+	req->sock_poll.write_space = sock->sk->sk_write_space;
+	req->sock_poll.state_change = sock->sk->sk_state_change;
+	sock->sk->sk_user_data = req;
+	sock->sk->sk_data_ready = poll_connection_data_ready;
+	sock->sk->sk_write_space = poll_connection_write_space;
+	sock->sk->sk_state_change = poll_connection_state_change;
+	write_unlock_bh(&sock->sk->sk_callback_lock);
+
+	return 0;
+}
+
+static int io_socket_poll_remove(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	struct socket *sock;
+	struct io_kiocb *poll_req;
+
+	if (req->file == NULL) {
+		return -EBADF;
+	}
+	if (!S_ISSOCK(req->file->f_inode->i_mode)) {
+		return -ENOTSOCK;
+	}
+	sock = req->file->private_data;
+	if (sock->sk->sk_user_data == NULL) {
+		return -ECANCELED;
+	}
+	poll_req = sock->sk->sk_user_data;
+	if (poll_req->user_data != req->user_data) {
+		pr_err("%s: user data mismatch", __func__);
+		return -ECANCELED;
+	}
+
+	spin_lock_irq(&req->ctx->completion_lock);
+	list_del_init(&poll_req->list);
+	spin_unlock_irq(&req->ctx->completion_lock);
+
+	write_lock_bh(&sock->sk->sk_callback_lock);
+	sock->sk->sk_user_data = NULL;
+	sock->sk->sk_data_ready = poll_req->sock_poll.data_ready;
+	sock->sk->sk_write_space = poll_req->sock_poll.write_space;
+	sock->sk->sk_state_change = poll_req->sock_poll.state_change;
+	write_unlock_bh(&sock->sk->sk_callback_lock);
+
+	io_put_req(poll_req);
+	io_put_req(req);
+
+	return 0;
+}
+
+static int io_socket_send(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	return 0;
+}
+
+static int io_socket_recv(struct io_kiocb *req, const struct sqe_submit *s,
+	bool force_nonblock)
+{
+	struct iovec inline_vecs[UIO_FASTIOV], *iovec = inline_vecs;
+	int ret;
+	long ret2, ret3, count;
+	struct iov_iter iter;
+	struct io_kiocb *poll_req;
+	struct socket *sock;
+
+	if (req->file == NULL) {
+		return -EBADF;
+	}
+	if (!S_ISSOCK(req->file->f_inode->i_mode)) {
+		return -ENOTSOCK;
+	}
+
+	req->rw.ki_pos = 0;
+	req->rw.ki_flags = IOCB_NOWAIT;
+	req->rw.ki_hint = 0;
+	req->rw.ki_complete = NULL;
+	req->flags |= REQ_F_NOWAIT;
+
+	ret = io_import_iovec(req->ctx, READ, s, &iovec, &iter);
+	if (ret < 0) {
+		return ret;
+	}
+
+	count = iov_iter_count(&iter);
+
+	ret2 = call_read_iter(req->file, &req->rw, &iter);
+	if (ret2 == count || (ret2 < 0 && ret2 != -EAGAIN)) {
+		/* Completed all request data or an error happened. */
+		goto out;
+	}
+
+	sock = req->file->private_data;
+	poll_req = sock->sk->sk_user_data;
+	/* Clear bit so next data_ready() will post poll completion and read data again */
+	atomic_and(~POLLIN, &poll_req->sock_poll.sent_events);
+	ret3 = call_read_iter(req->file, &req->rw, &iter);
+	if (ret3 == -EAGAIN) {
+		/* return short read */
+	} else if (ret3 < 0) {
+		/* return error */
+		ret2 = ret3;
+	} else {
+		if (ret2 < 0) {
+			/* EAGAIN returned on first read. */
+			ret2 = ret3;
+		} else {
+			/* Both reads returned some data. */
+			ret2 += ret3;
+		}
+		if (ret2 == count) {
+			/* Block new poll completions since the user space is going
+			 * to retry read after all requested data is returned.
+			 */
+			atomic_set(&poll_req->sock_poll.sent_events, POLLIN);
+		}
+	}
+out:
+	io_cqring_add_event(req->ctx, req->user_data, ret2);
+	io_put_req(req);
+	kfree(iovec);
+	return 0;
+}
+
 static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 			   const struct sqe_submit *s, bool force_nonblock)
 {
@@ -1513,6 +1797,21 @@ static int __io_submit_sqe(struct io_ring_ctx *ctx, struct io_kiocb *req,
 		break;
 	case IORING_OP_SYNCFS_FIXED:
 		ret = io_syncfs(req, s, force_nonblock);
+		break;
+	case IORING_OP_POLL_SERVER:
+		ret = io_poll_server(req, s, force_nonblock);
+		break;
+	case IORING_OP_POLL_CONNECTION:
+		ret = io_poll_connection(req, s, force_nonblock);
+		break;
+	case IORING_OP_SOCKET_POLl_REMOVE:
+		ret = io_socket_poll_remove(req, s, force_nonblock);
+		break;
+	case IORING_OP_SEND:
+		ret = io_socket_send(req, s, force_nonblock);
+		break;
+	case IORING_OP_RECV:
+		ret = io_socket_recv(req, s, force_nonblock);
 		break;
 	default:
 		ret = -EINVAL;
@@ -2422,6 +2721,7 @@ static void io_ring_ctx_wait_and_kill(struct io_ring_ctx *ctx)
 	percpu_ref_kill(&ctx->refs);
 	mutex_unlock(&ctx->uring_lock);
 
+	io_sock_poll_remove_all(ctx);
 	io_poll_remove_all(ctx);
 	wait_for_completion(&ctx->ctx_done);
 	io_ring_ctx_free(ctx);
