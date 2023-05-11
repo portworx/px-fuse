@@ -601,7 +601,7 @@ static void fp_handle_specialops(struct work_struct *work) {
         atomic_inc(&pxd_dev->fp.nio_discard);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0)
-        if (bdev_max_discard_sectors(bdev)) {  // discard supported
+	if (bdev_max_discard_sectors(bdev)) {  // discard supported
           r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO);
 	} else { // zero-out
@@ -617,8 +617,8 @@ static void fp_handle_specialops(struct work_struct *work) {
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
 	}
 #else
-        // submit discard to replica
-        if (blk_queue_discard(q)) { // discard supported
+    // submit discard to replica
+    if (blk_queue_discard(q)) { // discard supported
 	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
 	} else if (bdev_write_same(bdev)) {
@@ -627,8 +627,7 @@ static void fp_handle_specialops(struct work_struct *work) {
                 // convert discard to write same
                 r = blkdev_issue_write_same(bdev, blk_rq_pos(rq),
 		blk_rq_sectors(rq), GFP_NOIO, pg);
-	}
-
+	} else {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
 	r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
 				 blk_rq_sectors(rq), GFP_NOIO, 0);
@@ -636,10 +635,10 @@ static void fp_handle_specialops(struct work_struct *work) {
 	r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
 				 blk_rq_sectors(rq), GFP_NOIO);
 #endif
+	}
 #endif
 
-
-        BIO_ENDIO(&cc->clone, r);
+	BIO_ENDIO(&cc->clone, r);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
