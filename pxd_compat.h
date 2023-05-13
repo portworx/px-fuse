@@ -135,8 +135,12 @@ static inline unsigned int get_op_flags(struct bio *bio)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
+#define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+#else
 #define BDEVNAME(bio, b)   bio_devname(bio, b)
 #define BIO_COPY_DEV(dst, src) bio_copy_dev(dst, src)
+#endif
 #else
 #define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
 #define BIO_COPY_DEV(dst, src) do {			\
