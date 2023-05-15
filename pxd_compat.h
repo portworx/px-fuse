@@ -134,6 +134,29 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0)
+
+#include <linux/ctype.h>
+
+// Pulled from v5.19.17/source/block/genhd.c
+static inline char *bdevname(struct block_device *bdev, char *buf) {
+        struct gendisk *hd = bdev->bd_disk;
+	int partno = bdev->bd_partno;
+
+	if (!partno)
+		snprintf(buf, BDEVNAME_SIZE, "%s", hd->disk_name);
+	else if (isdigit(hd->disk_name[strlen(hd->disk_name)-1]))
+		snprintf(buf, BDEVNAME_SIZE, "%sp%d", hd->disk_name, partno);
+	else
+		snprintf(buf, BDEVNAME_SIZE, "%s%d", hd->disk_name, partno);
+
+	return buf;
+}
+
+#define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
+
+#else
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
 #define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
@@ -146,6 +169,8 @@ static inline unsigned int get_op_flags(struct bio *bio)
 #define BIO_COPY_DEV(dst, src) do {			\
 	(dst)->bi_bdev = (src)->bi_bdev; 		\
 } while (0)
+#endif
+
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)

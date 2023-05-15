@@ -1333,8 +1333,11 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	pxd_dev->disk = NULL;
 	if (disk) {
 		del_gendisk(disk);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0)
+		if (disk->queue) {
+			put_disk(disk);
+		}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 		if (disk->queue) {
 			blk_cleanup_disk(disk);
 		}
