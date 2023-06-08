@@ -55,6 +55,9 @@ struct pxd_device {
 	unsigned int nr_congestion_on;
 	unsigned int nr_congestion_off;
 
+	struct work_struct remove_work;
+
+	wait_queue_head_t remove_wait;
 	wait_queue_head_t suspend_wq;
 #if defined(__PXD_BIO_BLKMQ__) && defined(__PX_BLKMQ__)
         struct blk_mq_tag_set tag_set;
