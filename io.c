@@ -227,6 +227,15 @@ static void io_sq_wq_submit_work(struct work_struct *work);
 
 struct kmem_cache *req_cachep;
 
+static void *io_alloc_msg_buf(struct io_ring_ctx *ctx)
+{
+	if (ctx->nr_msg_bufs == 0) {
+		return NULL;
+	}
+	--ctx->nr_msg_bufs;
+	return ctx->msg_bufs[ctx->nr_msg_bufs];
+}
+
 static void io_ring_ctx_ref_free(struct percpu_ref *ref)
 {
 	struct io_ring_ctx *ctx = container_of(ref, struct io_ring_ctx, refs);
@@ -288,9 +297,17 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 	}
 	ctx->nr_user_files = IORING_MAX_FIXED_FILES;
 
+	ctx->nr_msg_bufs = 0;
+	ctx->msg_bufs = kcalloc(PXD_IO_MAX_MSG_BUFS, sizeof(void *), GFP_KERNEL);
+	if (ctx->msg_bufs == NULL) {
+		vfree(ctx->queue);
+		kfree(ctx->user_files);
+	}
+
 	if (percpu_ref_init(&ctx->refs, io_ring_ctx_ref_free, 0, GFP_KERNEL)) {
 		vfree(ctx->queue);
 		kfree(ctx->user_files);
+		kfree(ctx->msg_bufs);
 		return -ENOMEM;
 	}
 
@@ -2586,6 +2603,73 @@ err:
 	return ret;
 }
 
+static int io_sqe_give_buffers(struct io_ring_ctx *ctx, void __user *uarg)
+{
+	struct pxd_ioc_give_buffers arg;
+
+	if (copy_from_user(&arg, uarg, sizeof(arg))) {
+		return -EFAULT;
+	}
+
+	if (ctx->nr_msg_bufs + arg.count > PXD_IO_MAX_MSG_BUFS) {
+		return -EINVAL;
+	}
+
+	if (copy_from_user(&ctx->msg_bufs[ctx->nr_msg_bufs], arg.buffers,
+		arg.count * sizeof(void *))) {
+		return -EFAULT;
+	}
+
+	ctx->nr_msg_bufs += arg.count;
+
+	pr_info("%s: count %ld nr_bufs %d", __func__, arg.count, ctx->nr_msg_bufs);
+
+	return 0;
+}
+
+static int io_sqe_free_buffers(struct io_ring_ctx *ctx, struct pxd_ioc_free_buffers __user *uarg)
+{
+	struct pxd_ioc_free_buffers arg;
+	void **bufs;
+	int i = 0;
+
+	if (copy_from_user(&arg, uarg, sizeof(arg))) {
+		return -EFAULT;
+	}
+
+	if (arg.count < 0) {
+		return -EINVAL;
+	}
+
+	if (arg.count == 0) {
+		return 0;
+	}
+
+	bufs = kcalloc(arg.count, sizeof(void *), GFP_KERNEL);
+	if (bufs == NULL) {
+		return -ENOMEM;
+	}
+
+	for (; i < arg.count; ++i) {
+		bufs[i] = io_alloc_msg_buf(ctx);
+		if (bufs[i] == NULL) {
+			break;
+		}
+	}
+
+	if (copy_to_user(arg.buffers, bufs, i * sizeof(void *))) {
+		/* failed to copy, take back the buffers */
+		memcpy(&ctx->msg_bufs[ctx->nr_msg_bufs], bufs,
+			i * sizeof(void *));
+		ctx->nr_msg_bufs += i;
+		kfree(bufs);
+		return -EFAULT;
+	}
+
+	kfree(bufs);
+	return i;
+}
+
 static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *p)
 {
 	int ret;
@@ -2944,6 +3028,10 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return io_sqe_buffer_unregister(ctx);
 	case PXD_IOC_REGISTER_REGION:
 		return io_sqe_register_region(ctx, (void *) arg);
+	case PXD_IOC_GIVE_BUFFERS:
+		return io_sqe_give_buffers(ctx, (void *) arg);
+	case PXD_IOC_FREE_BUFFERS:
+		return io_sqe_free_buffers(ctx, (void *) arg);
 	default:
 		return -ENOTTY;
 	}
