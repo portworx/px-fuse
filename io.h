@@ -111,6 +111,10 @@ struct io_ring_ctx {
 #define PXD_IO_MAX_USER_BUFS 16
 	struct io_mapped_ubuf   user_bufs[PXD_IO_MAX_USER_BUFS];
 
+#define PXD_IO_MAX_MSG_BUFS 4096
+	unsigned nr_msg_bufs;
+	void **msg_bufs;
+
 	struct completion	ctx_done;
 
 	struct {
