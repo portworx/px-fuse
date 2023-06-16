@@ -236,6 +236,72 @@ static void *io_alloc_msg_buf(struct io_ring_ctx *ctx)
 	return ctx->msg_bufs[ctx->nr_msg_bufs];
 }
 
+/* initial ref count value, greater than max number of allocations to guarantee counter
+ * stays positive while allocator owns page */
+#define ALLOC_BIAS 4096
+
+static void io_new_fragment_page(struct user_page_fragment_allocator *alloc)
+{
+	alloc->offset = 0;
+	alloc->num_allocs = 0;
+	alloc->page->refs.counter = ALLOC_BIAS;
+}
+
+void *io_alloc_fragment(struct io_ring_ctx *ctx, size_t size)
+{
+	void *ret;
+	struct user_page_fragment_allocator *alloc = &ctx->fragment_allocator;
+
+	if (alloc->page == NULL) {
+		alloc->page = io_alloc_msg_buf(ctx);
+		if (alloc->page == NULL) {
+			return NULL;
+		}
+		io_new_fragment_page(alloc);
+	}
+
+	size = roundup(size, 8);
+	if (size + alloc->offset > ARRAY_SIZE(alloc->page->data)) {
+		if (size > ARRAY_SIZE(alloc->page->data)) {
+			return NULL;
+		}
+		/* Allocate new page if page still in use by user space, otherwise
+		 * reuse the same page.
+		 */
+		if (!atomic_sub_and_test(ALLOC_BIAS - alloc->num_allocs,
+			&alloc->page->refs)) {
+			alloc->page = io_alloc_msg_buf(ctx);
+			if (alloc->page == NULL) {
+				return NULL;
+			}
+		}
+		io_new_fragment_page(alloc);
+	}
+
+	++alloc->num_allocs;
+	ret = &alloc->page->data[alloc->offset];
+	alloc->offset += size;
+	return ret;
+}
+
+static void io_alloc_fragment_init(struct user_page_fragment_allocator *alloc)
+{
+	alloc->page = NULL;
+}
+
+static void *io_alloc_fragment_clear(struct user_page_fragment_allocator *alloc)
+{
+	struct user_page_fragment *page = alloc->page;
+
+	if (page != NULL) {
+		alloc->page = NULL;
+		if (atomic_sub_and_test(ALLOC_BIAS - alloc->num_allocs, &page->refs)) {
+			return page;
+		}
+	}
+	return NULL;
+}
+
 static void io_ring_ctx_ref_free(struct percpu_ref *ref)
 {
 	struct io_ring_ctx *ctx = container_of(ref, struct io_ring_ctx, refs);
@@ -303,6 +369,8 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 		vfree(ctx->queue);
 		kfree(ctx->user_files);
 	}
+
+	io_alloc_fragment_init(&ctx->fragment_allocator);
 
 	if (percpu_ref_init(&ctx->refs, io_ring_ctx_ref_free, 0, GFP_KERNEL)) {
 		vfree(ctx->queue);
@@ -2648,6 +2716,12 @@ static int io_sqe_free_buffers(struct io_ring_ctx *ctx, struct pxd_ioc_free_buff
 	bufs = kcalloc(arg.count, sizeof(void *), GFP_KERNEL);
 	if (bufs == NULL) {
 		return -ENOMEM;
+	}
+
+	// try freeing fragment page
+	bufs[i] = io_alloc_fragment_clear(&ctx->fragment_allocator);
+	if (bufs[i] != NULL) {
+		++i;
 	}
 
 	for (; i < arg.count; ++i) {

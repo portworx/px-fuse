@@ -57,6 +57,18 @@ struct io_mapped_ubuf {
 	unsigned int	nr_bvecs;
 };
 
+struct user_page_fragment {
+	atomic_t refs;
+	int pad;
+	char data[4088];
+};
+
+struct user_page_fragment_allocator {
+	struct user_page_fragment *page;
+	int offset;	/* offset to the next allocation */
+	int num_allocs; /* count the allocations to batch update atomic page counter */
+};
+
 struct io_ring_ctx {
 	struct {
 		struct percpu_ref	refs;
@@ -114,6 +126,8 @@ struct io_ring_ctx {
 #define PXD_IO_MAX_MSG_BUFS 4096
 	unsigned nr_msg_bufs;
 	void **msg_bufs;
+
+	struct user_page_fragment_allocator fragment_allocator;
 
 	struct completion	ctx_done;
 
