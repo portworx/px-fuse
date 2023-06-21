@@ -29,8 +29,8 @@ struct pxd_sync_ws {
 struct pxd_fastpath_extension {
 	// Extended information
 	atomic_t ioswitch_active; // failover or fallback active
-	atomic_t suspend;
-	atomic_t app_suspend; // userspace suspended IO
+	atomic_t suspend; // [int] incrementing counter
+	atomic_t app_suspend; // [bool] userspace suspended IO
 #ifdef __PXD_BIO_BLKMQ__
 	atomic_t blkmq_frozen; // state indicating whether actually mq frozen
 #else
@@ -42,6 +42,7 @@ struct pxd_fastpath_extension {
 	struct pxd_sync_ws syncwi[MAX_PXD_BACKING_DEVS];
 	struct completion sync_complete;
 	atomic_t sync_done;
+	uint64_t switch_uid; // switch IO request unique id
 
 	// failover work item
 	spinlock_t  fail_lock;
@@ -108,6 +109,11 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
 // handle IO reroutes and switch events
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
 void pxd_abortfailQ(struct pxd_device *pxd_dev);
+
+// reset device called during device cleanup actions from any internal state.
+// consider node wipe, device remove while suspended etc.
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev);
+
 
 static inline
 struct block_device* get_bdev(struct file *fileh)

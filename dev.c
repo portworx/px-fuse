@@ -213,7 +213,7 @@ static void fuse_conn_wakeup(struct fuse_conn *fc)
  *
  * If called with fc->lock, unlocks it
  */
-static void request_end(struct fuse_conn *fc, struct fuse_req *req,
+void request_end(struct fuse_conn *fc, struct fuse_req *req,
                         bool lock)
 __releases(fc->lock)
 {
@@ -582,7 +582,7 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 
 
 /* Look up request on processing list by unique ID */
-static struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
+struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 {
 	u32 index = unique & (FUSE_MAX_REQUEST_IDS - 1);
 	struct fuse_req *req = fc->request_map[index];

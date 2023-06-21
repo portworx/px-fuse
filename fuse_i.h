@@ -364,5 +364,9 @@ int pxd_set_fastpath(struct fuse_conn *fc, struct pxd_fastpath_out*);
 
 void fuse_request_init(struct fuse_req *req);
 void fuse_req_init_context(struct fuse_req *req);
+
+void request_end(struct fuse_conn *fc, struct fuse_req *req, bool lock);
+struct fuse_req *request_find(struct fuse_conn *fc, u64 unique);
+
 #endif
 #endif /* _FS_FUSE_I_H */
