@@ -39,6 +39,7 @@
  * Copyright (C) 2018-2019 Jens Axboe
  * Copyright (c) 2018-2019 Christoph Hellwig
  */
+#include "pxd.h"
 #include <linux/version.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 #include <linux/kernel.h>
@@ -227,6 +228,11 @@ static void io_sq_wq_submit_work(struct work_struct *work);
 
 struct kmem_cache *req_cachep;
 
+enum {
+	RECV_LEN,
+	RECV_DATA,
+};
+
 static void *io_alloc_msg_buf(struct io_ring_ctx *ctx)
 {
 	if (ctx->nr_msg_bufs == 0) {
@@ -253,12 +259,15 @@ void *io_alloc_fragment(struct io_ring_ctx *ctx, size_t size)
 	struct user_page_fragment_allocator *alloc = &ctx->fragment_allocator;
 
 	if (alloc->page == NULL) {
+		pr_info("%s: alloc new page\n", __func__);
 		alloc->page = io_alloc_msg_buf(ctx);
 		if (alloc->page == NULL) {
 			return NULL;
 		}
 		io_new_fragment_page(alloc);
 	}
+
+	pr_info("%s: continue with existing page %ld\n", __func__, size);
 
 	size = roundup(size, 8);
 	if (size + alloc->offset > ARRAY_SIZE(alloc->page->data)) {
@@ -270,10 +279,13 @@ void *io_alloc_fragment(struct io_ring_ctx *ctx, size_t size)
 		 */
 		if (!atomic_sub_and_test(ALLOC_BIAS - alloc->num_allocs,
 			&alloc->page->refs)) {
+			pr_info("%s: free page\n", __func__);
 			alloc->page = io_alloc_msg_buf(ctx);
-			if (alloc->page == NULL) {
+				if (alloc->page == NULL) {
 				return NULL;
 			}
+		} else {
+			pr_info("%s: reuse page\n", __func__);
 		}
 		io_new_fragment_page(alloc);
 	}
@@ -281,6 +293,7 @@ void *io_alloc_fragment(struct io_ring_ctx *ctx, size_t size)
 	++alloc->num_allocs;
 	ret = &alloc->page->data[alloc->offset];
 	alloc->offset += size;
+	pr_info("%s: return 0x%lx", __func__, (uintptr_t)ret);
 	return ret;
 }
 
@@ -300,6 +313,16 @@ static void *io_alloc_fragment_clear(struct user_page_fragment_allocator *alloc)
 		}
 	}
 	return NULL;
+}
+
+static void io_init_recv_msgs(struct io_sock_poll *s)
+{
+	memset(&s->msg, 0, sizeof(s->msg));
+	s->msg.msg_flags = MSG_DONTWAIT;
+	s->kiov.iov_base = s->len_flags;
+	s->kiov.iov_len = 17;
+	iov_iter_kvec(&s->msg.msg_iter, WRITE | ITER_KVEC, &s->kiov, 1, 17);
+	s->state = RECV_LEN;
 }
 
 static void io_ring_ctx_ref_free(struct percpu_ref *ref)
@@ -324,11 +347,11 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 	ctx->sq_thread_idle = params->sq_thread_idle;
 
 	params->sq_entries = params->sq_entries == 0 ?
-							FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
-								params->sq_entries);
+			     FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
+				     params->sq_entries);
 	params->cq_entries = params->cq_entries == 0 ?
-							FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
-								params->cq_entries);
+			     FUSE_REQUEST_QUEUE_SIZE : roundup_pow_of_two(
+				     params->cq_entries);
 
 	ctx->sq_entries = params->sq_entries;
 	ctx->sq_mask = ctx->sq_entries - 1;
@@ -1687,6 +1710,7 @@ static int io_poll_connection(struct io_kiocb *req, const struct sqe_submit *s,
 	bool force_nonblock)
 {
 	struct socket *sock;
+	struct io_sock_poll *sp;
 
 	if (req->file == NULL) {
 		return -EBADF;
@@ -1695,17 +1719,20 @@ static int io_poll_connection(struct io_kiocb *req, const struct sqe_submit *s,
 		return -ENOTSOCK;
 	}
 
+	sp = &req->sock_poll;
+	sp->sent_events.counter = 0;
+	io_init_recv_msgs(sp);
+
 	spin_lock_irq(&req->ctx->completion_lock);
 	list_add_tail(&req->list, &req->ctx->sock_poll_list);
 	spin_unlock_irq(&req->ctx->completion_lock);
 
 	sock = req->file->private_data;
-	req->sock_poll.sent_events.counter = 0;
 
 	write_lock_bh(&sock->sk->sk_callback_lock);
-	req->sock_poll.data_ready = sock->sk->sk_data_ready;
-	req->sock_poll.write_space = sock->sk->sk_write_space;
-	req->sock_poll.state_change = sock->sk->sk_state_change;
+	sp->data_ready = sock->sk->sk_data_ready;
+	sp->write_space = sock->sk->sk_write_space;
+	sp->state_change = sock->sk->sk_state_change;
 	sock->sk->sk_user_data = req;
 	sock->sk->sk_data_ready = poll_connection_data_ready;
 	sock->sk->sk_write_space = poll_connection_write_space;
@@ -2744,6 +2771,193 @@ static int io_sqe_free_buffers(struct io_ring_ctx *ctx, struct pxd_ioc_free_buff
 	return i;
 }
 
+static uint64_t get_uint64(const unsigned char *buffer)
+{
+	return (((uint64_t)buffer[0]) << 56) | (((uint64_t)buffer[1]) << 48) |
+	       (((uint64_t)buffer[2]) << 40) | (((uint64_t)buffer[3]) << 32) |
+	       (((uint64_t)buffer[4]) << 24) | (((uint64_t)buffer[5]) << 16) |
+	       (((uint64_t)buffer[6]) << 8) | ((uint64_t)buffer[7]);
+}
+
+#define RECV_MAX_DATA 1024 * 1024
+
+static int io_recv_msg_read_iter(struct socket *sock, struct io_sock_poll *s, int *bytes_received)
+{
+	int res;
+
+	res = sock_recvmsg(sock, &s->msg, MSG_DONTWAIT);
+	pr_info("%s:%d: sock_recvmsg ret %d", __func__, __LINE__, res);
+	if (res > 0) {
+		*bytes_received += res;
+	} else if (res != -EAGAIN)  {
+		return res;
+	}
+	while (iov_iter_count(&s->msg.msg_iter) != 0) {
+		/* short read */
+		atomic_andnot(POLLIN, &s->sent_events);
+		res = sock_recvmsg(sock, &s->msg, MSG_DONTWAIT);
+		pr_info("%s:%d: sock_recvmsg ret %d", __func__, __LINE__, res);
+		if (res <= 0) {
+			return res;
+		}
+		*bytes_received += res;
+		atomic_or(POLLIN, &s->sent_events);
+	}
+	return res;
+}
+
+static int io_sqe_recv_msgs(struct io_ring_ctx *ctx, struct pxd_ioc_recv_msgs __user *uarg)
+{
+	struct pxd_ioc_recv_msgs arg;
+	struct file *f;
+	struct socket *sock;
+	struct io_sock_poll *s;
+	int i;
+	struct pxd_ioc_msg *out_msgs = uarg->msgs;
+	int msg_count = 0;
+	int first_buf_size;
+	int first_alloc_size;
+	int bytes_received = 0;
+	int max_msgs = uarg->count;
+	int err;
+
+	if (copy_from_user(&arg, uarg, sizeof(arg))) {
+		return -EFAULT;
+	}
+
+	pr_info("%s: fd %d (%d) count %ld\n", __func__, arg.fixed_fd, ctx->nr_user_files,
+		arg.count);
+
+	if (arg.fixed_fd < 0 || ctx->nr_user_files <= arg.fixed_fd || arg.count <= 0) {
+		err = -EINVAL;
+		goto out;
+	}
+
+	f = ctx->user_files[arg.fixed_fd];
+	if (f == NULL) {
+		err = -EBADF;
+		goto out;
+	}
+	if (!S_ISSOCK(f->f_inode->i_mode)) {
+		err = -ENOTSOCK;
+		goto out;
+	}
+	sock = f->private_data;
+	s = sock->sk->sk_user_data;
+	if (s == NULL) {
+		err = -ECANCELED;
+		goto out;
+	}
+
+	switch (s->state) {
+	case RECV_LEN:
+	recv_len:
+		if (iov_iter_count(&s->msg.msg_iter) != 0) {
+			err = io_recv_msg_read_iter(sock, s, &bytes_received);
+			if (err <= 0) {
+				/* Don't have complete message or error occurred. */
+				goto out;
+			}
+		}
+		if (s->len_flags[0] == 0) {
+			first_buf_size = s->len_flags[1];
+			s->umsg.size = first_buf_size;
+			s->umsg.buf_count = 1;
+		} else {
+			s->umsg.size = get_uint64(&s->len_flags[1]);
+			if (s->umsg.size > 2ul * 1024 * 1024) {
+				err = -EMSGSIZE;
+				goto out;
+			}
+			pr_info("%s: large msg %d %d %d %d %d %d\n",
+				__func__, s->header_1[0], s->header_1[1],
+				s->header_1[2], s->header_1[3],
+				s->data_pages, s->header_2);
+			s->umsg.buf_count = s->data_pages + 1;
+			first_buf_size = s->umsg.size - s->data_pages * 4096;
+			if (first_buf_size == 0) {
+				err = -EMSGSIZE;
+				goto out;
+			}
+		}
+		pr_info("%s: got size %d %d segs", __func__, s->umsg.size, s->umsg.buf_count);
+		memset(&s->msg, 0, sizeof(s->msg));
+		s->msg.msg_flags = MSG_DONTWAIT;
+		first_alloc_size = PXD_RECV_HDR_SIZE + s->umsg.buf_count * sizeof(struct iovec) + first_buf_size;
+		if (first_alloc_size <= ARRAY_SIZE(ctx->fragment_allocator.page->data) / 2) {
+			s->umsg.content = io_alloc_fragment(ctx, first_alloc_size);
+		} else if (first_buf_size <= 4096) {
+			s->umsg.content = io_alloc_msg_buf(ctx);
+		} else {
+			/* @@@ */
+			BUG();
+		}
+		if (s->umsg.content == NULL) {
+			return -ENOMEM;
+		}
+		s->umsg.content->iov[0].iov_base = s->umsg.content->iov + s->umsg.buf_count;
+		s->umsg.content->iov[0].iov_len = first_buf_size;
+		for (i = 1; i < s->umsg.buf_count; ++i) {
+			s->umsg.content->iov[i].iov_base = io_alloc_msg_buf(ctx);
+			s->umsg.content->iov[i].iov_len = 4096;
+			if (s->umsg.content->iov[i].iov_base == NULL) {
+				err = -ENOMEM;
+				goto out;
+			}
+		}
+		iov_iter_init(&s->msg.msg_iter, WRITE, s->umsg.content->iov,
+			s->umsg.buf_count, s->umsg.size);
+		if (s->len_flags[0] == 0) {
+			if (copy_to_iter(&s->len_flags[2], 15, &s->msg.msg_iter) == 0) {
+				err = -EFAULT;
+				goto out;
+			}
+		} else {
+			if (copy_to_iter(&s->header_1, 8, &s->msg.msg_iter) == 0) {
+				err = -EFAULT;
+				goto out;
+			}
+		}
+		pr_info("%s: remain %ld", __func__, iov_iter_count(&s->msg.msg_iter));
+		s->state = RECV_DATA;
+		/* Fallthrough */
+	case RECV_DATA:
+		if (iov_iter_count(&s->msg.msg_iter) != 0) {
+			err = io_recv_msg_read_iter(sock, s, &bytes_received);
+			if (err <= 0) {
+				/* Don't have complete message or error occurred. */
+				goto out;
+			}
+		}
+		pr_info("%s: nr_segs %d", __func__, s->umsg.buf_count);
+		if (copy_to_user(out_msgs, &s->umsg, sizeof(s->umsg))) {
+			err = -EFAULT;
+			goto out;
+		}
+		++out_msgs;
+
+		io_init_recv_msgs(s);
+
+		++msg_count;
+		if (msg_count == max_msgs || bytes_received >= RECV_MAX_DATA) {
+			err = bytes_received;
+			goto out;
+		}
+		goto recv_len;
+	default:
+		return -EFAULT;
+	}
+out:
+	if (copy_to_user(&uarg->bufs_remaining, &ctx->nr_msg_bufs,
+		sizeof(uarg->bufs_remaining)))  {
+		return -EFAULT;
+	}
+	if (copy_to_user(&uarg->count, &msg_count, sizeof(msg_count))) {
+		return -EFAULT;
+	}
+	return err;
+}
+
 static int io_sq_offload_start(struct io_ring_ctx *ctx, struct io_uring_params *p)
 {
 	int ret;
@@ -3106,6 +3320,8 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return io_sqe_give_buffers(ctx, (void *) arg);
 	case PXD_IOC_FREE_BUFFERS:
 		return io_sqe_free_buffers(ctx, (void *) arg);
+	case PXD_IOC_RECV_MSGS:
+		return io_sqe_recv_msgs(ctx, (void *) arg);
 	default:
 		return -ENOTTY;
 	}

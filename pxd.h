@@ -5,7 +5,9 @@
 #include <linux/kernel.h>
 #ifdef __PXKERNEL__
 #include <linux/types.h>
+#include <linux/uio.h>
 #else
+#include <sys/uio.h>
 #include <stdint.h>
 #include <sys/param.h>
 #include <string.h>
@@ -49,6 +51,7 @@
 #define PXD_IOC_REGISTER_REGION	_IO(PXD_IOCTL_MAGIC, 15)
 #define PXD_IOC_GIVE_BUFFERS	_IO(PXD_IOCTL_MAGIC, 16)
 #define PXD_IOC_FREE_BUFFERS	_IO(PXD_IOCTL_MAGIC, 17)
+#define PXD_IOC_RECV_MSGS	_IO(PXD_IOCTL_MAGIC, 18)
 
 struct pxd_ioc_register_buffers {
 	void *base;
@@ -70,6 +73,26 @@ struct pxd_ioc_give_buffers {
 struct pxd_ioc_free_buffers {
 	size_t count;	/* number of entries in buffers */
 	void **buffers;	/* list of buffers returned to user space filled by ioctl */
+};
+
+#define PXD_RECV_HDR_SIZE 152
+
+struct pxd_ioc_msg_content {
+	char header[PXD_RECV_HDR_SIZE];
+	struct iovec iov[];
+};
+
+struct pxd_ioc_msg {
+	uint32_t buf_count;
+	uint32_t size;
+	struct pxd_ioc_msg_content *content;
+};
+
+struct pxd_ioc_recv_msgs {
+	int fixed_fd;		/* file descriptor registered with ctx */
+	size_t count;		/* size of messages list */
+	size_t bufs_remaining;	/* number of buffers available for kernel */
+	struct pxd_ioc_msg *msgs;		/* list of messages returned here */
 };
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */

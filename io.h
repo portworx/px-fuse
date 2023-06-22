@@ -49,6 +49,7 @@
 #include <linux/percpu-refcount.h>
 #include <linux/miscdevice.h>
 #include "fuse_i.h"
+#include <linux/socket.h>
 
 struct io_mapped_ubuf {
 	u64		ubuf;
@@ -180,6 +181,15 @@ struct io_sock_poll {
 	void (*write_space)(struct sock *sk);
 	void (*state_change)(struct sock *sk);
 	atomic_t sent_events;
+	struct kvec kiov;
+	struct msghdr msg;
+	int state;
+	struct pxd_ioc_msg umsg;
+	unsigned char pad[3];
+	unsigned char len_flags[9];
+	unsigned char header_1[4];
+	unsigned short data_pages;
+	unsigned short header_2;
 };
 
 /*
