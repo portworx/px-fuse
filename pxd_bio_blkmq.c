@@ -4,9 +4,18 @@
 
 #include <linux/delay.h>
 #include <linux/errno.h>
-#include <linux/genhd.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#include <linux/kdev_t.h>
+#include <linux/uuid.h>
+#include <linux/blk_types.h>
+#include <linux/device.h>
+#include <linux/xarray.h>
+#include <linux/printk.h>
+#else
+#include <linux/genhd.h>
+#endif
 #include <linux/workqueue.h>
 
 #include "fuse_i.h"
@@ -239,8 +248,19 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         struct bio *bio;
         int nr_bvec = 0;
         bool specialops = rq_is_special(rq);
-        unsigned int op_flags = get_op_flags(rq->bio);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0) /// to sync up with the usage of newer bio_alloc_bioset.
 
+#if defined(__EL8__)
+	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0)
+        unsigned int op_flags = get_op_flags(rq->bio);
+#endif
+	
+#else
+        unsigned int op_flags = get_op_flags(rq->bio);
+#endif
+
+#endif
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         // it is possible for sync request to carry no bio
@@ -257,8 +277,11 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 
         if (!specialops)
                 rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
-
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	bio = bio_alloc_bioset(rq->bio->bi_bdev, nr_bvec, rq->bio->bi_opf,GFP_KERNEL, get_fpbioset());
+#else
         bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
+#endif
         if (!bio) {
                 dump_allocs();
                 return -ENOMEM;
@@ -273,8 +296,21 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         bio->bi_size = 0;
 #endif
         bio->bi_end_io = stub_endio; // should never get called
-        BIO_COPY_DEV(bio, rq->bio);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0) /// to sync up with the usage of newer bio_alloc_bioset.
+#if defined(__EL8__)
+	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0)
+	BIO_COPY_DEV(bio, rq->bio);
         BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
+#endif
+	
+#else
+	BIO_COPY_DEV(bio, rq->bio);
+	BIO_SET_OP_ATTRS(bio, BIO_OP(rq->bio), op_flags);
+#endif
+	
+#endif
         bio->bi_private = fproot;
 
         if (specialops) {
@@ -334,7 +370,12 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         if (!fproot->bio) { // can only be flush request
-                clone_bio = bio_alloc_bioset(GFP_KERNEL, 0, get_fpbioset());
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	clone_bio = bio_alloc_bioset(NULL, 0, 0, GFP_KERNEL, get_fpbioset());
+#else
+	clone_bio = bio_alloc_bioset(GFP_KERNEL, 0, get_fpbioset());
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
                 BUG_ON((REQ_OP(rq) & REQ_OP_FLUSH) != REQ_OP_FLUSH);
                 BIO_SET_OP_ATTRS(clone_bio, REQ_OP_FLUSH, REQ_FUA);
@@ -343,7 +384,9 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
                 BIO_SET_OP_ATTRS(clone_bio, REQ_FLUSH, REQ_FUA);
 #endif
         } else {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	  clone_bio = bio_alloc_clone(fproot->bio->bi_bdev, fproot->bio, GFP_KERNEL, get_fpbioset());
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
                 clone_bio =
                     bio_clone_fast(fproot->bio, GFP_KERNEL, get_fpbioset());
 #else
@@ -550,7 +593,6 @@ static void pxd_failover_initiate(struct fp_root_context *fproot) {
 // io handling functions
 // discard is special ops
 static void fp_handle_specialops(struct work_struct *work) {
-        struct page *pg = ZERO_PAGE(0); // global shared zero page
         struct fp_clone_context *cc =
             container_of(work, struct fp_clone_context, work);
         struct fp_root_context *fproot = cc->fproot;
@@ -577,25 +619,45 @@ static void fp_handle_specialops(struct work_struct *work) {
         BUG_ON(!rq_is_special(rq));
         atomic_inc(&pxd_dev->fp.nio_discard);
 
-        // submit discard to replica
-        if (blk_queue_discard(q)) { // discard supported
-                r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
-                                         blk_rq_sectors(rq), GFP_NOIO, 0);
-        } else if (bdev_write_same(bdev)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	if (bdev_max_discard_sectors(bdev)) {  // discard supported
+          r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
+				   blk_rq_sectors(rq), GFP_NOIO);
+	} else { // zero-out
+	  r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
+				   blk_rq_sectors(rq), GFP_NOIO, 0);
+	}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) 
+	if (blk_queue_discard(q)) { // discard supported
+	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
+				   blk_rq_sectors(rq), GFP_NOIO, 0);
+	} else { // zero-out
+	  r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
+				   blk_rq_sectors(rq), GFP_NOIO, 0);
+	}
+#else
+    // submit discard to replica
+    if (blk_queue_discard(q)) { // discard supported
+	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
+				   blk_rq_sectors(rq), GFP_NOIO, 0);
+	} else if (bdev_write_same(bdev)) {
+	         struct page *pg = ZERO_PAGE(0); // global shared zero page
+
                 // convert discard to write same
                 r = blkdev_issue_write_same(bdev, blk_rq_pos(rq),
-                                            blk_rq_sectors(rq), GFP_NOIO, pg);
-        } else { // zero-out
+		blk_rq_sectors(rq), GFP_NOIO, pg);
+	} else {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
-                r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
-                                         blk_rq_sectors(rq), GFP_NOIO, 0);
+	r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
+				 blk_rq_sectors(rq), GFP_NOIO, 0);
 #else
-                r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
-                                         blk_rq_sectors(rq), GFP_NOIO);
+	r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
+				 blk_rq_sectors(rq), GFP_NOIO);
 #endif
-        }
+	}
+#endif
 
-        BIO_ENDIO(&cc->clone, r);
+	BIO_ENDIO(&cc->clone, r);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)

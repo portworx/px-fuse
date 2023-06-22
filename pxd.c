@@ -741,7 +741,9 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 {
 	int rc;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_ZEROES);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_SAME);
 #else
 	rc = pxd_handle_device_limits(req, &size, &off, REQ_WRITE_SAME);
@@ -769,7 +771,11 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
 
 	switch (op) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	case REQ_OP_WRITE_ZEROES:
+#else
 	case REQ_OP_WRITE_SAME:
+#endif
 		rc = pxd_write_same_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_WRITE:
@@ -1255,7 +1261,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->major = pxd_dev->major;
 	disk->first_minor = pxd_dev->minor;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
 	disk->flags |= GENHD_FL_NO_PART;
 #else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
@@ -1277,8 +1283,20 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,18,0)
+
+#if defined(__EL8__)
+	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0)
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
+#endif
+	
+#else
+	/* Enable discard support. */
+	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
+#endif
+#endif
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
@@ -1322,7 +1340,11 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk) {
 		del_gendisk(disk);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) 
+		if (disk->queue) {
+			put_disk(disk);
+		}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 		if (disk->queue) {
 			blk_cleanup_disk(disk);
 		}
@@ -1523,7 +1545,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 
 	if (pxd_dev) {
-#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
 		int rc = add_disk(pxd_dev->disk);
 		if (rc) {
 			return rc;
