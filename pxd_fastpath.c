@@ -565,14 +565,6 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 		pxd_resume_io(pxd_dev);
 	}
 
-#ifdef __PXD_BIO_BLKMQ__
-	BUG_ON(atomic_read(&fp->blkmq_frozen) != 0);
-#endif
-	BUG_ON(atomic_read(&fp->suspend) != 0);
-	BUG_ON(atomic_read(&fp->app_suspend) != 0);
-	BUG_ON(atomic_read(&fp->ioswitch_active) != 0);
-	BUG_ON(pxd_dev->fp.switch_uid != 0);
-
 	printk("pxd fastpath device %llu reset complete\n", pxd_dev->dev_id);
 }
 
