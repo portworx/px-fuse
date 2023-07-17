@@ -529,8 +529,6 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 	}
 
 	disableFastPath(pxd_dev, true);
-	// resume from userspace IO suspends after px restarts
-	pxd_request_resume(pxd_dev);
 
 	// abort any inflight ioswitch
 	if (atomic_read(&fp->ioswitch_active)) {
@@ -541,6 +539,9 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 			request_end(fc, req, -EIO);
 		}
 	}
+
+	// resume from userspace IO suspends
+	pxd_request_resume(pxd_dev);
 
 	// resume all suspended callstacks
 	while (atomic_read(&fp->suspend) > 0) {
