@@ -134,7 +134,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__)
 
 #include <linux/ctype.h>
 
