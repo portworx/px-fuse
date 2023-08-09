@@ -26,6 +26,7 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct delayed_work abort_work;
 	uint64_t open_seq;
+	struct work_struct abort_force;
 };
 
 struct pxd_context* find_context(unsigned ctx);

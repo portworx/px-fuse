@@ -47,6 +47,7 @@
 #define PXD_IOC_REGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 13)    /* 0x50580d */
 #define PXD_IOC_UNREGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 14)    /* 0x50580e */
 #define PXD_IOC_REGISTER_REGION	_IO(PXD_IOCTL_MAGIC, 15)
+#define PXD_IOC_ABORT_CONTEXT_FORCE	_IO(PXD_IOCTL_MAGIC, 16)
 
 struct pxd_ioc_register_buffers {
 	void *base;
@@ -77,6 +78,7 @@ struct pxd_ioc_register_region {
 #define PROC_PX_CONTROL		"px"
 #define PROC_PX_TOOL		"pxd"
 #define PROC_PX_UT			"t"
+#define PROC_PX_DUMMY			"dummy"
 
 /** fuse opcodes */
 enum pxd_opcode {
@@ -202,6 +204,11 @@ struct pxd_update_size {
 	int context_id;
 };
 
+/**
+ */
+struct pxd_abort_force {
+	int context_id;
+};
 /**
  * PXD_SET_FASTPATH request from user space
  */

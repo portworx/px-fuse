@@ -185,6 +185,36 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	return pxd_read_init(&ctx->fc, &iter);
 }
 
+static void pxd_ioctl_abort_force_work(struct work_struct *work)
+{
+	struct pxd_context *ctx = container_of(work, struct pxd_context, abort_force);
+	fuse_end_queued_requests(&ctx->fc);
+}
+
+static long pxd_ioctl_abort_force(struct file *file, void __user *argp)
+{
+	struct pxd_context *ctx = NULL;
+	struct pxd_abort_force args;
+
+	if (copy_from_user(&args, argp, sizeof(args))) {
+		return -EFAULT;
+	}
+
+	if (args.context_id >= pxd_num_contexts_exported) {
+		printk("%s : invalid context: %d\n", __func__, args.context_id);
+		return -EFAULT;
+	}
+
+	ctx =  &pxd_contexts[args.context_id];
+	if (!ctx || ctx->id >= pxd_num_contexts_exported) {
+		return -EFAULT;
+	}
+
+	INIT_WORK(&ctx->abort_force, pxd_ioctl_abort_force_work);
+	schedule_work(&ctx->abort_force);
+	return 0;
+}
+
 static long pxd_ioctl_resize(struct file *file, void __user *argp)
 {
 	struct pxd_context *ctx = NULL;
@@ -359,6 +389,8 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_fp_cleanup(file, (void __user *)arg);
 	case PXD_IOC_IO_FLUSHER:
 		return pxd_ioflusher_state((void __user *)arg);
+	case PXD_IOC_ABORT_CONTEXT_FORCE:
+		return pxd_ioctl_abort_force(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -1263,6 +1295,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
 
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+       blk_mq_freeze_queue(q);
+#endif
+
 	return 0;
 out_disk:
 	put_disk(disk);
@@ -1517,6 +1553,9 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
         device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #else
         add_disk(pxd_dev->disk);
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+               blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
 #endif
 
         pxd_dev->exported = true;
@@ -2276,6 +2315,7 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	if (strcmp(current->comm, PROC_PX_STORAGE) != 0 &&
 		strcmp(current->comm, PROC_PX_CONTROL) != 0 &&
 		strcmp(current->comm, PROC_PX_UT) != 0 &&
+		strcmp(current->comm, PROC_PX_DUMMY) != 0 &&
 		strcmp(current->comm, PROC_PX_TOOL) != 0) {
 		printk_ratelimited(KERN_INFO "%s: invalid access comm=%s",
 			__func__, current->comm);
@@ -2339,7 +2379,8 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		WRITE_ONCE(ctx->fc.connected, 0);
 	}
 
-	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
+	//XXX: Disabled IO TIMEOUT
+	//schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
 	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
