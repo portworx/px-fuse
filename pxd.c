@@ -1,3 +1,4 @@
+#include "fuse.h"
 #include <linux/module.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
@@ -1304,7 +1305,9 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk) {
 		del_gendisk(disk);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
+		pxd_dev->disk = NULL;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
 		if (disk->queue) {
 			blk_cleanup_disk(disk);
 		}
@@ -1417,6 +1420,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
+	init_waitqueue_head(&pxd_dev->remove_wait);
 	// hard coded congestion limits within driver
 	atomic_set(&pxd_dev->congested, 0);
 	pxd_dev->qdepth = DEFAULT_CONGESTION_THRESHOLD;
@@ -1561,49 +1565,90 @@ cleanup:
     return err;
 }
 
+static void pxd_finish_remove(struct work_struct *work)
+{
+	struct pxd_device *pxd_dev = container_of(work, struct pxd_device, remove_work);
+
+	pr_info("%s: dev %llu\n", __func__, pxd_dev->dev_id);
+
+	pxd_fastpath_reset_device(pxd_dev);
+
+	/* Make sure the req_fn isn't called anymore even if the device hangs around */
+	if (pxd_dev->disk && pxd_dev->disk->queue){
+#ifndef __PX_BLKMQ__
+		mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
+
+		QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
+
+		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+		// Do not mark queue dead, del_gendisk will try to
+		// submit all outstanding IOs on this device
+#else
+		blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
+#endif
+	}
+
+	pxd_free_disk(pxd_dev);
+
+	get_device(&pxd_dev->dev);
+	device_unregister(&pxd_dev->dev);
+
+	spin_lock(&pxd_dev->ctx->lock);
+	spin_lock(&pxd_dev->lock);
+	--pxd_dev->ctx->num_devices;
+	pxd_dev->exported = false;
+	list_del(&pxd_dev->node);
+	wake_up_all(&pxd_dev->remove_wait);
+	spin_unlock(&pxd_dev->lock);
+	spin_unlock(&pxd_dev->ctx->lock);
+
+	put_device(&pxd_dev->dev);
+
+	module_put(THIS_MODULE);
+}
+
 ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	int found = false;
 	int err;
 	struct pxd_device *pxd_dev;
-	bool cleanup = false;
+	DEFINE_WAIT(wait);
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
 		if (pxd_dev->dev_id == remove->dev_id) {
 			spin_lock(&pxd_dev->lock);
-			if (!pxd_dev->open_count || remove->force) {
-				list_del(&pxd_dev->node);
-				--ctx->num_devices;
-			}
-			found = true;
 			break;
 		}
 	}
-	spin_unlock(&ctx->lock);
-
-	if (!found) {
+	if (&pxd_dev->node == &ctx->list) {
 		err = -ENOENT;
 		goto out;
+	}
+	if (!pxd_dev->exported) {
+		err = -ENOENT;
+		goto out_lock;
 	}
 
 	if (pxd_dev->open_count && !remove->force) {
 		err = -EBUSY;
-		spin_unlock(&pxd_dev->lock);
-		goto out;
+		goto out_lock;
 	}
 
-	pxd_dev->removing = true;
-	wmb();
-	pr_info("removing device %llu", pxd_dev->dev_id);
-
-	cleanup = pxd_dev->exported;
-	pxd_dev->exported = false;
+	if (!pxd_dev->removing) {
+		pxd_dev->removing = true;
+		INIT_WORK(&pxd_dev->remove_work, pxd_finish_remove);
+		schedule_work(&pxd_dev->remove_work);
+	}
+	get_device(&pxd_dev->dev);
+	prepare_to_wait(&pxd_dev->remove_wait, &wait, TASK_INTERRUPTIBLE);
 	spin_unlock(&pxd_dev->lock);
 
 	/// perform all below actions on the kernel object if device got exported.
-	if (cleanup) {
+	if (pxd_dev->exported) {
 		pxd_fastpath_reset_device(pxd_dev);
 
 		/* Make sure the req_fn isn't called anymore even if the device hangs around */
@@ -1622,7 +1667,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 			blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
 #endif
-	}
+		}
 
 	spin_unlock(&pxd_dev->lock);
 
@@ -1632,12 +1677,21 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	disableFastPath(pxd_dev, false);
 	device_unregister(&pxd_dev->dev);
 
-		module_put(THIS_MODULE);
+	module_put(THIS_MODULE);
 	}
-
+	spin_unlock(&ctx->lock);
+	schedule();
+	finish_wait(&pxd_dev->remove_wait, &wait);
+	put_device(&pxd_dev->dev);
+	if (signal_pending(current)) {
+		return -ERESTARTSYS;
+	}
 	return 0;
+out_lock:
+	spin_unlock(&pxd_dev->lock);
 out:
-	pr_err("remove device %llu failed %d", pxd_dev->dev_id, err);
+	spin_unlock(&ctx->lock);
+	pr_err("remove device %llu failed %d\n", remove->dev_id, err);
 	return err;
 }
 
@@ -1706,7 +1760,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	struct pxd_device *pxd_dev;
 	struct pxd_init_in pxd_init;
 
-	spin_lock(&fc->lock);
+	spin_lock(&ctx->lock);
 
 	pxd_init.num_devices = ctx->num_devices;
 	pxd_init.version = PXD_VERSION;
@@ -1740,7 +1794,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		copied += sizeof(id);
 	}
 
-	spin_unlock(&fc->lock);
+	spin_unlock(&ctx->lock);
 
 	printk(KERN_INFO "%s: pxd-control-%d init OK %d devs version %d\n", __func__,
 		ctx->id, pxd_init.num_devices, pxd_init.version);
@@ -1748,7 +1802,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	return copied;
 
 copy_error:
-	spin_unlock(&fc->lock);
+	spin_unlock(&ctx->lock);
 	return -EFAULT;
 }
 

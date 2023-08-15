@@ -129,6 +129,7 @@ struct io_ring_ctx {
 		 */
 		struct list_head	poll_list;
 		struct list_head	cancel_list;
+		struct list_head	sock_poll_list;
 	} ____cacheline_aligned_in_smp;
 
 	uint32_t context_id;
@@ -155,6 +156,14 @@ struct io_poll_iocb {
 	struct wait_queue_entry		wait;
 };
 
+struct io_sock_poll {
+	struct file *file;
+	void (*data_ready)(struct sock *sk);
+	void (*write_space)(struct sock *sk);
+	void (*state_change)(struct sock *sk);
+	atomic_t sent_events;
+};
+
 /*
  * NOTE! Each of the iocb union members has the file pointer
  * as the first entry in their struct definition. So you can
@@ -166,6 +175,7 @@ struct io_kiocb {
 		struct file		*file;
 		struct kiocb		rw;
 		struct io_poll_iocb	poll;
+		struct io_sock_poll	sock_poll;
 	};
 
 	struct sqe_submit	submit;
