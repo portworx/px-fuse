@@ -47,6 +47,8 @@
 #define PXD_IOC_REGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 13)    /* 0x50580d */
 #define PXD_IOC_UNREGISTER_BUFFERS _IO(PXD_IOCTL_MAGIC, 14)    /* 0x50580e */
 #define PXD_IOC_REGISTER_REGION	_IO(PXD_IOCTL_MAGIC, 15)
+#define PXD_IOC_GIVE_BUFFERS	_IO(PXD_IOCTL_MAGIC, 16)
+#define PXD_IOC_FREE_BUFFERS	_IO(PXD_IOCTL_MAGIC, 17)
 
 struct pxd_ioc_register_buffers {
 	void *base;
@@ -57,6 +59,17 @@ struct pxd_ioc_register_buffers {
 struct pxd_ioc_register_region {
 	void *base;
 	size_t len;
+};
+
+struct pxd_ioc_give_buffers {
+	size_t count;	      /* number of entries in buffers */
+	void *const *buffers; /* list of buffers to transfer to the kernel */
+};
+
+/* returns number of buffers returned to user space */
+struct pxd_ioc_free_buffers {
+	size_t count;	/* number of entries in buffers */
+	void **buffers;	/* list of buffers returned to user space filled by ioctl */
 };
 
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
