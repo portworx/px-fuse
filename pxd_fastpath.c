@@ -421,7 +421,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	decode_mode(mode, modestr);
 	printk("device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
 			pxd_dev->dev_id, mode, modestr, update_path->count);
-
+	printk("prince_log 1");
 	if (update_path->count > MAX_PXD_BACKING_DEVS) {
 		printk("device %llu path count more than max supported(%ld)\n",
 				pxd_dev->dev_id, update_path->count);

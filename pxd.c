@@ -1405,6 +1405,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
+	printk(KERN_INFO"prince_log 2");
 
 	// initializes fastpath context part of pxd_dev
 	err = pxd_fastpath_init(pxd_dev);
