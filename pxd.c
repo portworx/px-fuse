@@ -1496,10 +1496,10 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
             goto cleanup;
         }
 
+        spin_unlock(&pxd_dev->lock);
         err = pxd_bus_add_dev(pxd_dev);
         if (err) {
             pxd_free_disk(pxd_dev);
-            spin_unlock(&pxd_dev->lock);
             module_put(THIS_MODULE);
             goto cleanup;
         }
@@ -1509,7 +1509,6 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
         if (err) {
             device_unregister(&pxd_dev->dev);
             pxd_free_disk(pxd_dev);
-            spin_unlock(&pxd_dev->lock);
             module_put(THIS_MODULE);
             goto cleanup;
         }
@@ -1519,6 +1518,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
         add_disk(pxd_dev->disk);
 #endif
 
+        spin_lock(&pxd_dev->lock);
         pxd_dev->exported = true;
         spin_unlock(&pxd_dev->lock);
 
