@@ -1484,6 +1484,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
+	printk(KERN_INFO"prince_log 1");
 
 	// initializes fastpath context part of pxd_dev
 	err = pxd_fastpath_init(pxd_dev);
@@ -1513,12 +1514,13 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		}
 	}
 
+	spin_unlock(&ctx->lock);
 	err = pxd_bus_add_dev(pxd_dev);
 	if (err) {
-		spin_unlock(&ctx->lock);
 		goto out_disk;
 	}
 
+	spin_lock(&ctx->lock);
 	list_add(&pxd_dev->node, &ctx->list);
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
