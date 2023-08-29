@@ -1513,18 +1513,21 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		}
 	}
 
-	err = pxd_bus_add_dev(pxd_dev);
-	if (err) {
-		spin_unlock(&ctx->lock);
-		goto out_disk;
-	}
-
 	list_add(&pxd_dev->node, &ctx->list);
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
+	err = pxd_bus_add_dev(pxd_dev);
+	if (err) {
+		goto out_list;
+	}
 
 	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
+out_list:
+	spin_lock(&ctx->lock);
+	list_del(&pxd_dev->node);
+	--ctx->num_devices;
+	spin_unlock(&ctx->lock);
 out_disk:
 	pxd_free_disk(pxd_dev);
 out_id:
