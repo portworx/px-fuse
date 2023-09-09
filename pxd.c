@@ -1647,38 +1647,6 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	prepare_to_wait(&pxd_dev->remove_wait, &wait, TASK_INTERRUPTIBLE);
 	spin_unlock(&pxd_dev->lock);
 
-	/// perform all below actions on the kernel object if device got exported.
-	if (pxd_dev->exported) {
-		pxd_fastpath_reset_device(pxd_dev);
-
-		/* Make sure the req_fn isn't called anymore even if the device hangs around */
-		if (pxd_dev->disk && pxd_dev->disk->queue){
-#ifndef __PX_BLKMQ__
-			mutex_lock(&pxd_dev->disk->queue->sysfs_lock);
-
-			QUEUE_FLAG_SET(QUEUE_FLAG_DYING, pxd_dev->disk->queue);
-
-			mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
-#else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-			// Do not mark queue dead, del_gendisk will try to
-			// submit all outstanding IOs on this device
-#else
-			blk_set_queue_dying(pxd_dev->disk->queue);
-#endif
-#endif
-		}
-
-	spin_unlock(&pxd_dev->lock);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-	pxd_free_disk(pxd_dev);
-#endif
-	disableFastPath(pxd_dev, false);
-	device_unregister(&pxd_dev->dev);
-
-	module_put(THIS_MODULE);
-	}
 	spin_unlock(&ctx->lock);
 	schedule();
 	finish_wait(&pxd_dev->remove_wait, &wait);
