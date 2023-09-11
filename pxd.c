@@ -1261,7 +1261,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, struct pxd_add_ext_out *add
 	disk->major = pxd_dev->major;
 	disk->first_minor = pxd_dev->minor;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))
 	disk->flags |= GENHD_FL_NO_PART;
 #else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;

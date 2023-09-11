@@ -134,7 +134,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-#if LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__)
+#if LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)
 
 #include <linux/ctype.h>
 
@@ -156,9 +156,8 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 #define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
 
 #else
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,14,0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__))
 #define BDEVNAME(bio, b)   bdevname(bio->bi_bdev, b)
 #else
 #define BDEVNAME(bio, b)   bio_devname(bio, b)

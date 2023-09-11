@@ -2,6 +2,7 @@
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/blk_types.h>
+#include <linux/blkdev.h>
 
 #include "pxd_compat.h"
 #include "pxd_core.h"
