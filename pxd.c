@@ -1248,7 +1248,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
 		 PXD_DEV"%llu", pxd_dev->dev_id);
 	disk->major = pxd_dev->major;
-	disk->minors = 256;
+	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
 #ifdef __PXD_BIO_MAKEREQ__
