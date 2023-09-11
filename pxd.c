@@ -1530,8 +1530,8 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
         }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-        err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
-        if (err) {
+		int rc = add_disk(pxd_dev->disk);
+        if (rc) {
             device_unregister(&pxd_dev->dev);
             pxd_free_disk(pxd_dev);
             module_put(THIS_MODULE);
