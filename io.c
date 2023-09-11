@@ -588,7 +588,8 @@ static inline void io_rw_done(struct kiocb *kiocb, ssize_t ret)
 		 * IO with EINTR.
 		 */
 		ret = -EINTR;
-		/* fall through */
+		kiocb->ki_complete(kiocb, ret, 0);
+		break;
 	default:
 		kiocb->ki_complete(kiocb, ret, 0);
 	}
