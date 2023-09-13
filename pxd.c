@@ -1171,7 +1171,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 		if (!disk) {
 			return -ENOMEM;
 		}
-		//disk->fops = get_bd_fpops();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
 		q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
@@ -1251,11 +1250,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
-#ifdef __PXD_BIO_MAKEREQ__
-		disk->fops = get_bd_fpops();
-#else
-		disk->fops = &pxd_bd_ops;
-#endif
+	disk->fops = get_bd_fpops();
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
