@@ -158,6 +158,7 @@ docker-build: docker-build-dev
 px_version.c:
 	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD | sed 's/remotes\/origin\///g'):$(shell git rev-parse HEAD)\";" > .$@
 	cc -c -o px_version.o_shipped  .$@
+	touch .px_version.o.cmd
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
