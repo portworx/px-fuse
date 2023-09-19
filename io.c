@@ -581,7 +581,7 @@ static inline void io_rw_done(struct kiocb *kiocb, ssize_t ret)
 {
 	switch (ret) {
 	case -EIOCBQUEUED:
-		break;
+		return;
 	case -ERESTARTSYS:
 	case -ERESTARTNOINTR:
 	case -ERESTARTNOHAND:
