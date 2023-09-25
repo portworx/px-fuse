@@ -131,7 +131,7 @@ ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CP
 
 .PHONY: rpm
 
-all: px_version.c
+all: .px_version.c
 	make $(FORCE_CC) -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
 
 insert: all
@@ -139,6 +139,7 @@ insert: all
 
 clean:
 	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) clean
+	@/bin/rm -f .px_version.c
 
 install:
 	make V=1 -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules_install
@@ -155,10 +156,10 @@ docker-build: docker-build-dev
 	-v $(shell pwd):/home/px-fuse \
 	portworx/px-fuse:dev make
 
-px_version.c:
-	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD | sed 's/remotes\/origin\///g'):$(shell git rev-parse HEAD)\";" > .$@
-	cc -c -o px_version.o_shipped  .$@
-	touch .px_version.o.cmd
+.px_version.c:
+	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD | sed 's/remotes\/origin\///g'):$(shell git rev-parse HEAD)\";" > $@
+	cc -c -o px_version.o_shipped  $@
+	echo "$(px_version.o):" > .px_version.o.cmd
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
