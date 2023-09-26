@@ -507,7 +507,11 @@ static void kiocb_end_write(struct kiocb *kiocb)
 	}
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
+static void io_complete_rw(struct kiocb *kiocb, long res)
+#else
 static void io_complete_rw(struct kiocb *kiocb, long res, long res2)
+#endif
 {
 	struct io_kiocb *req = container_of(kiocb, struct io_kiocb, rw);
 
@@ -577,7 +581,7 @@ static inline void io_rw_done(struct kiocb *kiocb, ssize_t ret)
 {
 	switch (ret) {
 	case -EIOCBQUEUED:
-		break;
+		return;
 	case -ERESTARTSYS:
 	case -ERESTARTNOINTR:
 	case -ERESTARTNOHAND:
@@ -588,11 +592,13 @@ static inline void io_rw_done(struct kiocb *kiocb, ssize_t ret)
 		 * IO with EINTR.
 		 */
 		ret = -EINTR;
-		kiocb->ki_complete(kiocb, ret, 0);
 		break;
-	default:
-		kiocb->ki_complete(kiocb, ret, 0);
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
+		kiocb->ki_complete(kiocb, ret);
+#else
+		kiocb->ki_complete(kiocb, ret, 0);
+#endif
 }
 
 static int io_import_fixed(struct io_ring_ctx *ctx, int rw,
