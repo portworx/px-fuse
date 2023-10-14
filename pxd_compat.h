@@ -172,12 +172,14 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 
 #endif
 
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
 static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
                                     blk_opf_t op_flags)
 {
-        bio->bi_opf = op_flags;                                                                                                                                                   
+  bio->bi_opf = op;
 }
+
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)
