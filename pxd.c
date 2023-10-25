@@ -182,7 +182,7 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	struct iov_iter iter;
 	struct iovec iov = {argp, sizeof(struct pxd_ioctl_init_args)};
 
-	iov_iter_init(&iter, WRITE, &iov, 1, sizeof(struct pxd_ioctl_init_args));
+	iov_iter_init(&iter, READ, &iov, 1, sizeof(struct pxd_ioctl_init_args));
 
 	return pxd_read_init(&ctx->fc, &iter);
 }
