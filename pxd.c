@@ -1708,6 +1708,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		printk(KERN_ERR "%s: copy pxd_init error\n", __func__);
 		goto copy_error;
 	}
+
 	copied += sizeof(pxd_init);
 
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -1731,6 +1732,8 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		}
 		copied += sizeof(id);
 	}
+
+	iter->data_source = WRITE;   // Reset to 'WRITE'  
 
 	spin_unlock(&fc->lock);
 
