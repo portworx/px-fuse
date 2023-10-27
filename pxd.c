@@ -1737,6 +1737,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		}
 		copied += sizeof(id);
 	}
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
 	iter->data_source = WRITE;   // Reset to 'WRITE'  
 #endif
