@@ -189,7 +189,7 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	struct iov_iter iter;
 	struct iovec iov = {argp, sizeof(struct pxd_ioctl_init_args)};
 
-	iov_iter_init(&iter, WRITE, &iov, 1, sizeof(struct pxd_ioctl_init_args));
+	iov_iter_init(&iter, READ, &iov, 1, sizeof(struct pxd_ioctl_init_args));
 
 	return pxd_read_init(&ctx->fc, &iter);
 }
@@ -1342,7 +1342,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk) {
 		del_gendisk(disk);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) 
 		if (disk->queue) {
 			put_disk(disk);
 		}
@@ -1711,6 +1711,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		printk(KERN_ERR "%s: copy pxd_init error\n", __func__);
 		goto copy_error;
 	}
+
 	copied += sizeof(pxd_init);
 
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
@@ -1733,6 +1734,8 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		}
 		copied += sizeof(id);
 	}
+
+	iter->data_source = WRITE;   // Reset to 'WRITE'  
 
 	spin_unlock(&fc->lock);
 
