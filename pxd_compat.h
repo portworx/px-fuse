@@ -134,7 +134,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 	return op_flags;
 }
 
-#if LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0) || LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)
 
 #include <linux/ctype.h>
 
@@ -169,6 +169,16 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 	(dst)->bi_bdev = (src)->bi_bdev; 		\
 } while (0)
 #endif
+
+#endif
+
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
+static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
+                                    blk_opf_t op_flags)
+{
+  bio->bi_opf = op;
+}
 
 #endif
 
