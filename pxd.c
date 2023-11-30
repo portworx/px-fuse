@@ -1635,7 +1635,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 
 	return 0;
 out:
-	pr_err("remove device %llu failed %d", pxd_dev->dev_id, err);
+	pr_err("remove device %llu failed %d", remove->dev_id, err);
 	return err;
 }
 
