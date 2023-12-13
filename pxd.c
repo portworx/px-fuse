@@ -1615,8 +1615,8 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-		// Do not mark queue dead, del_gendisk will try to
-		// submit all outstanding IOs on this device
+		blk_freeze_queue_start(pxd_dev->disk->queue);
+		blk_mark_disk_dead(pxd_dev->disk);
 #else
 		blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
