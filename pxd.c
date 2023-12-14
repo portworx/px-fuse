@@ -159,8 +159,12 @@ static long pxd_ioctl_get_version(void __user *argp)
 	int ver_len = 0;
 
 	if (argp) {
-		ver_len = strlen(gitversion) < 64 ? strlen(gitversion) : 64;
+		ver_len = strlen(gitversion) + 1; // account for null
+		if (sizeof(ver_data) < ver_len) {
+			ver_len = sizeof(ver_data);
+		}
 		strncpy(ver_data, gitversion, ver_len);
+		ver_data[ver_len-1]='\0';
 		if (copy_to_user(argp +
 				 offsetof(struct pxd_ioctl_version_args, piv_len),
 			&ver_len, sizeof(ver_len))) {
