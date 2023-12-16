@@ -1457,11 +1457,12 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->nr_congestion_off = 0;
 	atomic_set(&pxd_dev->ncount, 0);
 
+	pxd_dev->queue_depth = PXD_MAX_QDEPTH;
 	if (add->queue_depth < 0 || add->queue_depth > PXD_MAX_QDEPTH) {
 		err = -EINVAL;
 		goto out_module;
 	} else if (add->queue_depth != 0) {
-		pxd_dev->qdepth = add->queue_depth;
+		pxd_dev->queue_depth = add->queue_depth;
 	}
 
 	if (add->discard_size < SECTOR_SIZE)
