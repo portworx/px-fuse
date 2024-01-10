@@ -1270,7 +1270,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->first_minor = pxd_dev->minor;
 
 #if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
-	//#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__) && !defined(QUEUE_FLAG_DEAD))
 	disk->flags |= GENHD_FL_NO_PART;
 #else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
@@ -1630,7 +1629,7 @@ static void pxd_finish_remove(struct work_struct *work)
 	// so freeze queue and then mark queue dead to ensure no new reqs
 	// gets accepted.
     blk_freeze_queue_start(pxd_dev->disk->queue);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE__)))
     blk_mark_disk_dead(pxd_dev->disk);
 #else
     blk_set_queue_dying(pxd_dev->disk->queue);
