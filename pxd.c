@@ -1623,11 +1623,18 @@ static void pxd_finish_remove(struct work_struct *work)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
-		blk_freeze_queue_start(pxd_dev->disk->queue);
-		blk_mark_disk_dead(pxd_dev->disk);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+	// del_gendisk will try to fsync device
+	// so freeze queue and then mark queue dead to ensure no new reqs
+	// gets accepted.
+    blk_freeze_queue_start(pxd_dev->disk->queue);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25)
+    blk_mark_disk_dead(pxd_dev->disk);
 #else
-		blk_set_queue_dying(pxd_dev->disk->queue);
+    blk_set_queue_dying(pxd_dev->disk->queue);
+#endif
+#else
+    blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
 #endif
 	}
