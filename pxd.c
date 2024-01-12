@@ -472,7 +472,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__) 
 {
 		struct block_device *p = pxd_dev->disk->part0;
 		if (!p) return;
@@ -765,7 +765,7 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 {
 	int rc;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE__)))
 	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_ZEROES);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
 	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_SAME);
@@ -795,7 +795,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
 
 	switch (op) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE__)))
 	case REQ_OP_WRITE_ZEROES:
 #else
 	case REQ_OP_WRITE_SAME:
@@ -1207,7 +1207,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	 	q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
-#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
+#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT) 
         q = blk_alloc_queue_rh(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
@@ -1283,7 +1283,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
 
-#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))
+#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	disk->flags |= GENHD_FL_NO_PART;
 #else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
@@ -1302,18 +1302,19 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_physical_block_size(q, PXD_LBS);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
-#if defined(__EL8__)
+#if defined(__EL8__) || defined(__SUSE__)
 
-#if LINUX_VERSION_CODE != KERNEL_VERSION(5,14,0)
+#if defined(QUEUE_FLAG_DISCARD)
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif
+#endif                                                       
 
-#else
+#else                                                         // #else for defined(__EL8__) || defined(__SUSE__)
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif
-#endif
+#endif                                                        // #endif for defined(__EL8__) || defined(__SUSE__)
+#endif                                                        // #endif for LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
+	
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
 	if (pxd_dev->discard_size < SECTOR_SIZE)
@@ -1356,7 +1357,7 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	if (disk) {
 		del_gendisk(disk);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,0,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE__)))
 		if (disk->queue) {
 			put_disk(disk);
 		}
@@ -1589,7 +1590,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE__)))
 	err = add_disk(pxd_dev->disk);
 	if (err) {
 		device_unregister(&pxd_dev->dev);
@@ -1642,7 +1643,7 @@ static void pxd_finish_remove(struct work_struct *work)
 	// so freeze queue and then mark queue dead to ensure no new reqs
 	// gets accepted.
     blk_freeze_queue_start(pxd_dev->disk->queue);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE__)))
     blk_mark_disk_dead(pxd_dev->disk);
 #else
     blk_set_queue_dying(pxd_dev->disk->queue);

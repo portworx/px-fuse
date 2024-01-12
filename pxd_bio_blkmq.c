@@ -6,7 +6,7 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__)) || defined(__SUSE__))
 #include <linux/kdev_t.h>
 #include <linux/uuid.h>
 #include <linux/blk_types.h>
@@ -250,7 +250,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         bool specialops = rq_is_special(rq);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0) /// to sync up with the usage of newer bio_alloc_bioset.
 
-#if defined(__EL8__)
+#if defined(__EL8__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0)
         unsigned int op_flags = get_op_flags(rq->bio);
@@ -277,7 +277,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 
         if (!specialops)
                 rq_for_each_segment(bv, rq, rq_iter) nr_bvec++;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	bio = bio_alloc_bioset(rq->bio->bi_bdev, nr_bvec, rq->bio->bi_opf,GFP_KERNEL, get_fpbioset());
 #else
         bio = bio_alloc_bioset(GFP_KERNEL, nr_bvec, get_fpbioset());
@@ -298,7 +298,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         bio->bi_end_io = stub_endio; // should never get called
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0) /// to sync up with the usage of newer bio_alloc_bioset.
-#if defined(__EL8__)
+#if defined(__EL8__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0)
 	BIO_COPY_DEV(bio, rq->bio);
@@ -370,7 +370,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
         if (!fproot->bio) { // can only be flush request
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	clone_bio = bio_alloc_bioset(NULL, 0, 0, GFP_KERNEL, get_fpbioset());
 #else
 	clone_bio = bio_alloc_bioset(GFP_KERNEL, 0, get_fpbioset());
@@ -384,7 +384,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
                 BIO_SET_OP_ATTRS(clone_bio, REQ_FLUSH, REQ_FUA);
 #endif
         } else {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	  clone_bio = bio_alloc_clone(fproot->bio->bi_bdev, fproot->bio, GFP_KERNEL, get_fpbioset());
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0)
                 clone_bio =
@@ -619,7 +619,7 @@ static void fp_handle_specialops(struct work_struct *work) {
         BUG_ON(!rq_is_special(rq));
         atomic_inc(&pxd_dev->fp.nio_discard);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))  || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE__))
 	if (bdev_max_discard_sectors(bdev)) {  // discard supported
           r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO);
