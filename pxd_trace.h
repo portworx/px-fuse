@@ -32,6 +32,23 @@ TRACE_EVENT(
 
 TRACE_EVENT(
 	pxd_release,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
+	TP_PROTO(uint64_t dev_id, int major, int minor),
+	TP_ARGS(dev_id, major, minor),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, major)
+		__field(int, minor)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->major = major,
+		__entry->minor = minor
+	),
+	TP_printk(
+		"dev_id %llu major %d minor %d",
+		__entry->dev_id, __entry->major, __entry->minor)
+#else
 	TP_PROTO(uint64_t dev_id, int major, int minor, fmode_t mode),
 	TP_ARGS(dev_id, major, minor, mode),
 	TP_STRUCT__entry(
@@ -49,6 +66,7 @@ TRACE_EVENT(
 	TP_printk(
 		"dev_id %llu major %d minor %d mode %x",
 		__entry->dev_id, __entry->major, __entry->minor, __entry->mode)
+#endif
 );
 
 TRACE_EVENT(

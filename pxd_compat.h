@@ -173,7 +173,7 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 #endif
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && defined(QUEUE_FLAG_SKIP_TAGSET_QUIESCE))
 static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
                                     blk_opf_t op_flags)
 {
