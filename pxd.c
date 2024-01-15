@@ -1584,19 +1584,24 @@ static void pxd_finish_remove(struct work_struct *work)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE__)))
 	// del_gendisk will try to fsync device
-	// so freeze queue and then mark queue dead to ensure no new reqs
+	// so freeze queue and then *mark queue dead* to ensure no new reqs
 	// gets accepted.
     blk_freeze_queue_start(pxd_dev->disk->queue);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25)
     blk_mark_disk_dead(pxd_dev->disk);
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
+	// del_gendisk will not submit any new IO.
+	// so freeze queue and then queue dying, to ensure no new reqs
+	// gets accepted.
+    blk_freeze_queue_start(pxd_dev->disk->queue);
     blk_set_queue_dying(pxd_dev->disk->queue);
 #endif
-#else
-    blk_set_queue_dying(pxd_dev->disk->queue);
-#endif
+	// kernel bug here, disk deletion code, fsync IO, checking for disk dead while queue is marked dying,
+	// which will never happen, and the disk deletion code is stuck in deadlock.
+	// in this case, allow IOs to go to the queue and let px-storage handle IO
+	// on the device, so fsync can pass, and del_gendisk can proceed
+	// to safely delete the device.
 #endif
 	}
 
@@ -1624,6 +1629,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	int err;
 	struct pxd_device *pxd_dev;
+	long remtimeo;
 	DEFINE_WAIT(wait);
 
 	spin_lock(&ctx->lock);
@@ -1657,8 +1663,14 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&pxd_dev->lock);
 
 	spin_unlock(&ctx->lock);
-	schedule();
+	// future proof against device removal bugs
+	// schedule and forget if not done in reasonable time.
+	remtimeo = schedule_timeout(msecs_to_jiffies(500));
 	finish_wait(&pxd_dev->remove_wait, &wait);
+	if (remtimeo == 0) {
+		pr_warn("remove device %llu scheduled but timedout waiting to complete",
+				remove->dev_id);
+	}
 	put_device(&pxd_dev->dev);
 	if (signal_pending(current)) {
 		return -ERESTARTSYS;
