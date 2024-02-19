@@ -70,9 +70,14 @@ uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
 
+#define PXD_DETACH_TIMEOUT_MSECS_DEFAULT (500)
+#define PXD_DETACH_TIMEOUT_MSECS_MAX (180000)
+uint32_t pxd_detach_timeout_msecs = PXD_DETACH_TIMEOUT_MSECS_DEFAULT;
+
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+module_param(pxd_detach_timeout_msecs, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
@@ -1677,7 +1682,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&ctx->lock);
 	// future proof against device removal bugs
 	// schedule and forget if not done in reasonable time.
-	remtimeo = schedule_timeout(msecs_to_jiffies(500));
+	remtimeo = schedule_timeout(msecs_to_jiffies(pxd_detach_timeout_msecs));
 	finish_wait(&pxd_dev->remove_wait, &wait);
 	if (remtimeo == 0) {
 		pr_warn("remove device %llu scheduled but timedout waiting to complete",
@@ -1925,6 +1930,34 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	}
 	spin_unlock(&ctx->lock);
 
+	return count;
+}
+
+static ssize_t pxd_detach_timeout_show(struct device *dev,
+			 struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u msecs\n", pxd_detach_timeout_msecs);
+}
+
+ssize_t pxd_detach_timeout_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	uint32_t new_timeout_msecs = 0;
+	struct pxd_context *ctx = pxd_dev->ctx;
+
+	if (ctx == NULL)
+		return -ENXIO;
+
+	sscanf(buf, "%u", &new_timeout_msecs);
+	if (new_timeout_msecs < PXD_DETACH_TIMEOUT_MSECS_DEFAULT ||
+			new_timeout_msecs > PXD_DETACH_TIMEOUT_MSECS_MAX) {
+		return -EINVAL;
+	}
+
+	pxd_detach_timeout_msecs = new_timeout_msecs;
+
+	printk(KERN_NOTICE"pxd: set detach timeout to %d msecs\n", pxd_detach_timeout_msecs);
 	return count;
 }
 
@@ -2236,6 +2269,7 @@ static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
+static DEVICE_ATTR(detach_timeout, S_IRUGO|S_IWUSR, pxd_detach_timeout_show, pxd_detach_timeout_store);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
@@ -2256,6 +2290,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_debug.attr,
 	&dev_attr_inprogress.attr,
 	&dev_attr_release.attr,
+	&dev_attr_detach_timeout.attr,
 	NULL
 };
 
@@ -2541,6 +2576,10 @@ int pxd_init(void)
 {
 	int err, i, j;
 
+	if (pxd_detach_timeout_msecs < PXD_DETACH_TIMEOUT_MSECS_DEFAULT ||
+			pxd_detach_timeout_msecs > PXD_DETACH_TIMEOUT_MSECS_MAX) {
+		pxd_detach_timeout_msecs = PXD_DETACH_TIMEOUT_MSECS_DEFAULT;
+	}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	err = -ENOMEM;
 	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
