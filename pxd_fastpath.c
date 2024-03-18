@@ -2,7 +2,7 @@
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/delay.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)  || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE__)))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)  || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_GT_SP4__)))
 #include <linux/kdev_t.h>
 #include <linux/uuid.h>
 #include <linux/blk_types.h>
