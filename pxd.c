@@ -1579,6 +1579,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		module_put(THIS_MODULE);
 		goto cleanup;
 	}
+	spin_unlock(&pxd_dev->lock);
 
 	err = pxd_bus_add_dev(pxd_dev);
 	if (err) {
@@ -1587,8 +1588,6 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		goto cleanup;
 	}
 
-	pxd_dev->exported = true;
-	spin_unlock(&pxd_dev->lock);
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE__)))
 	err = add_disk(pxd_dev->disk);
@@ -1604,6 +1603,9 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	add_disk(pxd_dev->disk);
 #endif
 
+	spin_lock(&pxd_dev->lock);
+	pxd_dev->exported = true;
+	spin_unlock(&pxd_dev->lock);
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
@@ -2341,6 +2343,9 @@ static int pxd_bus_add_dev(struct pxd_device *pxd_dev)
 	dev->parent = &pxd_root_dev;
 	dev->release = pxd_dev_device_release;
 	dev_set_name(dev, "%d", pxd_dev->minor);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,1,0)
+	device_set_pm_not_required(dev);
+#endif
 	ret = device_register(dev);
 
 	return ret;
