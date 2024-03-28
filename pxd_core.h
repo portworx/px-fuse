@@ -16,7 +16,7 @@
 #endif
 
 struct pxd_context {
-	spinlock_t lock;
+	spinlock_t lock; // Protects the device list
 	struct list_head list;
 	size_t num_devices;
 	struct fuse_conn fc;
@@ -39,7 +39,7 @@ struct pxd_device {
 	struct gendisk *disk;
 	struct device dev;
 	size_t size;
-	spinlock_t lock;
+	spinlock_t lock; // Protects open_count, removing, connected, exported
 	spinlock_t qlock;
 	struct list_head node;
 	int open_count;

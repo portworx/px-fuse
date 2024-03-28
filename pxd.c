@@ -1339,7 +1339,9 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id, boo
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == dev_id) {
 			pxd_dev = pxd_dev_itr;
+			spin_lock(&pxd_dev->lock);
 			*stale = pxd_dev->removing;
+			spin_unlock(&pxd_dev->lock);
 			break;
 		}
 	}
