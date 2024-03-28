@@ -743,14 +743,15 @@ static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
 	struct pxd_suspend req;
 	size_t len = sizeof(req);
 	struct pxd_device *pxd_dev;
+	bool stale;
 
 	if (copy_from_iter(&req, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
 
-	pxd_dev = find_pxd_device(ctx, req.dev_id);
-	if (!pxd_dev) {
+	pxd_dev = find_pxd_device(ctx, req.dev_id, &stale);
+	if (stale || !pxd_dev) {
 		printk(KERN_ERR "device %llu not found\n", req.dev_id);
 		return -EINVAL;
 	}
@@ -763,14 +764,15 @@ static int fuse_notify_resume(struct fuse_conn *conn, unsigned int size,
 	struct pxd_resume req;
 	size_t len = sizeof(req);
 	struct pxd_device *pxd_dev;
+	bool stale;
 
 	if (copy_from_iter(&req, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
 
-	pxd_dev = find_pxd_device(ctx, req.dev_id);
-	if (!pxd_dev) {
+	pxd_dev = find_pxd_device(ctx, req.dev_id, &stale);
+	if (stale || !pxd_dev) {
 		printk(KERN_ERR "device %llu not found\n", req.dev_id);
 		return -EINVAL;
 	}
@@ -784,14 +786,15 @@ static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
        struct pxd_ioswitch req;
        size_t len = sizeof(req);
        struct pxd_device *pxd_dev;
+       bool stale;
 
        if (copy_from_iter(&req, len, iter) != len) {
                printk(KERN_ERR "%s: can't copy arg\n", __func__);
                return -EFAULT;
        }
 
-       pxd_dev = find_pxd_device(ctx, req.dev_id);
-       if (!pxd_dev) {
+       pxd_dev = find_pxd_device(ctx, req.dev_id, &stale);
+       if (stale || !pxd_dev) {
                printk(KERN_ERR "device %llu not found\n", req.dev_id);
                return -EINVAL;
        }

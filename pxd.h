@@ -246,7 +246,7 @@ struct pxd_ioswitch {
 };
 
 struct pxd_context;
-struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
+struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id, bool*);
 
 /**
  * PXD_GET_FEATURES request from user space
