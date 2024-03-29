@@ -70,9 +70,14 @@ uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
 
+#define PXD_DETACH_TIMEOUT_MSECS_DEFAULT (500)
+#define PXD_DETACH_TIMEOUT_MSECS_MAX (180000)
+uint32_t pxd_detach_timeout_msecs = PXD_DETACH_TIMEOUT_MSECS_DEFAULT;
+
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+module_param(pxd_detach_timeout_msecs, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
@@ -215,6 +220,7 @@ static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
 	struct pxd_fastpath_out cleanup_args;
 	long ret = 0;
 	struct pxd_device *pxd_dev;
+	bool stale;
 
 	if (copy_from_user(&cleanup_args, argp, sizeof(cleanup_args))) {
 		return -EFAULT;
@@ -230,8 +236,8 @@ static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
 		return -EFAULT;
 	}
 
-	pxd_dev = find_pxd_device(ctx, cleanup_args.dev_id);
-	if (pxd_dev != NULL) {
+	pxd_dev = find_pxd_device(ctx, cleanup_args.dev_id, &stale);
+	if (!stale && pxd_dev != NULL) {
 		(void)get_device(&pxd_dev->dev);
 		ret = pxd_fastpath_vol_cleanup(pxd_dev);
 		put_device(&pxd_dev->dev);
@@ -1323,15 +1329,19 @@ static void pxd_free_disk(struct pxd_device *pxd_dev)
 	}
 }
 
-struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
+struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id, bool *stale)
 {
 	struct pxd_device *pxd_dev_itr, *pxd_dev;
 
 	pxd_dev = NULL;
+	*stale = false;
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == dev_id) {
 			pxd_dev = pxd_dev_itr;
+			spin_lock(&pxd_dev->lock);
+			*stale = pxd_dev->removing;
+			spin_unlock(&pxd_dev->lock);
 			break;
 		}
 	}
@@ -1360,6 +1370,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
 	int err;
+	bool stale;
 
 	err = -ENOMEM;
 	if (ctx->num_devices >= PXD_MAX_DEVICES) {
@@ -1368,8 +1379,12 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	}
 
 	// if device already exists, then return it
-	pxd_dev = find_pxd_device(ctx, add->dev_id);
+	pxd_dev = find_pxd_device(ctx, add->dev_id, &stale);
 	if (pxd_dev) {
+		if (stale) {
+			return -ESTALE;
+		}
+
 		if (add->enable_fp && add->paths.count > 0) {
 			__pxd_update_path(pxd_dev, &add->paths);
 		} else {
@@ -1469,8 +1484,9 @@ out_module:
 
 ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
+	bool stale;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
-	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
+	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id, &stale);
 	char devfile[128];
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	struct block_device *bdev;
@@ -1480,6 +1496,9 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	int err = 0;
 
 	if (pxd_dev) {
+		if (stale) {
+			return -ESTALE;
+		}
 		spin_lock(&pxd_dev->lock);
 		if (pxd_dev->exported) {
 			spin_unlock(&pxd_dev->lock);
@@ -1529,18 +1548,18 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
         }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-		err = add_disk(pxd_dev->disk);
+		err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
+        device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
+#else
+        add_disk(pxd_dev->disk);
+#endif
         if (err) {
             device_unregister(&pxd_dev->dev);
             pxd_free_disk(pxd_dev);
             module_put(THIS_MODULE);
             goto cleanup;
         }
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
-        device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
-#else
-        add_disk(pxd_dev->disk);
-#endif
 
         spin_lock(&pxd_dev->lock);
         pxd_dev->exported = true;
@@ -1665,7 +1684,7 @@ ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 	spin_unlock(&ctx->lock);
 	// future proof against device removal bugs
 	// schedule and forget if not done in reasonable time.
-	remtimeo = schedule_timeout(msecs_to_jiffies(500));
+	remtimeo = schedule_timeout(msecs_to_jiffies(pxd_detach_timeout_msecs));
 	finish_wait(&pxd_dev->remove_wait, &wait);
 	if (remtimeo == 0) {
 		pr_warn("remove device %llu scheduled but timedout waiting to complete",
@@ -1913,6 +1932,34 @@ ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 	}
 	spin_unlock(&ctx->lock);
 
+	return count;
+}
+
+static ssize_t pxd_detach_timeout_show(struct device *dev,
+			 struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u msecs\n", pxd_detach_timeout_msecs);
+}
+
+ssize_t pxd_detach_timeout_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	uint32_t new_timeout_msecs = 0;
+	struct pxd_context *ctx = pxd_dev->ctx;
+
+	if (ctx == NULL)
+		return -ENXIO;
+
+	sscanf(buf, "%u", &new_timeout_msecs);
+	if (new_timeout_msecs < PXD_DETACH_TIMEOUT_MSECS_DEFAULT ||
+			new_timeout_msecs > PXD_DETACH_TIMEOUT_MSECS_MAX) {
+		return -EINVAL;
+	}
+
+	pxd_detach_timeout_msecs = new_timeout_msecs;
+
+	printk(KERN_NOTICE"pxd: set detach timeout to %d msecs\n", pxd_detach_timeout_msecs);
 	return count;
 }
 
@@ -2224,6 +2271,7 @@ static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
 static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
+static DEVICE_ATTR(detach_timeout, S_IRUGO|S_IWUSR, pxd_detach_timeout_show, pxd_detach_timeout_store);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
@@ -2244,6 +2292,7 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_debug.attr,
 	&dev_attr_inprogress.attr,
 	&dev_attr_release.attr,
+	&dev_attr_detach_timeout.attr,
 	NULL
 };
 
@@ -2529,6 +2578,10 @@ int pxd_init(void)
 {
 	int err, i, j;
 
+	if (pxd_detach_timeout_msecs < PXD_DETACH_TIMEOUT_MSECS_DEFAULT ||
+			pxd_detach_timeout_msecs > PXD_DETACH_TIMEOUT_MSECS_MAX) {
+		pxd_detach_timeout_msecs = PXD_DETACH_TIMEOUT_MSECS_DEFAULT;
+	}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	err = -ENOMEM;
 	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
