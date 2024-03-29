@@ -14,7 +14,6 @@
 
 #if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
-//#pragma message "The value of ABC: " VERTOSTR(RHEL_RELEASE_CODE)
 #define __RHEL_GT_94__
 #endif
 #endif
