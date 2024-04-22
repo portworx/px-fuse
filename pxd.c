@@ -12,6 +12,12 @@
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
 
+#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
+#define __RHEL_GT_94__
+#endif
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,3,0) && !defined(part_stat_lock)
 #include <linux/part_stat.h>
 #endif
@@ -90,16 +96,17 @@ struct pxd_context* find_context(unsigned ctx)
 	return &pxd_contexts[ctx];
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)
 static int pxd_open(struct gendisk *bdev, blk_mode_t mode)
 #else
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 #endif
-{	
+{
 	struct pxd_device *pxd_dev;
 	int err = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
-	pxd_dev = bdev->private_data;	
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)
+	pxd_dev = bdev->private_data;
 #else
 	pxd_dev = bdev->bd_disk->private_data;
 #endif
@@ -125,7 +132,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)
 static void pxd_release(struct gendisk *disk)
 #else
 static void pxd_release(struct gendisk *disk, fmode_t mode)
@@ -143,7 +150,7 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	pxd_dev->open_count--;
 	spin_unlock(&pxd_dev->lock);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor);
 #else
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
@@ -205,7 +212,7 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
 	direction = READ;
 #endif
-	  
+
 	iov_iter_init(&iter, direction, &iov, 1, sizeof(struct pxd_ioctl_init_args));
 
 	return pxd_read_init(&ctx->fc, &iter);
@@ -472,7 +479,7 @@ static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
 {
 		struct pxd_device *pxd_dev = req->queue->queuedata;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__) 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
 {
 		struct block_device *p = pxd_dev->disk->part0;
 		if (!p) return;
@@ -1207,7 +1214,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	 	q = blk_alloc_queue(NUMA_NO_NODE);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
 		q = blk_alloc_queue(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
-#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT) 
+#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
         q = blk_alloc_queue_rh(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
 #else
 		q = blk_alloc_queue(GFP_KERNEL);
@@ -1307,14 +1314,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 #if defined(QUEUE_FLAG_DISCARD)
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif                                                       
+#endif
 
 #else                                                         // #else for defined(__EL8__) || defined(__SUSE_GT_SP4__)
 	/* Enable discard support. */
 	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
 #endif                                                        // #endif for defined(__EL8__) || defined(__SUSE_GT_SP4__)
 #endif                                                        // #endif for LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
-	
+
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
 	if (pxd_dev->discard_size < SECTOR_SIZE)
@@ -1836,7 +1843,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
-	iter->data_source = WRITE;   // Reset to 'WRITE'  
+	iter->data_source = WRITE;   // Reset to 'WRITE'
 #endif
 	spin_unlock(&ctx->lock);
 
