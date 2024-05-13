@@ -474,14 +474,14 @@ clone_and_map(struct fp_root_context *fproot) {
                 if (S_ISBLK(get_mode(cc->file))) {
                         atomic_inc(&pxd_dev->fp.nswitch);
                         if (rq_is_special(rq)) {
-							kthread_init_work(&cc->work, fp_handle_specialops);
-							fastpath_queue_work(&cc->work, -1);
+                                kthread_init_work(&cc->work, fp_handle_specialops);
+                                fastpath_queue_work(&cc->work, -1, false);
                         } else {
                                 SUBMIT_BIO(clone);
                         }
                 } else {
-						kthread_init_work(&cc->work, pxd_process_fileio);
-						fastpath_queue_work(&cc->work, -1);
+                        kthread_init_work(&cc->work, pxd_process_fileio);
+                        fastpath_queue_work(&cc->work, -1, false);
                 }
         }
 
@@ -545,8 +545,8 @@ static void pxd_io_failover(struct kthread_work *work) {
 static void pxd_failover_initiate(struct fp_root_context *fproot) {
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
-		kthread_init_work(&fproot->work, pxd_io_failover);
-		fastpath_queue_work(&fproot->work, -1);
+        kthread_init_work(&fproot->work, pxd_io_failover);
+        fastpath_queue_work(&fproot->work, -1, false);
 }
 
 // io handling functions
@@ -687,7 +687,7 @@ static void end_clone_bio(struct bio *bio, int error)
 #else
     cc->status = error;
 #endif
-    fastpath_queue_work(&cc->work, cc->qnum);
+    fastpath_queue_work(&cc->work, cc->qnum, true);
 }
 
 

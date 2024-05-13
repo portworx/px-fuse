@@ -717,14 +717,14 @@ int pxd_debug_switch_nativepath(struct pxd_device* pxd_dev)
 
 // assign work on the worker thread with least penalty. loadbalance
 // across threads if no hint provided through 'qnum'
-void fastpath_queue_work(struct kthread_work* work, int qnum)
+void fastpath_queue_work(struct kthread_work* work, int qnum, bool completion)
 {
 	struct kthread_worker *worker = fpdefault;
 	int node = cpu_to_node(smp_processor_id());
 	if (node < MAX_NUMNODES) {
 		struct pxfpcontext_per_node *c = &pxfpctxt[node];
 		if (c->valid) {
-			if (qnum < 0) {
+			if (!completion || qnum < 0) {
 				qnum = atomic_add_return(1, &c->last_worker);
 			}
 
