@@ -21,12 +21,28 @@ extern uint32_t pxd_num_fpthreads;
 
 struct pxfpcontext_per_node {
 	bool valid;
-	atomic_t last_worker;
 #define MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE (8)
 	struct kthread_worker *fpworker[MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE];
 };
 struct kthread_worker *fpdefault = NULL;
 struct pxfpcontext_per_node pxfpctxt[MAX_NUMNODES];
+
+#define BURST_IO (8)
+#define BURST_MASK (BURST_IO-1)
+struct pxfpcontext_percpu {
+  uint8_t fpbatch;
+  unsigned mapped_cpu;
+};
+struct pxfpcontext_percpu pxfp_percpu[NR_CPUS];
+
+static void fastpath_map_workers(void)
+{
+    int i;
+
+    for (i=0; i<NR_CPUS; i++) {
+	pxfp_percpu[i].mapped_cpu = i;
+    }
+}
 
 static void fastpath_flush_work(void) {
        int node;
@@ -92,7 +108,6 @@ int fastpath_init(void)
 			continue;
 		}
 
-		atomic_set(&c->last_worker, 0);
 		active = 0;
 		for_each_cpu(cpu, cpumask) {
 			struct kthread_worker* worker;
@@ -121,6 +136,8 @@ int fastpath_init(void)
 		rc = -EINVAL;
 		goto out;
 	}
+
+	fastpath_map_workers();
 
 	rc = __fastpath_init();
 	if (rc == 0) {
@@ -715,20 +732,37 @@ int pxd_debug_switch_nativepath(struct pxd_device* pxd_dev)
 	return 0;
 }
 
+static
+unsigned int balanceIO(struct pxfpcontext_per_node *c, unsigned int cpuid, bool completion)
+{
+	if (completion)
+		return cpuid;
+
+	if (cpuid < NR_CPUS) {
+		struct pxfpcontext_percpu *this = &pxfp_percpu[cpuid];
+		int burst = ++this->fpbatch;
+		if ((burst & BURST_MASK)== 0) {
+			this->mapped_cpu++;
+		}
+		return this->mapped_cpu;
+	}
+
+	return 0; // not possible case
+}
+
 // assign work on the worker thread with least penalty. loadbalance
 // across threads if no hint provided through 'qnum'
-void fastpath_queue_work(struct kthread_work* work, int qnum, bool completion)
+void fastpath_queue_work(struct kthread_work* work, bool completion)
 {
+	unsigned int cpuid = smp_processor_id();
+	int node = cpu_to_node(cpuid);
 	struct kthread_worker *worker = fpdefault;
-	int node = cpu_to_node(smp_processor_id());
+
 	if (node < MAX_NUMNODES) {
 		struct pxfpcontext_per_node *c = &pxfpctxt[node];
 		if (c->valid) {
-			if (!completion || qnum < 0) {
-				qnum = atomic_add_return(1, &c->last_worker);
-			}
-
-			worker = c->fpworker[qnum & MAX_PXFP_WORKERS_PER_NODE_MASK];
+			cpuid = balanceIO(c, cpuid, completion);
+			worker = c->fpworker[cpuid & MAX_PXFP_WORKERS_PER_NODE_MASK];
 		}
 	}
 	kthread_queue_work(worker, work);
