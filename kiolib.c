@@ -6,6 +6,7 @@
 
 #include "pxd_compat.h"
 #include "pxd_core.h"
+#include "kiolib.h"
 
 static int _pxd_flush(struct pxd_device *pxd_dev, struct file *file) {
         int ret = 0;
