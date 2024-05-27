@@ -12,7 +12,7 @@
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
 
-#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION) && defined(__EL8__)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
 #define __RHEL_GT_94__
 #endif
