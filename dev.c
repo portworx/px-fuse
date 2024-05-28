@@ -294,7 +294,7 @@ __acquires(fc->lock)
 	remove_wait_queue(&fc->waitq, &wait);
 }
 
-ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
+static ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 	size_t copied, len;
 
@@ -597,7 +597,8 @@ struct fuse_req *request_find(struct fuse_conn *fc, u64 unique)
 	return req;
 }
 
-struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
+/*
+static struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
 {
 	struct pxd_context *pctx = find_context(ctx);
 
@@ -605,6 +606,7 @@ struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
 
 	return request_find(&pctx->fc, unique);
 }
+*/
 
 #define IOV_BUF_SIZE 64
 
@@ -1252,7 +1254,7 @@ void fuse_abort_conn(struct fuse_conn *fc)
 	spin_unlock(&fc->lock);
 }
 
-int fuse_dev_release(struct inode *inode, struct file *file)
+static int fuse_dev_release(struct inode *inode, struct file *file)
 {
 	struct fuse_conn *fc = fuse_get_conn(file);
 	if (fc) {
