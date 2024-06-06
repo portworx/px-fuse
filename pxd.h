@@ -44,7 +44,7 @@
 #define PXD_IOC_FPCLEANUP		_IO(PXD_IOCTL_MAGIC, 9)		/* 0x505809 */
 #define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 
-#define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
+#define PXD_MAX_DEVICES	1024			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 #define PXD_MIN_DISCARD_GRANULARITY		PXD_LBS
