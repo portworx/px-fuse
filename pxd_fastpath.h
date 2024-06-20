@@ -151,6 +151,7 @@ int remap_io_status(int status)
 
 	return -EIO;
 }
+void fastpath_queue_work(struct kthread_work*, bool completion);
 #endif /* __PX_FASTPATH__ */
 
 #endif /* _PXD_FASTPATH_H_ */

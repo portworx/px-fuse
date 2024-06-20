@@ -47,7 +47,7 @@ static void stub_endio(struct bio *bio, int error)
         BUG_ON("stub_endio called");
 }
 static void clone_cleanup(struct fp_root_context *fproot);
-static void fp_handle_specialops(struct work_struct *work);
+static void fp_handle_specialops(struct kthread_work *work);
 
 static atomic_t nclones;
 static atomic_t nrootbios;
@@ -59,11 +59,12 @@ static void dump_allocs(void) {
 struct fp_clone_context {
 #define FP_CLONE_MAGIC (0xea7ef00du)
         unsigned int magic;
+        int qnum;
         struct fp_clone_context *clones;
         struct fp_root_context *fproot;
         struct file *file;
         int status;
-        struct work_struct work;
+        struct kthread_work work;
         struct bio clone; // should be last
 };
 
@@ -74,6 +75,7 @@ static inline void fp_clone_context_init(struct fp_clone_context *cc,
         cc->fproot = fproot;
         cc->file = file;
         cc->clones = NULL;
+        cc->qnum = smp_processor_id(); // not used anymore
         cc->status = 0;
         // work should get initialized at the point of usage.
 }
@@ -90,7 +92,7 @@ static int reconcile_status(struct fp_root_context *fproot) {
         return status;
 }
 
-static void pxd_process_fileio(struct work_struct *work) {
+static void pxd_process_fileio(struct kthread_work *work) {
         struct fp_clone_context *cc =
             container_of(work, struct fp_clone_context, work);
         struct bio *clone = &cc->clone;
@@ -158,7 +160,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
                 // it is possible to call suspend during initial creation with
                 // no disk, ignore as in any case, no IO can flow through.
                 if (pxd_dev->disk && pxd_dev->disk->queue) {
-                        blk_freeze_queue_start(pxd_dev->disk->queue);
+                        blk_mq_quiesce_queue(pxd_dev->disk->queue);
                         atomic_set(&fp->blkmq_frozen, 1);
                 }
                 printk("For pxd device %llu IO suspended\n", pxd_dev->dev_id);
@@ -177,7 +179,7 @@ void pxd_resume_io(struct pxd_device *pxd_dev) {
         if (wakeup) {
                 if (atomic_read(&fp->blkmq_frozen)) {
                         if (pxd_dev->disk && pxd_dev->disk->queue) {
-                                blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+                                blk_mq_unquiesce_queue(pxd_dev->disk->queue);
                         }
                         atomic_set(&fp->blkmq_frozen, 0);
                 }
@@ -436,6 +438,8 @@ clone_and_map(struct fp_root_context *fproot) {
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
+        atomic_inc(&pxd_dev->ncount);
+
 // filter out only supported requests
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
         switch (req_op(rq)) {
@@ -515,14 +519,14 @@ clone_and_map(struct fp_root_context *fproot) {
                 if (S_ISBLK(get_mode(cc->file))) {
                         atomic_inc(&pxd_dev->fp.nswitch);
                         if (rq_is_special(rq)) {
-                                INIT_WORK(&cc->work, fp_handle_specialops);
-                                queue_work(fastpath_workqueue(), &cc->work);
+                                kthread_init_work(&cc->work, fp_handle_specialops);
+                                fastpath_queue_work(&cc->work, false);
                         } else {
                                 SUBMIT_BIO(clone);
                         }
                 } else {
-                        INIT_WORK(&cc->work, pxd_process_fileio);
-                        queue_work(fastpath_workqueue(), &cc->work);
+                        kthread_init_work(&cc->work, pxd_process_fileio);
+                        fastpath_queue_work(&cc->work, false);
                 }
         }
 
@@ -533,7 +537,7 @@ err:
 }
 
 // failover handling
-static void pxd_io_failover(struct work_struct *work) {
+static void pxd_io_failover(struct kthread_work *work) {
         struct fp_root_context *fproot =
             container_of(work, struct fp_root_context, work);
         struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
@@ -586,13 +590,13 @@ static void pxd_io_failover(struct work_struct *work) {
 static void pxd_failover_initiate(struct fp_root_context *fproot) {
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
-        INIT_WORK(&fproot->work, pxd_io_failover);
-        queue_work(fastpath_workqueue(), &fproot->work);
+        kthread_init_work(&fproot->work, pxd_io_failover);
+        fastpath_queue_work(&fproot->work, false);
 }
 
 // io handling functions
 // discard is special ops
-static void fp_handle_specialops(struct work_struct *work) {
+static void fp_handle_specialops(struct kthread_work *work) {
         struct fp_clone_context *cc =
             container_of(work, struct fp_clone_context, work);
         struct fp_root_context *fproot = cc->fproot;
@@ -660,14 +664,11 @@ static void fp_handle_specialops(struct work_struct *work) {
 	BIO_ENDIO(&cc->clone, r);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
-static void end_clone_bio(struct bio *bio)
-#else
-static void end_clone_bio(struct bio *bio, int error)
-#endif
+static void _end_clone_bio(struct kthread_work *work)
 {
         struct fp_clone_context *cc =
-            container_of(bio, struct fp_clone_context, clone);
+            container_of(work, struct fp_clone_context, work);
+        struct bio *bio = &cc->clone;
         struct fp_root_context *fproot = bio->bi_private;
         struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
         struct request *rq = fproot_to_request(fproot);
@@ -686,7 +687,7 @@ static void end_clone_bio(struct bio *bio, int error)
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
         blkrc = bio->bi_error;
 #else
-        blkrc = error;
+        blkrc = cc->status;
 #endif
 
         if (blkrc != 0) {
@@ -735,12 +736,29 @@ static void end_clone_bio(struct bio *bio, int error)
         atomic_dec(&pxd_dev->ncount);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+static void end_clone_bio(struct bio *bio)
+#else
+static void end_clone_bio(struct bio *bio, int error)
+#endif
+{
+    struct fp_clone_context *cc =
+            container_of(bio, struct fp_clone_context, clone);
+
+    kthread_init_work(&cc->work, _end_clone_bio);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+    cc->status = 0;
+#else
+    cc->status = error;
+#endif
+    fastpath_queue_work(&cc->work, true);
+}
+
 // entry point to handle IO
-void fp_handle_io(struct work_struct *work) {
-        struct fp_root_context *fproot =
-            container_of(work, struct fp_root_context, work);
-        struct request *rq = fproot_to_request(fproot); // orig request
-        struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+void fp_handle_io(struct kthread_work *work) {
+	struct fp_root_context *fproot = container_of(work, struct fp_root_context, work);
+	struct request *rq = fproot_to_request(fproot); // orig request
+	struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
 #ifndef __PX_BLKMQ__
         int r;
 #else
@@ -749,8 +767,6 @@ void fp_handle_io(struct work_struct *work) {
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
-
-        atomic_inc(&pxd_dev->ncount);
 
         r = clone_and_map(fproot);
 #ifndef __PX_BLKMQ__

@@ -72,10 +72,12 @@ uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
+uint32_t pxd_num_fpthreads = DEFAULT_PXFP_WORKERS_PER_NODE;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+module_param(pxd_num_fpthreads, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
@@ -1081,7 +1083,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		fp_root_context_init(fproot);
 		if (pxd_dev->fp.fastpath) {
 			// route through fastpath
-			queue_work(fastpath_workqueue(), &fproot->work);
+			fastpath_queue_work(&fproot->work, false);
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
@@ -1123,7 +1125,6 @@ void pxdmq_reroute_slowpath(struct fuse_req *req)
     fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }
 
-
 static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
@@ -1157,7 +1158,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
-		queue_work(fastpath_workqueue(), &fproot->work);
+		fastpath_queue_work(&fproot->work, false);
 		return BLK_STS_OK;
 	}
 }
@@ -1233,7 +1234,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
-	  pxd_dev->tag_set.nr_hw_queues = 8;
+	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
@@ -1496,8 +1497,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (fastpath_enabled(pxd_dev)) {
 		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
 		if (err) {
-			pxd_fastpath_cleanup(pxd_dev);
-			goto out_id;
+			goto out_fp;
 		}
 	}
 
@@ -1506,7 +1506,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		if (pxd_dev_itr->dev_id == add->dev_id) {
 			err = -EEXIST;
 			spin_unlock(&ctx->lock);
-			goto out_id;
+			goto out_fp;
 		}
 	}
 
@@ -1515,6 +1515,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_unlock(&ctx->lock);
 	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
+out_fp:
+	pxd_fastpath_cleanup(pxd_dev);
 out_id:
 	ida_simple_remove(&pxd_minor_ida, new_minor);
 out_module:
