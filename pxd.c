@@ -1417,10 +1417,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		goto out_module;
 	}
 
-	if (add->discard_size < SECTOR_SIZE)
-		pxd_dev->discard_size = SEGMENT_SIZE;
-	else
-		pxd_dev->discard_size = add->discard_size;
+	pxd_dev->discard_size = ALIGN(add->discard_size, PXD_MAX_DISCARD_GRANULARITY);
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
