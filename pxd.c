@@ -1417,7 +1417,10 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		goto out_module;
 	}
 
-	pxd_dev->discard_size = ALIGN(add->discard_size, PXD_MAX_DISCARD_GRANULARITY);
+	pxd_dev->discard_size = PXD_MAX_DISCARD_GRANULARITY;
+	if (add->discard_size != 0) {
+		pxd_dev->discard_size = ALIGN(add->discard_size, PXD_MAX_DISCARD_GRANULARITY);
+	}
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
