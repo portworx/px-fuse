@@ -76,7 +76,7 @@ struct pxd_ioc_free_buffers {
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 #define PXD_MIN_DISCARD_GRANULARITY		PXD_LBS
-#define PXD_MAX_DISCARD_GRANULARITY		(64 * 1024)
+#define PXD_MAX_DISCARD_GRANULARITY		(2 << 20)
 
 // NOTE: nvme devices can go upto 1023 queue depth
 #define MAX_CONGESTION_THRESHOLD (1024)
