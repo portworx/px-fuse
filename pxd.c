@@ -78,10 +78,12 @@ uint32_t pxd_num_contexts = PXD_NUM_CONTEXTS;
 uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
+uint32_t pxd_num_fpthreads = DEFAULT_PXFP_WORKERS_PER_NODE;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
+module_param(pxd_num_fpthreads, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
@@ -1088,7 +1090,7 @@ static void pxd_rq_fn(struct request_queue *q)
 		fp_root_context_init(fproot);
 		if (pxd_dev->fp.fastpath) {
 			// route through fastpath
-			queue_work(fastpath_workqueue(), &fproot->work);
+			fastpath_queue_work(&fproot->work, false);
 			spin_lock_irq(&pxd_dev->qlock);
 			continue;
 		}
@@ -1130,7 +1132,6 @@ void pxdmq_reroute_slowpath(struct fuse_req *req)
     fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }
 
-
 static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		const struct blk_mq_queue_data *bd)
 {
@@ -1164,7 +1165,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
-		queue_work(fastpath_workqueue(), &fproot->work);
+		fastpath_queue_work(&fproot->work, false);
 		return BLK_STS_OK;
 	}
 }
@@ -1240,7 +1241,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
-	  pxd_dev->tag_set.nr_hw_queues = 8;
+	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
@@ -1324,10 +1325,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
-	if (pxd_dev->discard_size < SECTOR_SIZE)
-		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
-	else
-		q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
+    q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
@@ -1402,18 +1400,6 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-typedef struct block_device* (*lookup_bdev_wrapper_fn)(char *dev, int mask);
-// This hack is needed because in ubuntu lookup_bdev is defined with 2 arg.
-// ubuntu commit id 6bdf7d686366556020b6ed044fa9eadd090d3984
-// struct block_device *lookup_bdev(const char *pathname, int mask)
-// mask = 0, no perm checks are done
-// So this module shall always push 2 args into stack, but the kernel function
-// decides whether it uses both or only 1.
-// This satisfies the compilation.
-static lookup_bdev_wrapper_fn lookup_bdev_wrapper = (lookup_bdev_wrapper_fn)lookup_bdev;
-#endif
-
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
 ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 {
@@ -1487,11 +1473,10 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		pxd_dev->queue_depth = add->queue_depth;
 	}
 
-	if (add->discard_size < SECTOR_SIZE)
-		pxd_dev->discard_size = SEGMENT_SIZE;
-	else
-		pxd_dev->discard_size = add->discard_size;
-
+	pxd_dev->discard_size = PXD_MAX_DISCARD_GRANULARITY;
+	if (add->discard_size != 0) {
+		pxd_dev->discard_size = ALIGN(add->discard_size, PXD_MAX_DISCARD_GRANULARITY);
+	}
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
 
@@ -1503,8 +1488,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (fastpath_enabled(pxd_dev)) {
 		err = pxd_init_fastpath_target(pxd_dev, &add->paths);
 		if (err) {
-			pxd_fastpath_cleanup(pxd_dev);
-			goto out_id;
+			goto out_fp;
 		}
 	}
 
@@ -1513,7 +1497,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		if (pxd_dev_itr->dev_id == add->dev_id) {
 			err = -EEXIST;
 			spin_unlock(&ctx->lock);
-			goto out_id;
+			goto out_fp;
 		}
 	}
 
@@ -1522,6 +1506,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_unlock(&ctx->lock);
 	return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 
+out_fp:
+	pxd_fastpath_cleanup(pxd_dev);
 out_id:
 	ida_simple_remove(&pxd_minor_ida, new_minor);
 out_module:
@@ -1535,59 +1521,30 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
-	char devfile[128];
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-	struct block_device *bdev;
-#else
-	dev_t kdev;
-#endif
 	int err = 0;
 
 	if (!pxd_dev) {
 		return -ENOENT;
 	}
 
+	spin_lock(&pxd_dev->lock);
 	if (pxd_dev->exported) {
+		spin_unlock(&pxd_dev->lock);
 		return 0;
 	}
-
-	spin_lock(&pxd_dev->lock);
-    /* pre-check to detect if prior instance is removed */
-    sprintf(devfile, "/dev/pxd/pxd%llu", pxd_dev->dev_id);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-    bdev = lookup_bdev_wrapper(devfile, 0);
-    if (!IS_ERR(bdev)) {
-		spin_unlock(&pxd_dev->lock);
-    	bdput(bdev);
-    	pr_err("stale bdev %s still alive", devfile);
-    	err = -EEXIST;
-		goto cleanup;
-   }
-#else
-   err = lookup_bdev(devfile, &kdev);
-   if (!err) {
-		spin_unlock(&pxd_dev->lock);
-		pr_err("stale bdev %s still alive", devfile);
-		err = -EEXIST;
-		goto cleanup;
-	}
-#endif
+	spin_unlock(&pxd_dev->lock);
 
 	if (!try_module_get(THIS_MODULE)) {
-		spin_unlock(&pxd_dev->lock);
 		err = -ENODEV;
 		goto cleanup;
 	}
 
-
 	err = pxd_init_disk(pxd_dev);
 	if (err) {
-		spin_unlock(&pxd_dev->lock);
 		module_put(THIS_MODULE);
 		goto cleanup;
 	}
 
-	spin_unlock(&pxd_dev->lock);
 	err = pxd_bus_add_dev(pxd_dev);
 	if (err) {
 		pxd_free_disk(pxd_dev);
@@ -1808,7 +1765,9 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	struct pxd_device *pxd_dev;
 	struct pxd_init_in pxd_init;
 
-	spin_lock(&ctx->lock);
+	// Taking context lock is unnecessary, as this gets called during
+	// userspace init only once, no changes to the pxd block device
+	// layer is expected during this window.
 
 	pxd_init.num_devices = ctx->num_devices;
 	pxd_init.version = PXD_VERSION;
@@ -1845,7 +1804,6 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
 	iter->data_source = WRITE;   // Reset to 'WRITE'
 #endif
-	spin_unlock(&ctx->lock);
 
 	printk(KERN_INFO "%s: pxd-control-%d init OK %d devs version %d\n", __func__,
 		ctx->id, pxd_init.num_devices, pxd_init.version);
@@ -1853,7 +1811,6 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 	return copied;
 
 copy_error:
-	spin_unlock(&ctx->lock);
 	return -EFAULT;
 }
 
