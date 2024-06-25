@@ -1325,7 +1325,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
-	q->limits.max_discard_sectors = pxd_dev->discard_size;
+    q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
