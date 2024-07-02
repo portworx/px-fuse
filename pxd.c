@@ -1254,7 +1254,18 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
 	  struct queue_limits lim = {
-		  .max_hw_sectors            = SEGMENT_SIZE / SECTOR_SIZE,
+		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
+		  .logical_block_size = PXD_LBS,
+		  .physical_block_size = PXD_LBS,
+		  .max_segment_size = SEGMENT_SIZE,
+		  .max_segments = SEGMENT_SIZE / PXD_LBS,
+		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
+		  .discard_alignment = PXD_MAX_DISCARD_GRANULARITY,
+		  .discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
+		  .io_min = PXD_LBS,
+		  .io_opt = PXD_LBS,
+		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE
 	  };
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
 #else
