@@ -12,7 +12,7 @@
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
 
-#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION) && defined(__EL8__)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
 #define __RHEL_GT_94__
 #endif
@@ -989,6 +989,7 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 	return rc;
 }
 
+#ifdef __PXD_BIO_MAKEREQ__
 // similar function to make_request_slowpath only optimized to ensure its a reroute
 // from fastpath on IO fail.
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
@@ -1019,6 +1020,7 @@ void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
 
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 }
+#endif
 
 #ifdef __PXD_BIO_BLKMQ__
 #if !defined(__PX_BLKMQ__)
@@ -1249,7 +1251,27 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
+	  struct queue_limits lim = {
+		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
+		  .logical_block_size = PXD_LBS,
+		  .physical_block_size = PXD_LBS,
+		  .max_segment_size = SEGMENT_SIZE,
+		  .max_segments = SEGMENT_SIZE / PXD_LBS,
+		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
+		  .discard_alignment = PXD_MAX_DISCARD_GRANULARITY,
+		  .discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
+		  .io_min = PXD_LBS,
+		  .io_opt = PXD_LBS,
+		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE
+	  };
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
+#else
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
+#endif
+
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
 		return PTR_ERR(disk);
@@ -1949,7 +1971,7 @@ static ssize_t pxd_timeout_show(struct device *dev,
 	return sprintf(buf, "%u\n", pxd_timeout_secs);
 }
 
-ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
+static ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
 			   const char *buf, size_t count)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
@@ -2486,7 +2508,7 @@ static void pxd_abort_context(struct work_struct *work)
 	pxdctx_set_connected(ctx, false);
 }
 
-int pxd_context_init(struct pxd_context *ctx, int i)
+static int pxd_context_init(struct pxd_context *ctx, int i)
 {
 	int err;
 
@@ -2526,7 +2548,7 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 	}
 }
 
-int pxd_init(void)
+static int pxd_init(void)
 {
 	int err, i, j;
 
@@ -2610,7 +2632,7 @@ out:
 	return err;
 }
 
-void pxd_exit(void)
+static void pxd_exit(void)
 {
 	int i;
 
