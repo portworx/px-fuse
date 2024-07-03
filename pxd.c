@@ -1255,7 +1255,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
 	  struct queue_limits lim = {
-		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
 		  .max_segment_size = SEGMENT_SIZE,
