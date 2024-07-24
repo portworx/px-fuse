@@ -1346,10 +1346,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
-	if (pxd_dev->discard_size < SECTOR_SIZE)
-		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
-	else
-		q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
+    q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
 	q->limits.discard_zeroes_data = 1;
@@ -1497,11 +1494,10 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		pxd_dev->queue_depth = add->queue_depth;
 	}
 
-	if (add->discard_size < SECTOR_SIZE)
-		pxd_dev->discard_size = SEGMENT_SIZE;
-	else
-		pxd_dev->discard_size = add->discard_size;
-
+	pxd_dev->discard_size = PXD_MAX_DISCARD_GRANULARITY;
+	if (add->discard_size != 0) {
+		pxd_dev->discard_size = ALIGN(add->discard_size, PXD_MAX_DISCARD_GRANULARITY);
+	}
 	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
 			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
 
