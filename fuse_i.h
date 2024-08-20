@@ -24,6 +24,8 @@
 #include <linux/workqueue.h>
 #include <linux/hash.h>
 #include <linux/version.h>
+#include <linux/mm_types.h>
+#include <linux/uio.h>
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,18,0)
 #include "iov_iter.h"
@@ -89,6 +91,13 @@ struct fuse_req {
 	struct fuse_out out;
 
 	struct pxd_rdwr_in pxd_rdwr_in;
+
+	struct work_struct work; // allow this to be async scheduled in bg
+	struct iov_iter iter;
+	const void *to_free;
+	struct fuse_conn *fc;
+	struct fuse_req *cmplt_req; /// completion request
+	struct mm_struct *mm; // userspace mm
 
 	union {
 		/** Associated request structrure. */

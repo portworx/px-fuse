@@ -23,9 +23,19 @@
 #include <linux/random.h>
 #include <linux/version.h>
 #include <linux/blkdev.h>
+#include <linux/workqueue.h>
 #include "pxd_compat.h"
 #include "pxd_fastpath.h"
 #include "pxd_core.h"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0) && LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+#include <linux/mmu_context.h>
+#endif
+
+#include <linux/sched.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#include <linux/sched/mm.h>
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -41,6 +51,7 @@
 #define FUSE_MAX_REQUEST_IDS (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
 static struct kmem_cache *fuse_req_cachep;
+static struct workqueue_struct *bgwq = NULL;
 
 static struct fuse_conn *fuse_get_conn(struct file *file)
 {
@@ -472,8 +483,15 @@ retry:
 			copied += copied_this_time;
 		} else {
 			err = copied_this_time;
-			req->out.h.error = -EIO;
-			request_end(fc, req, true);
+			if (req->in.h.opcode != PXD_COMPLETE) {
+				list_del(&req->list);
+				req->out.h.error = -EIO;
+				request_end(fc, req, true);
+			}
+		}
+		if (req->in.h.opcode == PXD_COMPLETE) {
+			list_del(&req->list);
+			fuse_request_free(req);
 		}
 		if (entry == last)
 			break;
@@ -939,6 +957,126 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 	}
 }
 
+static void dump_iter(const char *name, struct iov_iter *iter)
+{
+#if 0
+	printk("[%s]=>type: %d, offset: %ld, count: %ld, nr_segs %lu vec: %p\n", name,
+			iov_iter_type(iter),
+			iter->iov_offset, iter->count, iter->nr_segs, iter->__iov);
+
+
+	if (iov_iter_type(iter) == ITER_IOVEC) {
+		int i;
+		const struct iovec *iovec = iter->__iov;
+		for (i=0; i<iter->nr_segs; i++) {
+			printk(" [%d]: %p{%p, %ld}\n", i, &iovec[i], iovec[i].iov_base, iovec[i].iov_len);
+		}
+	}
+#endif
+}
+
+static void copy_iov_iter(struct fuse_req *req, struct iov_iter *src)
+{
+	dump_iter("source", src);
+	req->to_free = dup_iter(&req->iter, src, GFP_KERNEL);
+	BUG_ON(req->to_free == NULL);
+	dump_iter("copied", &req->iter);
+}
+
+#define OFFLOAD_READ
+
+// this will run out of a separate kthread - pulling some common context
+static void do_read_complete(struct work_struct *work)
+{
+	struct fuse_req *req = container_of(work, struct fuse_req, work);
+	struct fuse_conn *fc = req->fc;
+	struct iov_iter *iter = &req->iter;
+
+	struct fuse_req *cmplt_req = req->cmplt_req;
+	int rc = 0;
+#ifdef OFFLOAD_READ
+#ifdef HAVE_BVEC_ITER
+	struct bio_vec bvec;
+#else
+	struct bio_vec *bvec = NULL;
+#endif
+	struct request *breq = req->rq;
+	struct req_iterator breq_iter;
+	int nsegs = breq->nr_phys_segments;
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
+	mm_segment_t oldfs = get_fs();
+#endif
+	dump_iter("do_read_complete", iter);
+	// init the completion req
+	cmplt_req->to_free = req->to_free;
+	cmplt_req->in.h.user_data = req->out.h.user_data;
+	cmplt_req->mm = req->mm;
+
+	if (cmplt_req->mm != NULL) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+		kthread_use_mm(cmplt_req->mm);
+#else
+		set_fs(USER_DS);
+		use_mm(cmplt_req->mm);
+#endif
+	}
+
+	//BUG_ON(req->in.h.opcode != PXD_READ || iter->count == 0);
+	BUG_ON(req->in.h.opcode != PXD_READ);
+#ifdef OFFLOAD_READ
+	if (nsegs) {
+		int i = 0;
+		rq_for_each_segment(bvec, breq, breq_iter) {
+			ssize_t len = BVEC(bvec).bv_len;
+			if (copy_page_from_iter(BVEC(bvec).bv_page,
+						BVEC(bvec).bv_offset,
+						len, iter) != len) {
+				printk(KERN_ERR "%s: copy page %d of %d error\n",
+				       __func__, i, nsegs);
+				rc = -EFAULT;
+				// goto errout;
+				req->out.h.error = rc;
+				request_end(fc, req, true);
+				rc = 0; // DEBUG reset rc to px from restarting
+				goto errout;
+			}
+			i++;
+		}
+	}
+#endif
+	// finish to kernel
+	request_end(fc, req, true);
+
+errout:
+	if (cmplt_req->to_free != NULL)
+		kfree(cmplt_req->to_free);
+
+	if (cmplt_req->mm != NULL) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,8,0)
+		kthread_unuse_mm(cmplt_req->mm);
+#else
+		unuse_mm(cmplt_req->mm);
+		set_fs(oldfs);
+#endif
+	}
+
+	// submit a PXD_COMPLETE to userspace to free up read sm
+	cmplt_req->in.h.len = sizeof(struct rdwr_in_v1);
+	cmplt_req->in.h.opcode = PXD_COMPLETE;
+	cmplt_req->in.h.unique = 0;
+	cmplt_req->in.numargs = 1;
+	cmplt_req->in.args[0].size = sizeof(struct pxd_rdwr_in);
+	cmplt_req->in.args[0].value = &cmplt_req->pxd_rdwr_in;
+
+	cmplt_req->pxd_rdwr_in.pad = rc;
+
+	spin_lock(&fc->lock);
+	fuse_request_send_nowait_locked(fc, cmplt_req);
+	spin_unlock(&fc->lock);
+}
+
 /*
  * Write a single reply to a request.  First the header is copied from
  * the write buffer.  The request is then searched on the processing
@@ -951,6 +1089,7 @@ static int __fuse_dev_do_write(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
+#ifndef OFFLOAD_READ
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
 #else
@@ -966,7 +1105,7 @@ static int __fuse_dev_do_write(struct fuse_conn *fc,
 				ssize_t len = BVEC(bvec).bv_len;
 				if (copy_page_from_iter(BVEC(bvec).bv_page,
 							BVEC(bvec).bv_offset,
-							len, iter) != len) {
+							len, &req->iter) != len) {
 					printk(KERN_ERR "%s: copy page %d of %d error\n",
 					       __func__, i, nsegs);
 					return -EFAULT;
@@ -974,6 +1113,34 @@ static int __fuse_dev_do_write(struct fuse_conn *fc,
 				i++;
 			}
 		}
+#endif
+		req->mm = get_task_mm(current); // can fail
+		if (req->out.h.user_data != 0) {
+			req->cmplt_req = fuse_request_alloc();
+			BUG_ON(req->cmplt_req == NULL);
+
+			req->fc = fc;
+			copy_iov_iter(req, iter);
+			INIT_WORK(&req->work, do_read_complete);
+			queue_work(bgwq, &req->work);
+			return 0;
+		}
+#if 0
+		if (nsegs) {
+			int i = 0;
+			rq_for_each_segment(bvec, breq, breq_iter) {
+				ssize_t len = BVEC(bvec).bv_len;
+				if (copy_page_from_iter(BVEC(bvec).bv_page,
+							BVEC(bvec).bv_offset,
+							len, &req->iter) != len) {
+					printk(KERN_ERR "%s: copy page %d of %d error\n",
+					       __func__, i, nsegs);
+					return -EFAULT;
+				}
+				i++;
+			}
+		}
+#endif
 	}
 	request_end(fc, req, true);
 	return 0;
@@ -993,6 +1160,8 @@ static int __fuse_dev_do_write(struct fuse_conn *fc,
 	int nsegs = bio_segments(breq);
 	int bvec_iter;
 #endif
+
+	BUG("not expected here");
 
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
 		if (nsegs) {
@@ -1332,6 +1501,13 @@ int fuse_dev_init(void)
 	if (!fuse_req_cachep)
 		goto out;
 
+
+	//bgwq = alloc_workqueue("pxd-bgwq", WQ_HIGHPRI | WQ_BH, 0);
+	bgwq = alloc_workqueue("pxd-bgwq", WQ_HIGHPRI, 512);
+	if (bgwq == NULL) {
+		kmem_cache_destroy(fuse_req_cachep);
+		goto out;
+	}
 	return 0;
 
  out:
@@ -1340,5 +1516,6 @@ int fuse_dev_init(void)
 
 void fuse_dev_cleanup(void)
 {
+	if (bgwq != NULL) destroy_workqueue(bgwq);
 	kmem_cache_destroy(fuse_req_cachep);
 }

@@ -668,6 +668,7 @@ struct fuse_in_header {
 	uint32_t	gid;
 	uint32_t	pid;
 	uint32_t	padding;
+	uint64_t        user_data;
 };
 
 struct fuse_in_header_v1 {
@@ -679,12 +680,14 @@ struct fuse_in_header_v1 {
 	uint32_t	gid;
 	uint32_t	pid;
 	uint32_t	padding;
+	uint64_t        user_data;
 };
 
 struct fuse_out_header {
 	uint32_t	len;
 	int32_t		error;
 	uint64_t	unique;
+	uint64_t        user_data;
 };
 
 struct fuse_dirent {
