@@ -11,6 +11,9 @@
 #include "pxd_fastpath.h"
 #include "fuse_i.h"
 
+#define DEFAULT_PXOFFLOAD_WORKERS_PER_NODE (4)
+void offload_work(struct kthread_work* work);
+
 struct pxd_context {
 	spinlock_t lock;
 	struct list_head list;

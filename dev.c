@@ -957,36 +957,15 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 	}
 }
 
-static void dump_iter(const char *name, struct iov_iter *iter)
-{
-#if 0
-	printk("[%s]=>type: %d, offset: %ld, count: %ld, nr_segs %lu vec: %p\n", name,
-			iov_iter_type(iter),
-			iter->iov_offset, iter->count, iter->nr_segs, iter->__iov);
-
-
-	if (iov_iter_type(iter) == ITER_IOVEC) {
-		int i;
-		const struct iovec *iovec = iter->__iov;
-		for (i=0; i<iter->nr_segs; i++) {
-			printk(" [%d]: %p{%p, %ld}\n", i, &iovec[i], iovec[i].iov_base, iovec[i].iov_len);
-		}
-	}
-#endif
-}
-
 static void copy_iov_iter(struct fuse_req *req, struct iov_iter *src)
 {
-	dump_iter("source", src);
 	req->to_free = dup_iter(&req->iter, src, GFP_KERNEL);
 	BUG_ON(req->to_free == NULL);
-	dump_iter("copied", &req->iter);
 }
 
-#define OFFLOAD_READ
-
 // this will run out of a separate kthread - pulling some common context
-static void do_read_complete(struct work_struct *work)
+//static void do_read_complete(struct work_struct *work)
+static void do_read_complete(struct kthread_work *work)
 {
 	struct fuse_req *req = container_of(work, struct fuse_req, work);
 	struct fuse_conn *fc = req->fc;
@@ -994,7 +973,6 @@ static void do_read_complete(struct work_struct *work)
 
 	struct fuse_req *cmplt_req = req->cmplt_req;
 	int rc = 0;
-#ifdef OFFLOAD_READ
 #ifdef HAVE_BVEC_ITER
 	struct bio_vec bvec;
 #else
@@ -1003,12 +981,10 @@ static void do_read_complete(struct work_struct *work)
 	struct request *breq = req->rq;
 	struct req_iterator breq_iter;
 	int nsegs = breq->nr_phys_segments;
-#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,8,0)
 	mm_segment_t oldfs = get_fs();
 #endif
-	dump_iter("do_read_complete", iter);
 	// init the completion req
 	cmplt_req->to_free = req->to_free;
 	cmplt_req->in.h.user_data = req->out.h.user_data;
@@ -1025,7 +1001,6 @@ static void do_read_complete(struct work_struct *work)
 
 	//BUG_ON(req->in.h.opcode != PXD_READ || iter->count == 0);
 	BUG_ON(req->in.h.opcode != PXD_READ);
-#ifdef OFFLOAD_READ
 	if (nsegs) {
 		int i = 0;
 		rq_for_each_segment(bvec, breq, breq_iter) {
@@ -1045,7 +1020,6 @@ static void do_read_complete(struct work_struct *work)
 			i++;
 		}
 	}
-#endif
 	// finish to kernel
 	request_end(fc, req, true);
 
@@ -1089,31 +1063,6 @@ static int __fuse_dev_do_write(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
-#ifndef OFFLOAD_READ
-#ifdef HAVE_BVEC_ITER
-		struct bio_vec bvec;
-#else
-		struct bio_vec *bvec = NULL;
-#endif
-		struct request *breq = req->rq;
-		struct req_iterator breq_iter;
-		int nsegs = breq->nr_phys_segments;
-
-		if (nsegs) {
-			int i = 0;
-			rq_for_each_segment(bvec, breq, breq_iter) {
-				ssize_t len = BVEC(bvec).bv_len;
-				if (copy_page_from_iter(BVEC(bvec).bv_page,
-							BVEC(bvec).bv_offset,
-							len, &req->iter) != len) {
-					printk(KERN_ERR "%s: copy page %d of %d error\n",
-					       __func__, i, nsegs);
-					return -EFAULT;
-				}
-				i++;
-			}
-		}
-#endif
 		req->mm = get_task_mm(current); // can fail
 		if (req->out.h.user_data != 0) {
 			req->cmplt_req = fuse_request_alloc();
@@ -1121,26 +1070,10 @@ static int __fuse_dev_do_write(struct fuse_conn *fc,
 
 			req->fc = fc;
 			copy_iov_iter(req, iter);
-			INIT_WORK(&req->work, do_read_complete);
-			queue_work(bgwq, &req->work);
+			kthread_init_work(&req->work, do_read_complete);
+			offload_work(&req->work);
 			return 0;
 		}
-#if 0
-		if (nsegs) {
-			int i = 0;
-			rq_for_each_segment(bvec, breq, breq_iter) {
-				ssize_t len = BVEC(bvec).bv_len;
-				if (copy_page_from_iter(BVEC(bvec).bv_page,
-							BVEC(bvec).bv_offset,
-							len, &req->iter) != len) {
-					printk(KERN_ERR "%s: copy page %d of %d error\n",
-					       __func__, i, nsegs);
-					return -EFAULT;
-				}
-				i++;
-			}
-		}
-#endif
 	}
 	request_end(fc, req, true);
 	return 0;

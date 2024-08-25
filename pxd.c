@@ -79,11 +79,13 @@ uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
 uint32_t pxd_num_fpthreads = DEFAULT_PXFP_WORKERS_PER_NODE;
+uint32_t pxd_num_offload_threads = DEFAULT_PXOFFLOAD_WORKERS_PER_NODE;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 module_param(pxd_num_fpthreads, uint, 0644);
+module_param(pxd_num_offload_threads, uint, 0644);
 
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
@@ -98,6 +100,163 @@ struct pxd_context* find_context(unsigned ctx)
 	return &pxd_contexts[ctx];
 }
 
+
+#define MAX_OFFLOAD_WORKERS_PER_NODE (pxd_num_offload_threads) /// keep it power of 2.
+#define MAX_OFFLOAD_WORKERS_PER_NODE_MASK (MAX_OFFLOAD_WORKERS_PER_NODE-1) /// will be a bit mask.
+
+struct pxoffload_context_per_node {
+	bool valid;
+#define MAX_ALLOC_OFFLOAD_WORKER_THREADS_PER_NODE (8)
+	struct kthread_worker *worker[MAX_ALLOC_OFFLOAD_WORKER_THREADS_PER_NODE];
+};
+struct kthread_worker *default_worker = NULL;
+struct pxoffload_context_per_node pxoffload_ctxt[MAX_NUMNODES];
+
+#define BURST_IO (8)
+#define BURST_MASK (BURST_IO-1)
+struct pxoffload_context_percpu {
+  uint8_t batch;
+  unsigned mapped_cpu;
+};
+struct pxoffload_context_percpu pxoffload_percpu[NR_CPUS];
+
+static void pxoffload_map_workers(void)
+{
+    int i;
+
+    for (i=0; i<NR_CPUS; i++) {
+	pxoffload_percpu[i].mapped_cpu = i;
+    }
+}
+
+#if 0
+static void pxoffload_flush_work(void) {
+       int node;
+
+       for (node = 0; node < MAX_NUMNODES; node++) {
+               struct pxoffload_context_per_node *c = &pxoffload_ctxt[node];
+               if (c->valid) {
+                       int i;
+                       for (i = 0; i < MAX_OFFLOAD_WORKERS_PER_NODE; i++) {
+                               struct kthread_worker *worker = c->worker[i];
+                               if (worker != NULL) {
+                                       kthread_flush_worker(worker);
+                               }
+                       }
+               }
+       }
+}
+#endif
+
+static void pxoffload_exit(void) {
+	int i, node;
+	for (node=0; node < MAX_NUMNODES; node++) {
+		struct pxoffload_context_per_node *c = &pxoffload_ctxt[node];
+		if (c->valid) {
+			for (i=0; i<MAX_OFFLOAD_WORKERS_PER_NODE; i++) {
+				if (c->worker[i] != NULL) {
+					kthread_destroy_worker(c->worker[i]);
+				}
+			}
+		}
+	}
+}
+
+static int pxoffload_init(void) {
+	int node, cpu, rc;
+	if (((MAX_OFFLOAD_WORKERS_PER_NODE_MASK) & (MAX_OFFLOAD_WORKERS_PER_NODE)) != 0) {
+		printk(KERN_WARNING"pxd_num_offload_threads(%d) has to be a power of 2, reset to default(%d)\n", pxd_num_offload_threads, DEFAULT_PXOFFLOAD_WORKERS_PER_NODE);
+		MAX_OFFLOAD_WORKERS_PER_NODE = DEFAULT_PXOFFLOAD_WORKERS_PER_NODE;
+	}
+
+
+	printk(KERN_INFO"pxd inited with %d offload workers per numa node\n", MAX_OFFLOAD_WORKERS_PER_NODE);
+	memset(&pxoffload_ctxt, 0, sizeof(pxoffload_ctxt));
+	for_each_online_node(node) {
+		struct pxoffload_context_per_node *c = &pxoffload_ctxt[node];
+		const cpumask_t *cpumask = cpumask_of_node(node);
+		int active;
+
+		// unexpected!
+		if (c->valid) {
+			printk(KERN_NOTICE"pxd offload context on numa node %d already initialized, skipping\n", node);
+			continue;
+		}
+
+		if (cpumask_empty(cpumask)) {
+			// NUMA node with no cpu's?! - skip it.
+			printk(KERN_NOTICE"skipping online numa node %d with no attached cpus\n", node);
+			continue;
+		}
+
+		active = 0;
+		for_each_cpu(cpu, cpumask) {
+			struct kthread_worker* worker;
+			if (!cpu_online(cpu)) {
+				continue;
+			}
+			worker = kthread_create_worker_on_cpu(cpu, 0, "pxoffn%dc%d", node, cpu);
+			if (IS_ERR_OR_NULL(worker)) {
+				rc = PTR_ERR(worker);
+				goto out;
+			}
+			c->valid = true;
+			c->worker[active++] = worker;
+			if (default_worker == NULL) {
+				default_worker = worker;
+			}
+			if (active == MAX_OFFLOAD_WORKERS_PER_NODE) {
+				break;
+			}
+		}
+	}
+	// always confirm default
+	if (default_worker == NULL) {
+		// fastpath init failed.
+		printk(KERN_ERR"found no online node with online cpus\n");
+		rc = -EINVAL;
+		goto out;
+	}
+
+	pxoffload_map_workers();
+	return 0;
+out:
+	pxoffload_exit();
+	return rc;
+}
+
+static
+unsigned int balanceIO(struct pxoffload_context_per_node *c, unsigned int cpuid)
+{
+	if (cpuid < NR_CPUS) {
+		struct pxoffload_context_percpu *this = &pxoffload_percpu[cpuid];
+		int burst = ++this->batch;
+		if ((burst & BURST_MASK)== 0) {
+			this->mapped_cpu++;
+		}
+		return this->mapped_cpu;
+	}
+
+	return 0; // not possible case
+}
+
+// assign work on the worker thread with least penalty. loadbalance
+// across threads if no hint provided through 'qnum'
+void offload_work(struct kthread_work* work)
+{
+	unsigned int cpuid = smp_processor_id();
+	int node = cpu_to_node(cpuid);
+	struct kthread_worker *worker = default_worker;
+
+	if (node < MAX_NUMNODES) {
+		struct pxoffload_context_per_node *c = &pxoffload_ctxt[node];
+		if (c->valid) {
+			cpuid = balanceIO(c, cpuid);
+			worker = c->worker[cpuid & MAX_OFFLOAD_WORKERS_PER_NODE_MASK];
+		}
+	}
+	kthread_queue_work(worker, work);
+}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)
 static int pxd_open(struct gendisk *bdev, blk_mode_t mode)
@@ -2567,6 +2726,13 @@ static int pxd_init(void)
 		printk(KERN_ERR "pxd: fastpath initialization failed: %d\n", err);
 		goto out_blkdev;
 	}
+
+	err = pxoffload_init();
+	if (err) {
+		fastpath_cleanup();
+		printk(KERN_ERR "pxd: offloader initialization failed: %d\n", err);
+		goto out_blkdev;
+	}
 #ifdef __PX_BLKMQ__
 	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
 			gitversion, pxd_supported_features());
@@ -2596,6 +2762,7 @@ static void pxd_exit(void)
 {
 	int i;
 
+	pxoffload_exit();
 	fastpath_cleanup();
 	pxd_sysfs_exit();
 	unregister_blkdev(pxd_major, "pxd");

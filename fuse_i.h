@@ -92,7 +92,8 @@ struct fuse_req {
 
 	struct pxd_rdwr_in pxd_rdwr_in;
 
-	struct work_struct work; // allow this to be async scheduled in bg
+	// struct work_struct work; // allow this to be async scheduled in bg
+	struct kthread_work work;
 	struct iov_iter iter;
 	const void *to_free;
 	struct fuse_conn *fc;
