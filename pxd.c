@@ -1942,12 +1942,31 @@ out:
 	return err;
 }
 
+// on userspace restart, the state machine pointers part of read offload are no longer valid
+// userspace need not be informed anymore... free them up from pending io list.
+static void pxd_cleanup_completes(struct fuse_conn *fc) {
+	struct fuse_req *reqc, *reqn;
+
+	spin_lock(&fc->lock);
+	list_for_each_entry_safe(reqc, reqn, &fc->pending, list) {
+		if (reqc->in.h.opcode == PXD_COMPLETE) {
+			list_del(&reqc->list);
+			fuse_request_free(reqc);
+		}
+	}
+	spin_unlock(&fc->lock);
+}
+
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 {
 	size_t copied = 0;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev;
 	struct pxd_init_in pxd_init;
+
+
+	// walk through the pending list of IOs and cleanup any PXD_COMPLETE reqs
+	pxd_cleanup_completes(fc);
 
 	// Taking context lock is unnecessary, as this gets called during
 	// userspace init only once, no changes to the pxd block device
