@@ -48,6 +48,7 @@ struct pxd_device {
 	bool fastpath; // this is persistent, how the block device registered with kernel
 	unsigned int queue_depth; // sysfs attribute bdev io queue depth
 	unsigned int discard_size;
+	uint16_t block_size;
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// congestion handling
@@ -99,6 +100,7 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 #endif
 
 #define SEGMENT_SIZE (1024 * 1024)
+#define SUBBLOCK_SEGMENT_SIZE (SEGMENT_SIZE/2)
 
 #ifdef __PXD_BIO_MAKEREQ__
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);

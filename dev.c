@@ -553,7 +553,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
 	struct pxd_add_out add;
-	struct pxd_add_ext_out add_ext;
+	struct pxd_add_subblock_out add_ext;
 	size_t len = sizeof(add);
 
 	if (copy_from_iter(&add, len, iter) != len) {
@@ -563,6 +563,7 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 
 	memset(&add_ext, 0, sizeof(add_ext));
 	memcpy(&add_ext, &add, sizeof(add));
+	add_ext.block_size = PXD_LBS;
 	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
 	return pxd_add(conn, &add_ext);
 }
@@ -571,6 +572,23 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
 	struct pxd_add_ext_out add;
+	struct pxd_add_subblock_out add_ext;
+	size_t len = sizeof(add);
+
+	if (copy_from_iter(&add, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg\n", __func__);
+		return -EFAULT;
+	}
+	memset(&add_ext, 0, sizeof(add_ext));
+	memcpy(&add_ext, &add, sizeof(add));
+	add_ext.block_size = PXD_LBS;
+	return pxd_add(conn, &add_ext);
+}
+
+static int fuse_notify_subblock_add(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter)
+{
+	struct pxd_add_subblock_out add;
 	size_t len = sizeof(add);
 
 	if (copy_from_iter(&add, len, iter) != len) {
@@ -653,10 +671,15 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	if (ret)
 		return ret;
 
+#if 0
 	/* advance the iterator if data is unaligned */
 	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
 		iov_iter_advance(&data_iter,
 				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#else
+	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
+		printk("REQ: unaligned IO %llu offset\n", req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#endif
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		ssize_t len = BVEC(bvec).bv_len;
@@ -673,7 +696,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 		if (copied < len) {
 			size_t copy_this = copy_page_to_iter(BVEC(bvec).bv_page,
 				BVEC(bvec).bv_offset + copied,
-				len - copied, &data_iter);
+				min(len - copied, data_iter.iov[0].iov_len), &data_iter);
 			if (copy_this != len - copied) {
 				if (!iter->count)
 					return 0;
@@ -683,7 +706,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 					iov, &data_iter);
 				if (ret)
 					return ret;
-				len -= copied;
+				len -= (copied + copy_this);
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
@@ -720,10 +743,15 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	if (ret)
 		return ret;
 
+#if 0
 	/* advance the iterator if data is unaligned */
 	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
 		iov_iter_advance(&data_iter,
 				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#else
+        if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
+                printk("BIO: unaligned IO %llu offset\n", req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+#endif
 
 	bio_for_each_segment(bvec, req->bio, bvec_iter) {
 		ssize_t len = BVEC(bvec).bv_len;
@@ -934,6 +962,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_ioswitch_event(fc, size, iter, false);
 	case PXD_EXPORT_DEV:
 		return fuse_notify_export(fc, size, iter);
+	case PXD_SUBBLOCK_ADD:
+		return fuse_notify_subblock_add(fc, size, iter);
 	default:
 		return -EINVAL;
 	}

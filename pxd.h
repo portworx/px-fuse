@@ -86,6 +86,7 @@ enum pxd_opcode {
 	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
 	PXD_EXPORT_DEV,     /**< export the attached device to the kernel */
+	PXD_SUBBLOCK_ADD,   /**< add device with block size */
 	PXD_LAST,
 };
 
@@ -160,6 +161,21 @@ struct pxd_add_ext_out {
 
 
 /**
+ * PXD_ADD_SUBBLOCK request from user space
+ */
+struct pxd_add_subblock_out {
+	uint64_t dev_id;	/**< device global id */
+	size_t size;		/**< block device size in bytes */
+	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
+	int32_t discard_size;	/**< block device discard size in bytes */
+	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
+	int     enable_fp; /**< enable fast path */
+	struct pxd_update_path_out paths; /**< backing device paths */
+	int16_t block_size;     /**< block size */
+	int16_t reserved[3];
+};
+
+/**
  * PXD_REMOVE request from user space
  */
 struct pxd_remove_out {
@@ -226,11 +242,12 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
 #define PXD_FEATURE_ATTACH_OPTIMIZED (0x2)
+#define PXD_FEATURE_SUBBLOCK         (0x4)
 
 static inline
 int pxd_supported_features(void)
 {
-    int features = PXD_FEATURE_ATTACH_OPTIMIZED;
+    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_SUBBLOCK;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif

@@ -1255,8 +1255,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
 	  struct queue_limits lim = {
-		  .logical_block_size = PXD_LBS,
-		  .physical_block_size = PXD_LBS,
+		  .logical_block_size = pxd_dev->block_size,
+		  .physical_block_size = pxd_dev->block_size,
 		  .max_segment_size = SEGMENT_SIZE,
 		  .max_segments = SEGMENT_SIZE / PXD_LBS,
 		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
@@ -1267,6 +1267,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
 		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE
 	  };
+          if (pxd_dev->block_size != PXD_LBS) {
+              lim.max_segment_size = SUBBLOCK_SEGMENT_SIZE;
+              lim.max_hw_sectors = SUBBLOCK_SEGMENT_SIZE/SECTOR_SIZE;
+              lim.io_min = pxd_dev->block_size;
+          }
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
 #else
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
@@ -1322,13 +1327,18 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
-	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
-	blk_queue_max_segment_size(q, SEGMENT_SIZE);
+	if (pxd_dev->block_size != PXD_LBS) {
+		blk_queue_max_hw_sectors(q, SUBBLOCK_SEGMENT_SIZE / SECTOR_SIZE);
+		blk_queue_max_segment_size(q, SUBBLOCK_SEGMENT_SIZE);
+        } else {
+		blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
+		blk_queue_max_segment_size(q, SEGMENT_SIZE);
+	}
 	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
-	blk_queue_io_min(q, PXD_LBS);
 	blk_queue_io_opt(q, PXD_LBS);
-	blk_queue_logical_block_size(q, PXD_LBS);
-	blk_queue_physical_block_size(q, PXD_LBS);
+	blk_queue_io_min(q, pxd_dev->block_size);
+	blk_queue_logical_block_size(q, pxd_dev->block_size);
+	blk_queue_physical_block_size(q, pxd_dev->block_size);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 #if defined(__EL8__) || defined(__SUSE_GT_SP4__)
@@ -1421,19 +1431,36 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 	return pxd_dev;
 }
 
+static
+bool pxd_supported_block_size(uint64_t dev_id, int32_t block_size)
+{
+       int32_t bs = PAGE_SIZE;
+       if (block_size <= 0) {
+               goto out;
+       }
+
+       do {
+               if (block_size == bs) return true;
+               bs >>= 1;
+       } while (bs >= SECTOR_SIZE);
+
+out:
+       printk(KERN_ERR"device %llu passed unsupported block size %u", dev_id, block_size);
+       return false;
+}
+
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_subblock_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = NULL;
 	struct pxd_device *pxd_dev_itr;
 	int new_minor;
-	int err;
+	int err = -EINVAL;
 
-	err = -ENOMEM;
 	if (ctx->num_devices >= PXD_MAX_DEVICES) {
 		printk(KERN_ERR "Too many devices attached..\n");
-		goto out_module;
+		return -ENOMEM;
 	}
 
 	// if device already exists, then return it
@@ -1447,9 +1474,14 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 	}
 
+
+	if (!pxd_supported_block_size(add->dev_id, add->block_size)) {
+		return -EINVAL;
+	}
+
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
 	if (!pxd_dev)
-		goto out_module;
+		return -ENOMEM;
 
 	pxd_mem_printk("device %llu allocated at %px\n", add->dev_id, pxd_dev);
 
@@ -1475,6 +1507,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->fastpath = add->enable_fp;
+        pxd_dev->block_size = add->block_size;
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
