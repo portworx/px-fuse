@@ -114,8 +114,12 @@ endif
 endif
 
 ifdef CONFIG_SUSE_PATCHLEVEL
-ifeq ($(shell test $(CONFIG_SUSE_PATCHLEVEL) -gt 4; echo $$?),0)
-PXDEFINES += -D__SUSE_GT_SP4__
+ifeq ($(shell test $(CONFIG_SUSE_PATCHLEVEL) -eq 5; echo $$?),0)
+PXDEFINES += -D__SUSE_EQ_SP5__
+endif
+
+ifeq ($(shell test $(CONFIG_SUSE_PATCHLEVEL) -ge 6; echo $$?),0)
+PXDEFINES += -D__SUSE_GTE_SP6__
 endif
 endif
 
