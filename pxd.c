@@ -209,11 +209,7 @@ static long pxd_ioctl_init(struct file *file, void __user *argp)
 	struct pxd_context *ctx = container_of(file->f_op, struct pxd_context, fops);
 	struct iov_iter iter;
 	struct iovec iov = {argp, sizeof(struct pxd_ioctl_init_args)};
-	int direction = WRITE;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
-	direction = READ;
-#endif
+	int direction = READ;
 
 	iov_iter_init(&iter, direction, &iov, 1, sizeof(struct pxd_ioctl_init_args));
 
@@ -1825,10 +1821,6 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		}
 		copied += sizeof(id);
 	}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
-	iter->data_source = WRITE;   // Reset to 'WRITE'
-#endif
 
 	printk(KERN_INFO "%s: pxd-control-%d init OK %d devs version %d\n", __func__,
 		ctx->id, pxd_init.num_devices, pxd_init.version);
