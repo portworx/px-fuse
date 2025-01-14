@@ -106,9 +106,9 @@ ifeq ($(shell cat "/host-os-release" | grep ID_LIKE | grep -q suse; echo $$?),0)
 PXDEFINES += -D__SUSE__
 endif
 
-# Detect SUSE Linux Micro 6.1 inside PX container --
-ifeq ($(shell cat "/host-os-release" | grep -q "SUSE Linux Micro 6.1"; echo $$?),0)
-PXDEFINES += -D__SLE_MICRO_EQ_6_1__
+# Detect SUSE Linux Micro 6.0 or 6.1 inside PX container
+ifeq ($(shell cat "/host-os-release" | grep -E -q "SUSE Linux Micro 6\.[01]"; echo $$?),0)
+PXDEFINES += -D__SLE_MICRO_GTE_6_0__
 endif
 
 else  # Not inside PX container
@@ -117,9 +117,9 @@ ifeq ($(shell cat "/etc/os-release" | grep ID_LIKE | grep -q suse; echo $$?),0)
 PXDEFINES += -D__SUSE__
 endif
 
-# Detect SUSE Linux Micro 6.1 on host
-ifeq ($(shell cat "/etc/os-release" | grep -q "SUSE Linux Micro 6.1"; echo $$?),0)
-PXDEFINES += -D__SLE_MICRO_EQ_6_1__
+# Detect SUSE Linux Micro 6.0 or 6.1 on host
+ifeq ($(shell cat "/etc/os-release" | grep -E -q "SUSE Linux Micro 6\.[01]"; echo $$?),0)
+PXDEFINES += -D__SLE_MICRO_GTE_6_0__
 endif
 endif
 endif
