@@ -88,6 +88,7 @@ module_param(pxd_num_fpthreads, uint, 0644);
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
+static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force);
 
 struct pxd_context* find_context(unsigned ctx)
 {
@@ -259,7 +260,7 @@ static long pxd_ioctl_detach_device(struct file *file, void __user *argp)
                 return -EFAULT;
         }
 
-        ret = pxd_ioc_detach_device(&ctx->fc, &detach_device_args);
+        ret = pxd_remove_dev(&ctx->fc, detach_device_args.dev_id, false /* force */);
         return ret;
 }
 
