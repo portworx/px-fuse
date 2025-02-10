@@ -1810,11 +1810,6 @@ out:
 	return err;
 }
 
-ssize_t pxd_ioc_detach_device(struct fuse_conn *fc, struct pxd_detach_device *detach_device)
-{
-        return pxd_remove_dev(fc, detach_device->dev_id, false /*force*/);
-}
-
 ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 {
 	size_t copied = 0;
