@@ -194,11 +194,13 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
+	printk(KERN_INFO "in %s, adding to pending list\n", __func__);
 	list_add_tail(&req->list, &fc->pending);
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
 {
+	printk(KERN_INFO "in %s, wake up, signing up fasync SIGIO, POLL_IN\n", __func__);
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 }
@@ -226,6 +228,7 @@ __releases(fc->lock)
 	list_del(&req->list);
 	spin_unlock(&fc->lock);
 	uid = req->in.h.unique;
+	printk(KERN_INFO "in %s, unique = %llu req->end = %p\n", __func__, uid, req->end);
 	if (req->end)
 		shouldfree = req->end(fc, req, req->out.h.error);
 	fuse_put_unique(fc, uid);
@@ -244,6 +247,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
 	req->in.h.unique = fuse_get_unique(fc);
+	printk(KERN_INFO "in %s, unique = %llu, adding it to request_map at idx : %llu\n", __func__, req->in.h.unique, req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1));
 	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	/*
@@ -573,6 +577,7 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 	struct pxd_add_ext_out add;
 	size_t len = sizeof(add);
 
+	printk(KERN_INFO "fuse_notify_add_ext\n");
 	if (copy_from_iter(&add, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
@@ -950,6 +955,7 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 static int __fuse_dev_do_write(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
+	printk(KERN_INFO "in %s, opcode = %d\n", __func__, req->in.h.opcode);
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
@@ -1040,6 +1046,7 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	 * and error contains notification code.
 	 */
 	if (!oh.unique) {
+		printk(KERN_INFO "%s : oh.unique = 0", __func__);
 		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), iter);
 		return err ? err : nbytes;
 	}
@@ -1049,11 +1056,13 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 
 	err = -ENOENT;
 
+	printk(KERN_INFO "%s : oh.unique = %llu", __func__, oh.unique);
 	req = request_find(fc, oh.unique);
 	if (!req) {
 		printk(KERN_ERR "%s: request %lld not found\n", __func__, oh.unique);
 		return -ENOENT;
 	}
+	printk(KERN_INFO "%s : found request for unique: %llu", __func__, oh.unique);
 
 	spin_lock(&fc->lock);
 	if (!fc->connected) {

@@ -93,6 +93,7 @@ int fastpath_init(void)
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 #endif
 	printk(KERN_INFO"pxd inited with %d workers per numa node\n", MAX_PXFP_WORKERS_PER_NODE);
+	printk(KERN_INFO "allocating workqueue: pxwq\n");
 	gwq = alloc_workqueue("pxwq", WQ_HIGHPRI, 0);
 	if (!gwq) {
 		printk(KERN_ERR"fastpath workqueue alloc failure\n");
@@ -241,12 +242,15 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 	bool busy = false;
 
 	if (atomic_read(&pxd_dev->fp.sync_done) != 0) {
+		printk(KERN_INFO "device %llu sync work pending : false\n", pxd_dev->dev_id);
 		return true;
 	}
 
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
 		busy |= work_busy(&pxd_dev->fp.syncwi[i].ws);
 	}
+
+	printk(KERN_INFO "device %llu sync work pending busy : %d\n", pxd_dev->dev_id, busy);
 
 	return busy;
 }
@@ -292,8 +296,11 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 		return -EINVAL;
 	}
 
+	printk(KERN_INFO "device %llu skip_flush %d, fastpath %d\n",
+			pxd_dev->dev_id, skip_flush, fp->fastpath);
 	// check if previous sync instance is still active
 	if (!skip_flush && pxd_sync_work_pending(pxd_dev)) {
+		printk(KERN_INFO "device %llu sync work pending\n", pxd_dev->dev_id);
 		return -EBUSY;
 	}
 
@@ -323,7 +330,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 		if (rc) goto fail;
 	}
 
-	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
+	printk(KERN_NOTICE"device %llu suspended IO\n", pxd_dev->dev_id);
 	return 0;
 fail:
 	// It is possible replicas are down during failover
@@ -362,7 +369,7 @@ int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 	}
 
 	pxd_resume_io(pxd_dev);
-	printk(KERN_NOTICE"device %llu resumed IO from userspace\n", pxd_dev->dev_id);
+	printk(KERN_INFO "in %s device %llu resumed IO from userspace\n", __func__, pxd_dev->dev_id);
 	return 0;
 }
 
@@ -404,10 +411,13 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_suspend_io(pxd_dev);
 
 	decode_mode(mode, modestr);
+	printk(KERN_INFO"device %llu fastpath %d mode %#x(%s) setting up with %d backing volumes\n",
+		pxd_dev->dev_id, fp->fastpath, mode, modestr, fp->nfd);
+
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) { /* valid fd exists already */
 			if (force) {
-				printk("dev %llu:%s closing file desc %px\n",
+				printk(KERN_INFO "dev %llu:%s closing file desc %px\n",
 						pxd_dev->dev_id, __func__, fp->file[i]);
 				filp_close(fp->file[i], NULL);
 				f = filp_open(fp->device_path[i], mode, 0600);
@@ -420,6 +430,8 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 				f = fp->file[i];
 			}
 		} else {
+			printk(KERN_INFO "dev %llu:%s opening file desc %s\n",
+					pxd_dev->dev_id, __func__, fp->device_path[i]);
 			f = filp_open(fp->device_path[i], mode, 0600);
 			if (IS_ERR_OR_NULL(f)) {
 				printk(KERN_ERR"Failed attaching path: device %llu, path %s err %ld\n",
@@ -431,12 +443,12 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		fp->file[i] = f;
 
 		inode = file_inode(f);
-		printk(KERN_INFO"device %lld:%d, inode %lu mode %#x\n", pxd_dev->dev_id, i, inode->i_ino, mode);
+		printk(KERN_INFO "device %lld:%d, inode %lu mode %#x\n", pxd_dev->dev_id, i, inode->i_ino, mode);
 		if (S_ISREG(inode->i_mode)) {
 			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
 					pxd_dev->dev_id, i, inode->i_ino);
 		} else if (S_ISBLK(inode->i_mode)) {
-			printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
+			printk(KERN_INFO "device[%lld:%d] is a block device - inode %lu\n",
 				pxd_dev->dev_id, i, inode->i_ino);
 		} else {
 			printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
@@ -448,7 +460,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	pxd_dev->fp.fastpath = true;
 	pxd_resume_io(pxd_dev);
 
-	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
+	printk(KERN_INFO "pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
 		pxd_dev->dev_id, fp->fastpath, mode, fp->nfd,
 		fp->file[0], fp->file[1], fp->file[2]);
 
@@ -487,27 +499,35 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
 			!fastpath_active(pxd_dev)) {
+		printk(KERN_INFO "in %s : device %llu fastpath_enabled = %d fastpath_active = %d pxd_dev->fp.nfd = %d\n", __func__, pxd_dev->dev_id, fastpath_enabled(pxd_dev), fastpath_active(pxd_dev), pxd_dev->fp.nfd);
 		pxd_dev->fp.active_failover = false;
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
 
+	printk(KERN_INFO "in %s device %llu suspending IO, skipsync = %d\n", __func__, pxd_dev->dev_id, skipsync);
 	pxd_suspend_io(pxd_dev);
+
+	printk(KERN_INFO "in %s device %llu flushing fastpath workqueue\n", __func__, pxd_dev->dev_id);
 	fastpath_flush_work();
 
 	if (PXD_ACTIVE(pxd_dev)) {
-		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
+		printk(KERN_WARNING "%s: pxd device %llu fastpath disabled with active IO (%d)\n",
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
 	}
 
 	for (i = 0; i < nfd; i++) {
 		if (fp->file[i] > 0) {
 			if (!skipsync) {
+				printk(KERN_INFO "in %s device %llu: fsyncing file desc %px\n", __func__, pxd_dev->dev_id, fp->file[i]);
 				int ret = vfs_fsync(fp->file[i], 0);
 				if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
 					printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
 				}
+			} else {
+				printk(KERN_INFO "in %s device %llu: skipping fsync for file desc %px\n", __func__, pxd_dev->dev_id, fp->file[i]);
 			}
+			printk(KERN_INFO "in %s device %llu: closing file desc %px\n", __func__, pxd_dev->dev_id, fp->file[i]);
 			filp_close(fp->file[i], NULL);
 			fp->file[i] = NULL;
 		}
@@ -516,6 +536,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	pxd_dev->fp.fastpath = false;
 	pxd_dev->fp.can_failover = false;
 
+	printk(KERN_INFO "in %s device %llu resuming IO\n", __func__, pxd_dev->dev_id);
 	pxd_resume_io(pxd_dev);
 }
 
@@ -579,7 +600,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 
 	mode = open_mode(pxd_dev->mode);
 	decode_mode(mode, modestr);
-	printk("device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
+	printk(KERN_INFO "device %llu setting up fastpath target with mode %#x(%s), paths %ld\n",
 			pxd_dev->dev_id, mode, modestr, update_path->count);
 
 	if (update_path->count > MAX_PXD_BACKING_DEVS) {
@@ -591,20 +612,22 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	pxd_suspend_io(pxd_dev);
 	// update only the path below
 	for (i = 0; i < update_path->count; i++) {
-		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
+		printk(KERN_INFO "Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 			update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
 		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i], MAX_PXD_DEVPATH_LEN);
 		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
-		pxd_printk("dev %llu: successfully installed fastpath %s\n",
+		printk(KERN_INFO "dev %llu: successfully installed fastpath %s\n",
 			pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
 	}
 	pxd_dev->fp.nfd = update_path->count;
 	pxd_dev->fp.can_failover = update_path->can_failover;
+
+	printk(KERN_INFO "device %llu fastpath target setup complete, nfd = %d, can_failover = %d, device_path[0] = %s\n", pxd_dev->dev_id, pxd_dev->fp.nfd, pxd_dev->fp.can_failover, pxd_dev->fp.device_path[0]);
 	enableFastPath(pxd_dev, true);
 	pxd_resume_io(pxd_dev);
 
 	if (!pxd_dev->fp.fastpath) goto out_file_failed;
-	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
+	printk(KERN_INFO "dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
 out_file_failed:
 	disableFastPath(pxd_dev, false);
@@ -753,6 +776,7 @@ unsigned int balanceIO(struct pxfpcontext_per_node *c, unsigned int cpuid, bool 
 		if ((burst & BURST_MASK)== 0) {
 			this->mapped_cpu++;
 		}
+		printk(KERN_INFO "in %s, cpuid %d mapped to %d\n", __func__, cpuid, this->mapped_cpu);
 		return this->mapped_cpu;
 	}
 
@@ -767,6 +791,7 @@ void fastpath_queue_work(struct kthread_work* work, bool completion)
 	int node = cpu_to_node(cpuid);
 	struct kthread_worker *worker = fpdefault;
 
+	printk(KERN_INFO "in %s, node %d, cpuid %d completion = %d\n", __func__, node, cpuid, completion);
 	if (node < MAX_NUMNODES) {
 		struct pxfpcontext_per_node *c = &pxfpctxt[node];
 		if (c->valid) {
@@ -774,6 +799,7 @@ void fastpath_queue_work(struct kthread_work* work, bool completion)
 			worker = c->fpworker[cpuid & MAX_PXFP_WORKERS_PER_NODE_MASK];
 		}
 	}
+	printk(KERN_INFO "in %s, node %d, cpuid %d, queuing work on worker %p\n", __func__, node, cpuid, worker);
 	kthread_queue_work(worker, work);
 }
 

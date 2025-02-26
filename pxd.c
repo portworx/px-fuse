@@ -645,6 +645,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 					  ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
 					  ((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #endif
+	printk(KERN_INFO "in %s : req->in.args[0].value = %p, pxd_rdwr_in.dev_minor = %u, pxd_rdwr_in.offset = %llu, pxd_rdwr_in.size = %u pxd_rdwr_in.flags = %u\n", __func__, req->in.args[0].value, req->pxd_rdwr_in.dev_minor, req->pxd_rdwr_in.offset, req->pxd_rdwr_in.size, req->pxd_rdwr_in.flags);
 }
 
 /*
@@ -906,17 +907,21 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	pxd_dev->fp.switch_uid = 0;
 	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
-	printk("device %llu completed ioswitch %d with status %d\n",
+	printk(KERN_INFO "device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.h.opcode, status);
 
 	if (req->in.h.opcode == PXD_FAILOVER_TO_USERSPACE) {
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
+		printk(KERN_INFO "in %s opcode = PXD_FAILOVER_TO_USERSPACE, disabling fastpath\n", __func__);
 		disableFastPath(pxd_dev, true);
 
 		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+
+		printk(KERN_INFO "in %s, moving failQ to ios\n", __func__);
 		list_splice(&pxd_dev->fp.failQ, &ios);
 		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
+		printk(KERN_INFO "in %s, clearing active_failover\n", __func__);
 		pxd_dev->fp.active_failover = false;
 		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 	}
@@ -924,6 +929,7 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	// reopen the suspended device
 	pxd_request_resume_internal(pxd_dev);
 
+	printk(KERN_INFO "in %s device %llu reissuing failQ\n", __func__, pxd_dev->dev_id);
 	// reissue any failed IOs from local list
 	pxd_reissuefailQ(pxd_dev, &ios, status);
 
@@ -953,6 +959,7 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 	pxd_req_misc(req, 0, 0, pxd_dev->minor, PXD_FLAGS_SYNC);
 
 	pxd_dev->fp.switch_uid = req->in.h.unique;
+	printk(KERN_INFO "in %s device %llu switch_uid = %llu\n", __func__, pxd_dev->dev_id, pxd_dev->fp.switch_uid);
 	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
 	return 0;
 }
@@ -970,8 +977,10 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return 0; // already initiated, skip it.
 	}
 
+	printk(KERN_INFO "in %s device %llu calling pxd_request_suspend_internal\n", __func__, pxd_dev->dev_id);
 	rc = pxd_request_suspend_internal(pxd_dev, false, true);
 	if (rc) {
+		printk(KERN_INFO "in %s device %llu failed to suspend IO, setting ioswitch_active to 0\n", __func__, pxd_dev->dev_id);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 		return rc;
 	}
@@ -1167,7 +1176,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
+	printk(KERN_INFO "%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
 		   "flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
@@ -1268,6 +1277,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
+	  printk(KERN_INFO "blk_mq tag details : depth %d, num_hw_queues %u queue_rq is pxd_queue_rq cmd_size %u\n", pxd_dev->tag_set.queue_depth, pxd_dev->tag_set.nr_hw_queues, pxd_dev->tag_set.cmd_size);
 	  err = blk_mq_alloc_tag_set(&pxd_dev->tag_set);
 	  if (err) {
 		return err;
@@ -1291,6 +1301,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  };
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
 #else
+	  printk(KERN_INFO "blk_mq_alloc_disk for %llu", pxd_dev->dev_id);
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 #endif
 
@@ -1302,10 +1313,13 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  disk->minors = 1;
 #else
 	  /* Create gendisk info. */
+	  printk(KERN_INFO "alloc gendisk for %llu", pxd_dev->dev_id);
 	  disk = alloc_disk(1);
 	  if (!disk) {
 		return -ENOMEM;
 	  }
+
+	  printk(KERN_INFO "init blk_mq queue for %llu", pxd_dev->dev_id);
 	  q = blk_mq_init_queue(&pxd_dev->tag_set);
 	  if (IS_ERR(q)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
@@ -1319,6 +1333,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  if (!disk) {
 		return -ENOMEM;
 	  }
+	  printk(KERN_INFO "blk_init_queue for %llu", pxd_dev->dev_id);
 	  q = blk_init_queue(pxd_rq_fn, &pxd_dev->qlock);
 	  if (!q) {
 		put_disk(disk);
@@ -1330,6 +1345,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	// Disk and queue initialization
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
 		 PXD_DEV"%llu", pxd_dev->dev_id);
+	printk(KERN_INFO "pxd: disk name %s, major = %d minor = %d", disk->disk_name, pxd_dev->major, pxd_dev->minor);
 	disk->major = pxd_dev->major;
 	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
@@ -1341,6 +1357,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 #endif
 
 	disk->fops = get_bd_fpops();
+
+	printk(KERN_INFO "pxd: setting pxd_dev as private_data for disk");
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
@@ -1351,6 +1369,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
+	printk(KERN_INFO "in %s : max_hw_sectors %u max_segment_size %u max_segments %u io_min %u io_opt %u logical_block_size %u physical_block_size %u\n",
+			__func__, q->limits.max_hw_sectors, q->limits.max_segment_size, q->limits.max_segments, q->limits.io_min, q->limits.io_opt, q->limits.logical_block_size, q->limits.physical_block_size);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 #if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
@@ -1435,14 +1455,20 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 
 	pxd_dev = NULL;
 	spin_lock(&ctx->lock);
+
+	printk(KERN_INFO "traversing list for dev_id %llu\n", dev_id);
 	list_for_each_entry(pxd_dev_itr, &ctx->list, node) {
 		if (pxd_dev_itr->dev_id == dev_id) {
+			printk(KERN_INFO "found device %llu\n", dev_id);
 			pxd_dev = pxd_dev_itr;
 			break;
 		}
 	}
 	spin_unlock(&ctx->lock);
 
+	if (!pxd_dev) {
+		printk(KERN_ERR "device %llu not found\n", dev_id);
+	}
 	return pxd_dev;
 }
 
@@ -1464,6 +1490,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	// if device already exists, then return it
 	pxd_dev = find_pxd_device(ctx, add->dev_id);
 	if (pxd_dev) {
+		printk(KERN_INFO " found device in %s , enable_fp : %d, path count : %ld for dev : %llu\n", __func__, add->enable_fp, add->paths.count, add->dev_id);
 		if (add->enable_fp && add->paths.count > 0) {
 			__pxd_update_path(pxd_dev, &add->paths);
 		} else {
@@ -1476,7 +1503,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	if (!pxd_dev)
 		goto out_module;
 
-	pxd_mem_printk("device %llu allocated at %px\n", add->dev_id, pxd_dev);
+	printk(KERN_INFO "device %llu allocated at %px\n", add->dev_id, pxd_dev);
 
 	pxd_dev->magic = PXD_DEV_MAGIC;
 	pxd_dev->exported = false;
@@ -1492,6 +1519,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		goto out_module;
 	}
 
+	printk(KERN_INFO "device %llu minor %d major = %d\n", add->dev_id, new_minor, pxd_major);
 	pxd_dev->dev_id = add->dev_id;
 	pxd_dev->major = pxd_major;
 	pxd_dev->minor = new_minor;
@@ -1524,8 +1552,8 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	else
 		pxd_dev->discard_size = add->discard_size;
 
-	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu\n",
-			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count);
+	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu queue_depth %d, discard_size %d\n",
+			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count, pxd_dev->queue_depth, pxd_dev->discard_size);
 
 	// initializes fastpath context part of pxd_dev
 	err = pxd_fastpath_init(pxd_dev);
@@ -1548,6 +1576,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		}
 	}
 
+	printk(KERN_INFO "adding device %llu to ctx listm pxd_dev minor = %d\n", add->dev_id, pxd_dev->minor);
 	list_add(&pxd_dev->node, &ctx->list);
 	++ctx->num_devices;
 	spin_unlock(&ctx->lock);
@@ -1574,6 +1603,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		return -ENOENT;
 	}
 
+	printk(KERN_INFO "in %s : found device for dev id %llu\n", __func__, dev_id);
 	spin_lock(&pxd_dev->lock);
 	if (pxd_dev->exported) {
 		spin_unlock(&pxd_dev->lock);
@@ -1586,6 +1616,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		goto cleanup;
 	}
 
+	printk(KERN_INFO "exporting device %llu, calling pxd_init_disk\n", dev_id);
 	err = pxd_init_disk(pxd_dev);
 	if (err) {
 		module_put(THIS_MODULE);

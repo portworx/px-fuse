@@ -55,6 +55,7 @@ static inline void fp_root_context_init(struct fp_root_context *fproot) {
   fproot->clones = NULL;
   atomic_set(&fproot->nactive, 0);
   INIT_LIST_HEAD(&fproot->wait);
+  printk(KERN_INFO "init kthread fp_handle_io\n");
   kthread_init_work(&fproot->work, fp_handle_io);
 }
 
