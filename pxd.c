@@ -645,7 +645,7 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 					  ((flags & REQ_FUA) ? PXD_FLAGS_FUA : 0) |
 					  ((flags & REQ_META) ? PXD_FLAGS_META : 0);
 #endif
-	printk(KERN_INFO "in %s : req->in.args[0].value = %p, pxd_rdwr_in.dev_minor = %u, pxd_rdwr_in.offset = %llu, pxd_rdwr_in.size = %u pxd_rdwr_in.flags = %u\n", __func__, req->in.args[0].value, req->pxd_rdwr_in.dev_minor, req->pxd_rdwr_in.offset, req->pxd_rdwr_in.size, req->pxd_rdwr_in.flags);
+	printk(KERN_INFO "in %s : req = %p req->in.args[0].value = %p, pxd_rdwr_in.dev_minor = %u, pxd_rdwr_in.offset = %llu, pxd_rdwr_in.size = %u pxd_rdwr_in.flags = %u\n", __func__, req, req->in.args[0].value, req->pxd_rdwr_in.dev_minor, req->pxd_rdwr_in.offset, req->pxd_rdwr_in.size, req->pxd_rdwr_in.flags);
 }
 
 /*

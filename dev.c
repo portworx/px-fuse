@@ -302,6 +302,7 @@ static ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 {
 	size_t copied, len;
 
+	printk(KERN_INFO "in %s, opcode = %d\n", __func__, req->in.h.opcode);
 	copied = sizeof(req->in.h);
 	if (copy_to_iter(&req->in.h, copied, iter) != copied) {
 		printk(KERN_ERR "%s: copy header error\n", __func__);
@@ -314,6 +315,8 @@ static ssize_t fuse_copy_req_read(struct fuse_req *req, struct iov_iter *iter)
 		return -EFAULT;
 	}
 	copied += len;
+
+	printk(KERN_INFO "in %s, copied = %lu\n", __func__, copied);
 
 	return copied;
 }
@@ -422,6 +425,8 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	INIT_LIST_HEAD(&tmp);
 
 	spin_lock(&fc->lock);
+
+	printk(KERN_INFO "in %s, request_pending = %d remain = %lu\n", __func__, request_pending(fc), remain);
 	if (!request_pending(fc)) {
 		err = -EAGAIN;
 		if ((file->f_flags & O_NONBLOCK) && fc->connected)
@@ -450,6 +455,8 @@ retry:
 			break;
 		}
 	}
+
+	printk(KERN_INFO "in %s, copied = %lu\n", __func__, copied);
 
 	err = copied ? copied : -EINVAL;
 	if (last == &fc->pending)
@@ -525,6 +532,7 @@ static ssize_t fuse_dev_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	if (!fc)
 		return -EPERM;
 
+	printk(KERN_INFO "in %s\n", __func__);
 	return fuse_dev_do_read(fc, file, to);
 }
 #endif
