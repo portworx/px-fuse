@@ -157,7 +157,6 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
         struct pxd_fastpath_extension *fp = &pxd_dev->fp;
         int curr = atomic_inc_return(&pxd_dev->fp.suspend);
 
-        printk(KERN_INFO "suspending IO for pxd device %llu, curr = %d, pxd_dev->disk = %px, pxd_dev->disk->queue = %px\n", pxd_dev->dev_id, curr, pxd_dev->disk, pxd_dev->disk->queue);
         if (curr == 1) {
                 // it is possible to call suspend during initial creation with
                 // no disk, ignore as in any case, no IO can flow through.
