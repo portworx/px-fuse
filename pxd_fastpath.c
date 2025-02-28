@@ -497,6 +497,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int nfd = fp->nfd;
 	int i;
 
+	printk(KERN_INFO "in %s : fastpath_enabled = %d, fp.nfd = %d fastpath_active = %d", fastpath_enabled(pxd_dev), pxd_dev->fp.nfd, fastpath_active(pxd_dev));
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
 			!fastpath_active(pxd_dev)) {
 		printk(KERN_INFO "in %s : device %llu fastpath_enabled = %d fastpath_active = %d pxd_dev->fp.nfd = %d\n", __func__, pxd_dev->dev_id, fastpath_enabled(pxd_dev), fastpath_active(pxd_dev), pxd_dev->fp.nfd);
