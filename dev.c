@@ -194,7 +194,7 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
-	printk(KERN_INFO "in %s, adding to pending list\n", __func__);
+	printk(KERN_INFO "in %s, adding  req with opcode = %d unique = %llu to pending list\n", __func__, req->in.h.opcode, req->in.h.unique);
 	list_add_tail(&req->list, &fc->pending);
 }
 
@@ -851,6 +851,7 @@ static int fuse_notify_suspend(struct fuse_conn *conn, unsigned int size,
 	size_t len = sizeof(req);
 	struct pxd_device *pxd_dev;
 
+	printk(KERN_INFO "in %s size = %u\n", __func__, size);
 	if (copy_from_iter(&req, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;

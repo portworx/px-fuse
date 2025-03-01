@@ -718,6 +718,7 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
+	printk(KERN_INFO "in %s, read request size = %u, off = %llu, minor = %u, flags = %u\n", __func__, size, off, minor, flags);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
     rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_READ);
 #else
@@ -734,6 +735,7 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->end = pxd_process_read_reply_q;
 #endif
 
+	printk(KERN_INFO "in %s, opcode = PXD_READ, end= process_read_reply_q\n", __func__);
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
 }
@@ -826,6 +828,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	int rc;
 	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
 
+	printk(KERN_INFO "in %s kernel version >= 4.8 and REQ_PREFLUSH defined\n", __func__);
 	switch (op) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
 	case REQ_OP_WRITE_ZEROES:

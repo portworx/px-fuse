@@ -292,6 +292,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 	int i;
 	int rc;
 
+	printk(KERN_INFO "in %s device %llu suspending IO, skipsync = %d coe = %d\n", __func__, pxd_dev->dev_id, skip_flush, coe);
 	if (!fastpath_enabled(pxd_dev)) {
 		return -EINVAL;
 	}
@@ -304,6 +305,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 		return -EBUSY;
 	}
 
+	printk(KERN_INFO "device %llu about to suspend IO\n", pxd_dev->dev_id);
 	pxd_suspend_io(pxd_dev);
 
 	if (skip_flush || !fp->fastpath) return 0;
@@ -352,6 +354,7 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 	if (atomic_cmpxchg(&pxd_dev->fp.app_suspend, 0, 1) != 0) {
 		return -EBUSY;
 	}
+	printk(KERN_INFO "in %s device %llu suspending IO from userspace\n", __func__, pxd_dev->dev_id);
 
 	rc = pxd_request_suspend_internal(pxd_dev, skip_flush, coe);
 	if (rc) {

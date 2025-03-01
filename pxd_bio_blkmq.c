@@ -163,6 +163,7 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
                 if (pxd_dev->disk && pxd_dev->disk->queue) {
                         printk(KERN_INFO "quiescing queue for pxd device %llu, setting frozen\n", pxd_dev->dev_id);
                         blk_mq_quiesce_queue(pxd_dev->disk->queue);
+                        printk(KERN_INFO "queue quiesced for pxd device %llu\n", pxd_dev->dev_id);
                         atomic_set(&fp->blkmq_frozen, 1);
                 }
                 printk(KERN_INFO "For pxd device %llu IO suspended\n", pxd_dev->dev_id);
@@ -227,8 +228,8 @@ void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
                 if (!status) {
                         // switch to native path, if px is down, then abort IO
                         // timer will cleanup
-                        printk_ratelimited(
-                            KERN_ERR
+                        printk(
+                            KERN_INFO
                             "%s: pxd%llu: resuming IO in native path.\n",
                             __func__, pxd_dev->dev_id);
                         atomic_inc(&pxd_dev->fp.nslowPath);
