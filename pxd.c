@@ -2443,7 +2443,8 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	if (READ_ONCE(fc->connected) == 1) {
 		printk(KERN_ERR "%s: pxd-control-%d(%lld) already open\n", __func__,
 			ctx->id, ctx->open_seq);
-		return -EINVAL;
+		// TODO: remove later
+		return 0;
 	}
 
 	// abort work cannot be active while restarting requests

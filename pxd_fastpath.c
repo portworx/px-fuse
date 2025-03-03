@@ -312,18 +312,21 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 
 	atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
 	reinit_completion(&fp->sync_complete);
+	printk(KERN_INFO "device %llu about to queue sync work\n", pxd_dev->dev_id);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
 		queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
 	}
 
 #define SYNC_TIMEOUT (60000)
 	rc = 0;
+	printk(KERN_INFO "device %llu about to wait for sync completion\n", pxd_dev->dev_id);
 	if (!wait_for_completion_timeout(&fp->sync_complete,
 						msecs_to_jiffies(SYNC_TIMEOUT))) {
 		// suspend aborted as sync timedout
 		rc = -EBUSY;
 		goto fail;
 	}
+	printk(KERN_INFO "device %llu sync complete\n", pxd_dev->dev_id);
 
 	// consolidate responses
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
@@ -368,6 +371,8 @@ int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 int pxd_request_resume_internal(struct pxd_device *pxd_dev)
 {
 	if (!fastpath_enabled(pxd_dev)) {
+		printk(KERN_INFO "in %s device %llu resume failed (fpenabled %d, fastpath %d)\n",
+			   __func__, pxd_dev->dev_id, fastpath_enabled(pxd_dev), pxd_dev->fp.fastpath);
 		return -EINVAL;
 	}
 
@@ -500,7 +505,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	int nfd = fp->nfd;
 	int i;
 
-	printk(KERN_INFO "in %s : fastpath_enabled = %d, fp.nfd = %d fastpath_active = %d", fastpath_enabled(pxd_dev), pxd_dev->fp.nfd, fastpath_active(pxd_dev));
+	printk(KERN_INFO "in %s : fastpath_enabled = %d, fp.nfd = %d fastpath_active = %d", __func__, fastpath_enabled(pxd_dev), pxd_dev->fp.nfd, fastpath_active(pxd_dev));
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
 			!fastpath_active(pxd_dev)) {
 		printk(KERN_INFO "in %s : device %llu fastpath_enabled = %d fastpath_active = %d pxd_dev->fp.nfd = %d\n", __func__, pxd_dev->dev_id, fastpath_enabled(pxd_dev), fastpath_active(pxd_dev), pxd_dev->fp.nfd);

@@ -738,8 +738,10 @@ static void _end_clone_bio(struct kthread_work *work)
         blkrc = reconcile_status(fproot);
         printk(KERN_INFO "in %s, blkrc = %d\n", __func__, blkrc);
         // debug condition for force fail
-        if (pxd_dev->fp.force_fail)
+        if (pxd_dev->fp.force_fail) {
+                printk(KERN_INFO "in %s, force_fail = true, returning -EIO\n", __func__);
                 blkrc = -EIO;
+        }
 
         printk(KERN_INFO "in %s, can_failover = %d\n", __func__, pxd_dev->fp.can_failover);
         if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
