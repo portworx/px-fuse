@@ -231,6 +231,7 @@ __releases(fc->lock)
 	printk(KERN_INFO "in %s, unique = %llu req->end = %p\n", __func__, uid, req->end);
 	if (req->end)
 		shouldfree = req->end(fc, req, req->out.h.error);
+	printk(KERN_INFO "in %s, unique = %llu shouldfree = %d\n", __func__, uid, shouldfree);
 	fuse_put_unique(fc, uid);
 	if (shouldfree) fuse_request_free(req);
 }
@@ -247,7 +248,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
 	req->in.h.unique = fuse_get_unique(fc);
-	printk(KERN_INFO "in %s, unique = %llu, adding it to request_map at idx : %llu\n", __func__, req->in.h.unique, req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1));
+	printk(KERN_INFO "in %s, dev = %llu unique = %llu, opcode = %d, len= %d,  adding it to request_map at idx : %llu\n", __func__, req->pxd_dev->dev_id, req->in.h.unique, req->in.h.opcode, req->in.h.len, req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1));
 	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	/*

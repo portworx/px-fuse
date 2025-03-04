@@ -442,14 +442,17 @@ static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
 {
 	int ncount = PXD_ACTIVE(pxd_dev);
 
+	printk(KERN_INFO "in %s device %llu ncount = %d qdepth = %d\n", __func__, pxd_dev->dev_id, ncount, pxd_dev->qdepth);
 	// does not care about async or sync request.
 	if (ncount > pxd_dev->qdepth) {
 		if (atomic_cmpxchg(&pxd_dev->congested, 0, 1) == 0) {
+			printk(KERN_INFO "in %s device %llu congested, changing nr_congestion_on from %d to %d\n", __func__, pxd_dev->dev_id, pxd_dev->nr_congestion_on, pxd_dev->nr_congestion_on + 1);
 			pxd_dev->nr_congestion_on++;
 		}
 		return 1;
 	}
 	if (atomic_cmpxchg(&pxd_dev->congested, 1, 0) == 1) {
+		printk(KERN_INFO "in %s device %llu not congested, changing nr_congestion_off from %d to %d\n", __func__, pxd_dev->dev_id, pxd_dev->nr_congestion_off, pxd_dev->nr_congestion_off + 1);
 		pxd_dev->nr_congestion_off++;
 	}
 
@@ -464,6 +467,7 @@ int pxd_device_congested(void *data, int bits)
 	// notify congested if device is suspended as well.
 	// modified under lock, read outside lock.
 	if (atomic_read(&pxd_dev->fp.suspend)) {
+		printk(KERN_INFO "in %s device %llu suspended via fp.suspend\n", __func__, pxd_dev->dev_id);
 		return 1;
 	}
 
@@ -481,15 +485,17 @@ void pxd_check_q_congested(struct pxd_device *pxd_dev)
 void pxd_check_q_decongested(struct pxd_device *pxd_dev)
 {
 	if (!pxd_device_congested(pxd_dev, 0)) {
+		printk(KERN_INFO "in %s device %llu not congested, waking up suspend_wq\n", __func__, pxd_dev->dev_id);
 		wake_up(&pxd_dev->suspend_wq);
 	}
 }
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req, int status)
 {
+	printk("in %s, status = %d unique = %llu, decrementing ncount from %d\n", __func__, status, req->in.h.unique, atomic_read(&req->pxd_dev->ncount));
 	atomic_dec(&req->pxd_dev->ncount);
 	pxd_check_q_decongested(req->pxd_dev);
-	pxd_printk("%s: receive reply to %px(%lld) at %lld err %d\n",
+	printk(KERN_INFO "%s: receive reply to %px(%lld) at %lld err %d\n",
 			__func__, req, req->in.h.unique,
 			req->pxd_rdwr_in.offset, status);
 }
@@ -572,6 +578,7 @@ static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
 static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
 		int status)
 {
+	printk(KERN_INFO "in %s, status = %d\n", __func__, status);
 	pxd_request_complete(fc, req, status);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
@@ -587,6 +594,7 @@ static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 		int status)
 {
 
+	printk(KERN_INFO "in %s, status = %d\n", __func__, status);
 	pxd_request_complete(fc, req, status);
 #ifndef __PX_BLKMQ__
 	blk_end_request(req->rq, status, blk_rq_bytes(req->rq));
@@ -761,6 +769,7 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	req->end = pxd_process_write_reply_q;
 #endif
 
+	printk(KERN_INFO "in %s, opcode = PXD_WRITE, end= process_write_reply_q\n", __func__);
 	pxd_req_misc(req, size, off, minor, flags);
 
 	if (pxd_detect_zero_writes && req->pxd_rdwr_in.size != 0)
@@ -790,6 +799,8 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 	req->end = pxd_process_write_reply_q;
 #endif
 
+	printk(KERN_INFO "in %s, opcode = PXD_DISCARD, end= process_write_reply_q\n", __func__);
+
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
 }
@@ -817,6 +828,8 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 	req->end = pxd_process_write_reply_q;
 #endif
 
+	printk(KERN_INFO "in %s, opcode = PXD_WRITE_SAME, end= process_write_reply_q\n", __func__);
+
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
 }
@@ -838,16 +851,24 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		rc = pxd_write_same_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_WRITE:
+		printk(KERN_INFO "in %s, REQ_OP_WRITE start: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		rc = pxd_write_request(req, size, off, minor, flags);
+		printk(KERN_INFO "in %s, REQ_OP_WRITE end: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		break;
 	case REQ_OP_READ:
+		printk(KERN_INFO "in %s, REQ_OP_READ start: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		rc = pxd_read_request(req, size, off, minor, flags);
+		printk(KERN_INFO "in %s, REQ_OP_READ end: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		break;
 	case REQ_OP_DISCARD:
+		printk(KERN_INFO "in %s, REQ_OP_DISCARD start: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		rc = pxd_discard_request(req, size, off, minor, flags);
+		printk(KERN_INFO "in %s, REQ_OP_DISCARD end: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		break;
 	case REQ_OP_FLUSH:
+		printk(KERN_INFO "in %s, REQ_OP_FLUSH start: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		rc = pxd_write_request(req, 0, 0, minor, REQ_FUA);
+		printk(KERN_INFO "in %s, REQ_OP_FLUSH end: unique = %llu, size = %u, off = %llu, minor = %u, flags = %u\n", __func__, req->in.h.unique, size, off, minor, flags);
 		break;
 	default:
 		printk(KERN_ERR"[%llu] REQ_OP_UNKNOWN(%#x): size=%d, off=%lld, minor=%d, flags=%#x\n",
@@ -855,7 +876,10 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 		return -1;
 	}
 
-	if (rc == 0) atomic_inc(&req->pxd_dev->ncount);
+	if (rc == 0) {
+		printk(KERN_INFO "in %s, rc = 0, incrementing ncount from %d\n", __func__, atomic_read(&req->pxd_dev->ncount));
+		atomic_inc(&req->pxd_dev->ncount);
+	}
 	return rc;
 }
 
