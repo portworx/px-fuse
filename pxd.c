@@ -1517,7 +1517,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	// if device already exists, then return it
 	pxd_dev = find_pxd_device(ctx, add->dev_id);
 	if (pxd_dev) {
-		printk(KERN_INFO " found device in %s , enable_fp : %d, path count : %ld for dev : %llu\n", __func__, add->enable_fp, add->paths.count, add->dev_id);
+		printk(KERN_INFO "found device in %s , enable_fp : %d, path count : %ld for dev : %llu, in the device pxd_dev->fastpath = %d, pxd_dev->fp.nfd = %d pxd_dev->fp.fastpath = %d\n", __func__, add->enable_fp, add->paths.count, add->dev_id, pxd_dev->fastpath, pxd_dev->fp.nfd, pxd_dev->fp.fastpath);
 		if (add->enable_fp && add->paths.count > 0) {
 			__pxd_update_path(pxd_dev, &add->paths);
 		} else {
