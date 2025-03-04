@@ -894,6 +894,7 @@ static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
        size_t len = sizeof(req);
        struct pxd_device *pxd_dev;
 
+
        if (copy_from_iter(&req, len, iter) != len) {
                printk(KERN_ERR "%s: can't copy arg\n", __func__);
                return -EFAULT;
@@ -904,6 +905,7 @@ static int fuse_notify_ioswitch_event(struct fuse_conn *conn, unsigned int size,
                printk(KERN_ERR "device %llu not found\n", req.dev_id);
                return -EINVAL;
        }
+		printk(KERN_INFO "in %s dev = %llu failover = %d\n", __func__, req.dev_id, failover);
 
        return pxd_request_ioswitch(pxd_dev,
                 failover ? PXD_FAILOVER_TO_USERSPACE : PXD_FALLBACK_TO_KERNEL);
@@ -944,8 +946,10 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 	case PXD_RESUME:
 		return fuse_notify_resume(fc, size, iter);
 	case PXD_FAILOVER_TO_USERSPACE:
+		printk(KERN_INFO "in %s PXD_FAILOVER_TO_USERSPACE\n", __func__);
 		return fuse_notify_ioswitch_event(fc, size, iter, true);
 	case PXD_FALLBACK_TO_KERNEL:
+		printk(KERN_INFO "in %s PXD_FALLBACK_TO_KERNEL\n", __func__);
 		return fuse_notify_ioswitch_event(fc, size, iter, false);
 	case PXD_EXPORT_DEV:
 		return fuse_notify_export(fc, size, iter);
@@ -1110,7 +1114,7 @@ static ssize_t fuse_dev_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	struct fuse_conn *fc = fuse_get_conn(iocb->ki_filp);
 	if (!fc)
 		return -EPERM;
-
+	printk(KERN_INFO "in %s\n", __func__);
 	return fuse_dev_do_write(fc, from);
 }
 #endif

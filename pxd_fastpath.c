@@ -269,14 +269,14 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 
 	switch (code) {
 	case PXD_FAILOVER_TO_USERSPACE:
-		printk("device %llu initiated failover\n", pxd_dev->dev_id);
+		printk("in %s device %llu initiated failover\n", __func__, pxd_dev->dev_id);
 		// IO path blocked, a future path refresh will take it to native path
 		// enqueue a failover request to userspace on this device.
 		return pxd_initiate_failover(pxd_dev);
 	case PXD_FALLBACK_TO_KERNEL:
 		// IO path already routed to userspace.
 		// enqueue a fallback marker request to userspace on this device.
-		printk("device %llu initiated fallback\n", pxd_dev->dev_id);
+		printk("in %s device %llu initiated fallback\n", __func__, pxd_dev->dev_id);
 		return pxd_initiate_fallback(pxd_dev);
 	default:
 		// unsupported opcode
