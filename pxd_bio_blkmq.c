@@ -578,6 +578,7 @@ static void pxd_io_failover(struct kthread_work *work) {
                         list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
                         cleanup = true;
                 } else {
+                        printk(KERN_INFO "in %s, reroute = true\n", __func__);
                         reroute = true;
                 }
         } else {
