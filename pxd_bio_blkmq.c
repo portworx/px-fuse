@@ -452,8 +452,6 @@ clone_and_map(struct fp_root_context *fproot) {
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
-        atomic_inc(&pxd_dev->ncount);
-
 // filter out only supported requests
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
         switch (req_op(rq)) {
@@ -547,6 +545,9 @@ clone_and_map(struct fp_root_context *fproot) {
                         fastpath_queue_work(&cc->work, false);
                 }
         }
+
+        // update the active count only on success
+        atomic_inc(&pxd_dev->ncount);
 
         return 0;
 err:
@@ -744,6 +745,8 @@ static void _end_clone_bio(struct kthread_work *work)
                 blkrc = -EIO;
         }
 
+        printk(KERN_INFO "in %s, decrementing ncount from %d to %d\n", __func__, atomic_read(&pxd_dev->ncount), atomic_read(&pxd_dev->ncount) - 1);
+        atomic_dec(&pxd_dev->ncount);
         printk(KERN_INFO "in %s, can_failover = %d\n", __func__, pxd_dev->fp.can_failover);
         if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
                 atomic_inc(&pxd_dev->fp.nerror);
@@ -763,7 +766,6 @@ static void _end_clone_bio(struct kthread_work *work)
 #endif
 
         atomic_inc(&pxd_dev->fp.ncomplete);
-        atomic_dec(&pxd_dev->ncount);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)

@@ -50,8 +50,14 @@ struct pxd_device {
 	unsigned int discard_size;
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
+	// [global] total active requests
+	// usually, this is incremented on submitting IO and decremented on
+	// successful IO completion. But, say the iopath is remote fastpath
+	// and the IO fails => retry IO in native path. native path also
+	// increments/decrements the ncount => ncount should be decremented
+	// even on IO failure in fastpath.
+	atomic_t ncount;
 	// congestion handling
-	atomic_t ncount; // [global] total active requests, always modify with pxd_dev.lock
 	unsigned int qdepth;
 	atomic_t congested;
 	bool exported;
