@@ -26,6 +26,7 @@
 #include "pxd_compat.h"
 #include "pxd_fastpath.h"
 #include "pxd_core.h"
+#include "pxd_trace.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -194,13 +195,11 @@ static void fuse_put_unique(struct fuse_conn *fc, u64 uid)
 
 static void queue_request(struct fuse_conn *fc, struct fuse_req *req)
 {
-	printk(KERN_INFO "in %s, adding to pending list\n", __func__);
 	list_add_tail(&req->list, &fc->pending);
 }
 
 static void fuse_conn_wakeup(struct fuse_conn *fc)
 {
-	printk(KERN_INFO "in %s, wake up, signing up fasync SIGIO, POLL_IN\n", __func__);
 	wake_up(&fc->waitq);
 	kill_fasync(&fc->fasync, SIGIO, POLL_IN);
 }
@@ -228,7 +227,6 @@ __releases(fc->lock)
 	list_del(&req->list);
 	spin_unlock(&fc->lock);
 	uid = req->in.h.unique;
-	printk(KERN_INFO "in %s, unique = %llu req->end = %p\n", __func__, uid, req->end);
 	if (req->end)
 		shouldfree = req->end(fc, req, req->out.h.error);
 	fuse_put_unique(fc, uid);
@@ -247,7 +245,6 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
 	req->in.h.unique = fuse_get_unique(fc);
-	printk(KERN_INFO "in %s, unique = %llu, adding it to request_map at idx : %llu\n", __func__, req->in.h.unique, req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1));
 	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	/*
@@ -577,7 +574,6 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 	struct pxd_add_ext_out add;
 	size_t len = sizeof(add);
 
-	printk(KERN_INFO "fuse_notify_add_ext\n");
 	if (copy_from_iter(&add, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
@@ -622,6 +618,7 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 	int iovcnt;
 	size_t len;
 
+	trace_copy_in_read_data_iovec(read_data->iovcnt, min(read_data->iovcnt, IOV_BUF_SIZE));
 	if (!read_data->iovcnt)
 		return -EFAULT;
 
@@ -632,6 +629,7 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 		return -EFAULT;
 	}
 	read_data->iovcnt -= iovcnt;
+
 
 	iov_iter_init(data_iter, READ, iov, iovcnt, iov_length(iov, iovcnt));
 
@@ -657,14 +655,22 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	ret = copy_in_read_data_iovec(iter, read_data_p, iov, &data_iter);
 	if (ret)
 		return ret;
+	
+	trace_fuse_notify_read_data_request(blk_rq_pos(req->rq) * SECTOR_SIZE,
+		blk_rq_bytes(req->rq), req->pxd_rdwr_in.offset, read_data_p->offset);
 
 	/* advance the iterator if data is unaligned */
-	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
+	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK)) {
+		printk(KERN_ALERT "this should never happen!!!");
 		iov_iter_advance(&data_iter,
 				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+	}
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		ssize_t len = BVEC(bvec).bv_len;
+
+		trace_fuse_notify_read_data_segment_info(BVEC(bvec).bv_offset,
+			BVEC(bvec).bv_len);
 		copied = 0;
 		if (skipped < read_data_p->offset) {
 			if (read_data_p->offset - skipped >= len) {
@@ -679,19 +685,27 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 			size_t copy_this = copy_page_to_iter(BVEC(bvec).bv_page,
 				BVEC(bvec).bv_offset + copied,
 				len - copied, &data_iter);
+			
+			trace_fuse_notify_read_data_copy(copied, copy_this,
+				BVEC(bvec).bv_offset, BVEC(bvec).bv_offset + copied,
+				BVEC(bvec).bv_len, len - copied, iter->count);
 			if (copy_this != len - copied) {
-				if (!iter->count)
+				if (!iter->count) {
 					return 0;
+				}
 
 				/* out of space in destination, copy more iovec */
 				ret = copy_in_read_data_iovec(iter, read_data_p,
 					iov, &data_iter);
 				if (ret)
 					return ret;
-				len -= copied;
+				len -= (copied + copy_this);
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
+				trace_fuse_notify_read_data_finalcopy(len, copied,
+					BVEC(bvec).bv_offset, BVEC(bvec).bv_offset + copied + copy_this,
+					BVEC(bvec).bv_len);
 				if (copied != len) {
 					printk(KERN_ERR "%s: copy failed new iovec\n",
 						__func__);
@@ -955,7 +969,6 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 static int __fuse_dev_do_write(struct fuse_conn *fc,
 		struct fuse_req *req, struct iov_iter *iter)
 {
-	printk(KERN_INFO "in %s, opcode = %d\n", __func__, req->in.h.opcode);
 	if (req->in.h.opcode == PXD_READ && iter->count > 0) {
 #ifdef HAVE_BVEC_ITER
 		struct bio_vec bvec;
@@ -1046,7 +1059,6 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 	 * and error contains notification code.
 	 */
 	if (!oh.unique) {
-		printk(KERN_INFO "%s : oh.unique = 0", __func__);
 		err = fuse_notify(fc, oh.error, nbytes - sizeof(oh), iter);
 		return err ? err : nbytes;
 	}
@@ -1056,13 +1068,11 @@ static ssize_t fuse_dev_do_write(struct fuse_conn *fc, struct iov_iter *iter)
 
 	err = -ENOENT;
 
-	printk(KERN_INFO "%s : oh.unique = %llu", __func__, oh.unique);
 	req = request_find(fc, oh.unique);
 	if (!req) {
 		printk(KERN_ERR "%s: request %lld not found\n", __func__, oh.unique);
 		return -ENOENT;
 	}
-	printk(KERN_INFO "%s : found request for unique: %llu", __func__, oh.unique);
 
 	spin_lock(&fc->lock);
 	if (!fc->connected) {
