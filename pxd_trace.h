@@ -32,64 +32,76 @@ TRACE_EVENT(
 
 TRACE_EVENT(
 	copy_in_read_data_iovec,
-	TP_PROTO(int prev_iovcnt, int curr_iovcnt),
-	TP_ARGS(prev_iovcnt, curr_iovcnt),
+	TP_PROTO(uint64_t req_id, int prev_iovcnt, int curr_iovcnt),
+	TP_ARGS(req_id, prev_iovcnt, curr_iovcnt),
 	TP_STRUCT__entry(
+		__field(uint64_t, req_id)
 		__field(int, prev_iovcnt)
 		__field(int, curr_iovcnt)
 	),
 	TP_fast_assign(
+		__entry->req_id = req_id,
 		__entry->prev_iovcnt = prev_iovcnt,
 		__entry->curr_iovcnt = curr_iovcnt
 	),
 	TP_printk(
-		"prev_iovcnt %d curr_iovcnt %d",
-		__entry->prev_iovcnt, __entry->curr_iovcnt)
+		"req_id %llu prev_iovcnt %d curr_iovcnt %d",
+		__entry->req_id, __entry->prev_iovcnt, __entry->curr_iovcnt)
 );
 
 TRACE_EVENT(
 	fuse_notify_read_data_request,
-	TP_PROTO(uint64_t rq_offset, uint64_t rq_size, uint64_t rdwr_offset, uint64_t read_data_p_offset),
-	TP_ARGS(rq_offset, rq_size, rdwr_offset, read_data_p_offset),
+	TP_PROTO(uint64_t devid, uint64_t req_id,uint64_t rq_offset, uint64_t rq_size, uint64_t rdwr_offset, uint64_t read_data_p_offset),
+	TP_ARGS(devid, req_id, rq_offset, rq_size, rdwr_offset, read_data_p_offset),
 	TP_STRUCT__entry(
+		__field(uint64_t, devid)
+		__field(uint64_t, req_id)
 		__field(uint64_t, rq_offset)
 		__field(uint64_t, rq_size)
 		__field(uint64_t, rdwr_offset)
 		__field(uint64_t, read_data_p_offset)
 	),
 	TP_fast_assign(
+		__entry->devid = devid,
+		__entry->req_id = req_id,
 		__entry->rq_offset = rq_offset,
 		__entry->rq_size = rq_size,
 		__entry->rdwr_offset = rdwr_offset,
 		__entry->read_data_p_offset = read_data_p_offset
 	),
 	TP_printk(
-		"rq_offset %llu rq_size %llu rdwr_offset %llu read_data_p_offset %llu",
-		__entry->rq_offset, __entry->rq_size, __entry->rdwr_offset, __entry->read_data_p_offset)
+		"devid %llu req_id %llu rq_offset %llu rq_size %llu rdwr_offset %llu read_data_p_offset %llu",
+		__entry->devid, __entry->req_id, __entry->rq_offset, __entry->rq_size, __entry->rdwr_offset, __entry->read_data_p_offset)
 );
 
 TRACE_EVENT(
 	fuse_notify_read_data_segment_info,
-	TP_PROTO(uint64_t bv_offset, uint64_t bv_len),
-	TP_ARGS(bv_offset, bv_len),
+	TP_PROTO(uint64_t devid, uint64_t req_id, uint64_t bv_offset, uint64_t bv_len),
+	TP_ARGS(devid, req_id,bv_offset, bv_len),
 	TP_STRUCT__entry(
+		__field(uint64_t, devid)
+		__field(uint64_t, req_id)
 		__field(uint64_t, bv_offset)
 		__field(uint64_t, bv_len)
 	),
 	TP_fast_assign(
+		__entry->devid = devid,
+		__entry->req_id = req_id,
 		__entry->bv_offset = bv_offset,
 		__entry->bv_len = bv_len
 	),
 	TP_printk(
-		"bv_offset %llu bv_len %llu",
-		__entry->bv_offset, __entry->bv_len)
+		"devid %llu req_id %llu bv_offset %llu bv_len %llu",
+		__entry->devid, __entry->req_id, __entry->bv_offset, __entry->bv_len)
 );
 
 TRACE_EVENT(
 	fuse_notify_read_data_copy,
-	TP_PROTO(size_t copied, size_t copy_this, uint64_t bv_offset, uint64_t offset, uint64_t bv_len, uint64_t len, uint64_t iter_count),
-	TP_ARGS(copied, copy_this, bv_offset, offset, bv_len, len, iter_count),
+	TP_PROTO(uint64_t devid, uint64_t req_id, size_t copied, size_t copy_this, uint64_t bv_offset, uint64_t offset, uint64_t bv_len, uint64_t len, uint64_t iter_count),
+	TP_ARGS(devid, req_id, copied, copy_this, bv_offset, offset, bv_len, len, iter_count),
 	TP_STRUCT__entry(
+		__field(uint64_t, devid)
+		__field(uint64_t, req_id)
 		__field(size_t, copied)
 		__field(size_t, copy_this)
 		__field(uint64_t, bv_offset)
@@ -99,6 +111,8 @@ TRACE_EVENT(
 		__field(uint64_t, iter_count)
 	),
 	TP_fast_assign(
+		__entry->devid = devid,
+		__entry->req_id = req_id,
 		__entry->copied = copied,
 		__entry->copy_this = copy_this,
 		__entry->bv_offset = bv_offset,
@@ -108,15 +122,17 @@ TRACE_EVENT(
 		__entry->iter_count = iter_count
 	),
 	TP_printk(
-		"copied %zu copy_this %zu bv_offset %llu offset %llu bv_len %llu len %llu iter_count %llu",
-		__entry->copied, __entry->copy_this, __entry->bv_offset, __entry->offset, __entry->bv_len, __entry->len, __entry->iter_count)
+		"devid %llu req_id %llu copied %zu copy_this %zu bv_offset %llu offset %llu bv_len %llu len %llu iter_count %llu",
+		__entry->devid, __entry->req_id, __entry->copied, __entry->copy_this, __entry->bv_offset, __entry->offset, __entry->bv_len, __entry->len, __entry->iter_count)
 );
 
 TRACE_EVENT(
 	fuse_notify_read_data_finalcopy,
-	TP_PROTO(uint64_t len, uint64_t copied, uint64_t bv_offset, uint64_t offset, uint64_t bv_len),
-	TP_ARGS(len, copied, bv_offset, offset, bv_len),
+	TP_PROTO(uint64_t devid, uint64_t req_id, uint64_t len, uint64_t copied, uint64_t bv_offset, uint64_t offset, uint64_t bv_len),
+	TP_ARGS(devid, req_id, len, copied, bv_offset, offset, bv_len),
 	TP_STRUCT__entry(
+		__field(uint64_t, devid)
+		__field(uint64_t, req_id)
 		__field(uint64_t, len)
 		__field(uint64_t, copied)
 		__field(uint64_t, bv_offset)
@@ -124,6 +140,8 @@ TRACE_EVENT(
 		__field(uint64_t, bv_len)
 	),
 	TP_fast_assign(
+		__entry->devid = devid,
+		__entry->req_id = req_id,
 		__entry->len = len,
 		__entry->copied = copied,
 		__entry->bv_offset = bv_offset,
@@ -131,8 +149,8 @@ TRACE_EVENT(
 		__entry->bv_len = bv_len
 	),
 	TP_printk(
-		"len %llu copied %llu bv_offset %llu offset %llu bv_len %llu",
-		__entry->len, __entry->copied, __entry->bv_offset, __entry->offset, __entry->bv_len)
+		"devid %llu req_id %llu len %llu copied %llu bv_offset %llu offset %llu bv_len %llu",
+		__entry->devid, __entry->req_id, __entry->len, __entry->copied, __entry->bv_offset, __entry->offset, __entry->bv_len)
 );
 
 TRACE_EVENT(

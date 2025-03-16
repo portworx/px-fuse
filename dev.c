@@ -618,7 +618,7 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 	int iovcnt;
 	size_t len;
 
-	trace_copy_in_read_data_iovec(read_data->iovcnt, read_data->iovcnt - min(read_data->iovcnt, IOV_BUF_SIZE));
+	trace_copy_in_read_data_iovec(read_data->unique, read_data->iovcnt, read_data->iovcnt - min(read_data->iovcnt, IOV_BUF_SIZE));
 	if (!read_data->iovcnt)
 		return -EFAULT;
 
@@ -656,7 +656,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	if (ret)
 		return ret;
 	
-	trace_fuse_notify_read_data_request(blk_rq_pos(req->rq) * SECTOR_SIZE,
+	trace_fuse_notify_read_data_request(req->pxd_dev->dev_id, read_data_p->unique, blk_rq_pos(req->rq) * SECTOR_SIZE,
 		blk_rq_bytes(req->rq), req->pxd_rdwr_in.offset, read_data_p->offset);
 
 	/* advance the iterator if data is unaligned */
@@ -669,7 +669,8 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		ssize_t len = BVEC(bvec).bv_len;
 
-		trace_fuse_notify_read_data_segment_info(BVEC(bvec).bv_offset,
+		trace_fuse_notify_read_data_segment_info(req->pxd_dev->dev_id, read_data_p->unique,
+			BVEC(bvec).bv_offset,
 			BVEC(bvec).bv_len);
 		copied = 0;
 		if (skipped < read_data_p->offset) {
@@ -686,7 +687,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 				BVEC(bvec).bv_offset + copied,
 				len - copied, &data_iter);
 			
-			trace_fuse_notify_read_data_copy(copied, copy_this,
+			trace_fuse_notify_read_data_copy(req->pxd_dev->dev_id, read_data_p->unique, copied, copy_this,
 				BVEC(bvec).bv_offset, BVEC(bvec).bv_offset + copied,
 				BVEC(bvec).bv_len, len - copied, iter->count);
 			if (copy_this != len - copied) {
@@ -703,7 +704,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
-				trace_fuse_notify_read_data_finalcopy(len, copied,
+				trace_fuse_notify_read_data_finalcopy(req->pxd_dev->dev_id, read_data_p->unique, len, copied,
 					BVEC(bvec).bv_offset, BVEC(bvec).bv_offset + copied + copy_this,
 					BVEC(bvec).bv_len);
 				if (copied != len) {
