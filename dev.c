@@ -23,6 +23,10 @@
 #include <linux/random.h>
 #include <linux/version.h>
 #include <linux/blkdev.h>
+#include <linux/crypto.h>
+#include <crypto/hash.h>
+#include <crypto/md5.h>
+
 #include "pxd_compat.h"
 #include "pxd_fastpath.h"
 #include "pxd_core.h"
@@ -630,6 +634,11 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 	}
 	read_data->iovcnt -= iovcnt;
 
+	for (int i = 0; i < iovcnt; i++) {
+		if (((uint64_t)iov[i].iov_base & 0xfff) != 0) {
+			printk(KERN_ERR "%s: iov_base not page aligned len = %llu\n", __func__, (uint64_t)iov[i].iov_len);
+		}
+	}
 
 	iov_iter_init(data_iter, READ, iov, iovcnt, iov_length(iov, iovcnt));
 
@@ -787,12 +796,87 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 }
 #endif
 
+#define ONE_MB      (1024 * 1024)
+#define BLOCK_SZ 4096
+
+static void verify_iov(struct fuse_conn *fuse_conn, struct fuse_req *req, struct pxd_read_data_out *read_data)
+{
+    struct bio_vec bvec;
+    struct req_iterator iter;
+    size_t total_copied = 0;
+	uint8_t* buf = kvzalloc(ONE_MB, GFP_KERNEL);
+
+    loff_t start_offset_bytes = blk_rq_pos(req->rq) * SECTOR_SIZE;
+
+	if (buf == NULL) {
+		printk(KERN_ERR "%s: kvzalloc() failed for 1MB\n", __func__);
+		return;
+	}
+
+    rq_for_each_segment(bvec, req->rq, iter) {
+        void *kaddr;
+        size_t seg_len = bvec.bv_len;
+        size_t seg_off = bvec.bv_offset;
+
+		BUG_ON(total_copied + seg_len > ONE_MB);
+
+        kaddr = kmap_local_page(bvec.bv_page);
+		BUG_ON(kaddr == NULL);
+
+        memcpy(buf + total_copied, kaddr + seg_off, seg_len);
+
+        kunmap_local(kaddr);
+
+        total_copied += seg_len;
+    }
+
+    for (size_t offset = 0; offset < total_copied; offset += BLOCK_SZ) {
+        loff_t block_offset_bytes = start_offset_bytes + offset;
+
+        SHASH_DESC_ON_STACK(shash, md5_tfm);
+
+        u8 digest[MD5_DIGEST_SIZE];
+        char md5_str[MD5_DIGEST_SIZE * 2 + 1] = { 0 };
+
+        // Initialize the shash_desc
+        shash->tfm   = fuse_conn->md5_tfm;
+
+        if (crypto_shash_init(shash)) {
+			printk(KERN_ERR "%s: crypto_shash_init() failed\n", __func__);
+			kvfree(buf);
+            return;
+        }
+        if (crypto_shash_update(shash, buf + offset, BLOCK_SZ)) {
+			printk(KERN_ERR "%s: crypto_shash_update() failed\n", __func__);
+			kvfree(buf);
+            return;
+        }
+        if (crypto_shash_final(shash, digest)) {
+			printk(KERN_ERR "%s: crypto_shash_final() failed\n", __func__);
+			kvfree(buf);
+            return;
+        }
+        for (int i = 0; i < MD5_DIGEST_SIZE; i++)
+            sprintf(md5_str + (i * 2), "%02x", digest[i]);
+
+        trace_verify_iov(
+            req->pxd_dev->dev_id,
+            read_data->unique,
+            (uint64_t)block_offset_bytes,
+            (uint64_t)BLOCK_SZ,
+            md5_str
+        );
+    }
+	kvfree(buf);
+}
+
 static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 				struct iov_iter *iter)
 {
 	struct pxd_read_data_out read_data;
 	size_t len = sizeof(read_data);
 	struct fuse_req *req;
+	int ret;
 
 	if (copy_from_iter(&read_data, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy read_data arg\n", __func__);
@@ -815,7 +899,12 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		return -EINVAL;
 	}
 
-	return __fuse_notify_read_data(conn, req, &read_data, iter);
+	ret = __fuse_notify_read_data(conn, req, &read_data, iter);
+
+	// verify
+	verify_iov(conn, req, &read_data);
+
+	return ret;
 }
 
 
@@ -1176,6 +1265,8 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 		kfree(fc->free_ids);
 	if (fc->request_map)
 		kfree(fc->request_map);
+	if (fc->md5_tfm)
+		crypto_free_shash(fc->md5_tfm);
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1220,6 +1311,12 @@ int fuse_conn_init(struct fuse_conn *fc)
 	for_each_possible_cpu(cpu) {
 		struct fuse_per_cpu_ids *my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 		memset(my_ids, 0, sizeof(*my_ids));
+	}
+
+	fc->md5_tfm = crypto_alloc_shash("md5", 0, 0);
+    if (IS_ERR(fc->md5_tfm)) {
+		printk(KERN_ERR "failed to allocate md5 transform\n");
+		goto err_out;
 	}
 
 	fc->reqctr = 0;

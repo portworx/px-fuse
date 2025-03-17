@@ -286,6 +286,9 @@ struct fuse_conn {
 	/** O_ASYNC requests */
 	struct fasync_struct *fasync;
 
+	// md5
+	struct crypto_shash *md5_tfm;
+
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
 };
