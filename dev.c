@@ -617,7 +617,7 @@ static struct fuse_req* request_find_in_ctx(unsigned ctx, u64 unique)
 
 static int copy_in_read_data_iovec(struct iov_iter *iter,
 	struct pxd_read_data_out *read_data, struct iovec *iov,
-	struct iov_iter *data_iter)
+	struct iov_iter *data_iter, struct iovec *verify_iov, int *verify_iovcnt)
 {
 	int iovcnt;
 	size_t len;
@@ -638,6 +638,8 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 		if (((uint64_t)iov[i].iov_base & 0xfff) != 0) {
 			printk(KERN_ERR "%s: iov_base not page aligned len = %llu\n", __func__, (uint64_t)iov[i].iov_len);
 		}
+		verify_iov[*verify_iovcnt] = iov[i];
+		(*verify_iovcnt)++;
 	}
 
 	iov_iter_init(data_iter, READ, iov, iovcnt, iov_length(iov, iovcnt));
@@ -648,7 +650,8 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 #ifndef __PXD_BIO_MAKEREQ__
 static int __fuse_notify_read_data(struct fuse_conn *conn,
 		struct fuse_req *req,
-		struct pxd_read_data_out *read_data_p, struct iov_iter *iter)
+		struct pxd_read_data_out *read_data_p, struct iov_iter *iter,
+		struct iovec *verify_iov, int *verify_iovcnt)
 {
 	struct iovec iov[IOV_BUF_SIZE];
 	struct iov_iter data_iter;
@@ -661,7 +664,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	size_t copied, skipped = 0;
 	int ret;
 
-	ret = copy_in_read_data_iovec(iter, read_data_p, iov, &data_iter);
+	ret = copy_in_read_data_iovec(iter, read_data_p, iov, &data_iter, verify_iov, verify_iovcnt);
 	if (ret)
 		return ret;
 	
@@ -706,7 +709,7 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 
 				/* out of space in destination, copy more iovec */
 				ret = copy_in_read_data_iovec(iter, read_data_p,
-					iov, &data_iter);
+					iov, &data_iter, verify_iov, verify_iovcnt);
 				if (ret)
 					return ret;
 				len -= (copied + copy_this);
@@ -799,7 +802,8 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 #define ONE_MB      (1024 * 1024)
 #define BLOCK_SZ 4096
 
-static void verify_iov(struct fuse_conn *fuse_conn, struct fuse_req *req, struct pxd_read_data_out *read_data)
+static void verify_iov(struct fuse_conn *fuse_conn, struct fuse_req *req, struct pxd_read_data_out *read_data,
+	struct iovec *verify_iov, int *iovcnt)
 {
     struct bio_vec bvec;
     struct req_iterator iter;
@@ -830,6 +834,7 @@ static void verify_iov(struct fuse_conn *fuse_conn, struct fuse_req *req, struct
         total_copied += seg_len;
     }
 
+	// verify from block device perspective
     for (size_t offset = 0; offset < total_copied; offset += BLOCK_SZ) {
         loff_t block_offset_bytes = start_offset_bytes + offset;
 
@@ -867,7 +872,61 @@ static void verify_iov(struct fuse_conn *fuse_conn, struct fuse_req *req, struct
             md5_str
         );
     }
+
+	// verify after copy
+
+	// reset 
+	start_offset_bytes = blk_rq_pos(req->rq) * SECTOR_SIZE;
+	total_copied = 0;
+	memset(buf, 0, ONE_MB);
+
+	for (int i = 0; i < *iovcnt; i++) {
+		size_t len = verify_iov[i].iov_len;
+		const void __user *user_ptr = (const void __user *)verify_iov[i].iov_base;
+		BUG_ON(total_copied + len > ONE_MB);
+
+		if (copy_from_user(buf + total_copied, user_ptr, len)) {
+            kvfree(buf);
+			printk(KERN_ERR "%s: copy_from_user() failed user_ptr = %p\n", __func__, user_ptr);
+            return;
+        }
+		total_copied += len;
+	}
+
+	for (size_t offset = 0; offset < total_copied; offset += BLOCK_SZ) {
+		loff_t block_offset_bytes = start_offset_bytes + offset;
+		SHASH_DESC_ON_STACK(shash, md5_tfm);
+		u8 digest[MD5_DIGEST_SIZE];
+		char md5_str[MD5_DIGEST_SIZE * 2 + 1] = { 0 };
+		shash->tfm   = fuse_conn->md5_tfm;
+		if (crypto_shash_init(shash)) {
+			printk(KERN_ERR "%s: crypto_shash_init() failed\n", __func__);
+			kvfree(buf);
+			return;
+		}
+		if (crypto_shash_update(shash, buf + offset, BLOCK_SZ)) {
+			printk(KERN_ERR "%s: crypto_shash_update() failed\n", __func__);
+			kvfree(buf);
+			return;
+		}
+		if (crypto_shash_final(shash, digest)) {
+			printk(KERN_ERR "%s: crypto_shash_final() failed\n", __func__);
+			kvfree(buf);
+			return;
+		}
+		for (int i = 0; i < MD5_DIGEST_SIZE; i++)
+			sprintf(md5_str + (i * 2), "%02x", digest[i]);
+		trace_verify_iov_copy(
+			req->pxd_dev->dev_id,
+			read_data->unique,
+			(uint64_t)block_offset_bytes,
+			(uint64_t)BLOCK_SZ,
+			md5_str
+		);
+	}
+
 	kvfree(buf);
+
 }
 
 static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
@@ -877,9 +936,14 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	size_t len = sizeof(read_data);
 	struct fuse_req *req;
 	int ret;
+	int iovcnt = 0;
+	struct iovec * iov;
+
+	iov = kvmalloc(sizeof(struct iovec) * 512, GFP_KERNEL);
 
 	if (copy_from_iter(&read_data, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy read_data arg\n", __func__);
+		kvfree(iov);
 		return -EFAULT;
 	}
 
@@ -889,6 +953,7 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 		spin_unlock(&conn->lock);
 		printk(KERN_ERR "%s: request %lld not found\n", __func__,
 		       read_data.unique);
+		kvfree(iov);
 		return -ENOENT;
 	}
 	spin_unlock(&conn->lock);
@@ -896,14 +961,17 @@ static int fuse_notify_read_data(struct fuse_conn *conn, unsigned int size,
 	if (req->in.h.opcode != PXD_WRITE &&
 	    req->in.h.opcode != PXD_WRITE_SAME) {
 		printk(KERN_ERR "%s: request is not a write\n", __func__);
+		kvfree(iov);
 		return -EINVAL;
 	}
 
-	ret = __fuse_notify_read_data(conn, req, &read_data, iter);
+	// get the iovcnt
+	ret = __fuse_notify_read_data(conn, req, &read_data, iter, iov, &iovcnt);
 
 	// verify
-	verify_iov(conn, req, &read_data);
-
+	verify_iov(conn, req, &read_data, iov, &iovcnt);
+	
+	kvfree(iov);
 	return ret;
 }
 

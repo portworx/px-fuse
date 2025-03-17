@@ -51,7 +51,37 @@ TRACE_EVENT(verify_iov,
         __entry->len          = len;
         __assign_str(md5_str, md5_str);
     ),
-    TP_printk("dev_id=%llu req_id=%llu block_offset=%llu len=%llu md5=%s",
+    TP_printk("block_driver data : dev_id=%llu req_id=%llu block_offset=%llu len=%llu md5=%s",
+        (unsigned long long)__entry->dev_id,
+        (unsigned long long)__entry->req_id,
+        (unsigned long long)__entry->block_offset,
+        (unsigned long long)__entry->len,
+        __get_str(md5_str)
+    )
+);
+
+TRACE_EVENT(verify_iov_copy,
+    TP_PROTO(uint64_t dev_id,
+             uint64_t req_id,
+             uint64_t block_offset,
+             uint64_t len,
+             const char *md5_str),
+    TP_ARGS(dev_id, req_id, block_offset, len, md5_str),
+    TP_STRUCT__entry(
+        __field(uint64_t, dev_id)
+        __field(uint64_t, req_id)
+        __field(uint64_t, block_offset)
+        __field(uint64_t, len)
+        __string(md5_str, md5_str)
+    ),
+    TP_fast_assign(
+        __entry->dev_id       = dev_id;
+        __entry->req_id       = req_id;
+        __entry->block_offset = block_offset;
+        __entry->len          = len;
+        __assign_str(md5_str, md5_str);
+    ),
+    TP_printk("after copy data : dev_id=%llu req_id=%llu block_offset=%llu len=%llu md5=%s",
         (unsigned long long)__entry->dev_id,
         (unsigned long long)__entry->req_id,
         (unsigned long long)__entry->block_offset,
