@@ -712,7 +712,9 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 					iov, &data_iter, verify_iov, verify_iovcnt);
 				if (ret)
 					return ret;
-				len -= (copied + copy_this);
+				// len -= (copied + copy_this);
+				// revert fix
+				len -= copied;
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
