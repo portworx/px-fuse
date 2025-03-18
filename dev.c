@@ -675,15 +675,20 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 				BVEC(bvec).bv_offset + copied,
 				len - copied, &data_iter);
 			if (copy_this != len - copied) {
-				if (!iter->count)
-					return 0;
+				if (!iter->count) {
+					// running out of space in user iovecs when the last copy is a partial copy
+					// should be treated as an error
+					printk(KERN_ERR "%s: copy failed no space in user iovecs : dev id : %lld request id : %lld\n",
+						__func__, req->pxd_dev->dev_id, read_data_p->unique);
+					return -EFAULT;
+				}
 
 				/* out of space in destination, copy more iovec */
 				ret = copy_in_read_data_iovec(iter, read_data_p,
 					iov, &data_iter);
 				if (ret)
 					return ret;
-				len -= copied;
+				len -= (copied + copy_this);
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
@@ -742,15 +747,20 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 				BVEC(bvec).bv_offset + copied,
 				len - copied, &data_iter);
 			if (copy_this != len - copied) {
-				if (!iter->count)
-					return 0;
+				if (!iter->count) {
+					// running out of space in user iovecs when the last copy is a partial copy
+					// should be treated as an error
+					printk(KERN_ERR "%s: copy failed no space in user iovecs : dev id : %lld request id : %lld\n",
+						__func__, req->pxd_dev->dev_id, read_data_p->unique);
+					return -EFAULT;
+				}
 
 				/* out of space in destination, copy more iovec */
 				ret = copy_in_read_data_iovec(iter, read_data_p,
 					iov, &data_iter);
 				if (ret)
 					return ret;
-				len -= copied;
+				len -= (copied + copy_this);
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
