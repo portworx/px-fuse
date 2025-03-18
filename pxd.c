@@ -88,7 +88,6 @@ module_param(pxd_num_fpthreads, uint, 0644);
 static void pxd_abort_context(struct work_struct *work);
 static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
-static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force);
 
 struct pxd_context* find_context(unsigned ctx)
 {
@@ -241,29 +240,6 @@ static long pxd_ioctl_resize(struct file *file, void __user *argp)
 	return ret;
 }
 
-static long pxd_ioctl_detach_device(struct file *file, void __user *argp)
-{
-        struct pxd_context *ctx = NULL;
-        struct pxd_detach_device detach_device_args;
-        long ret = 0;
-
-        if (copy_from_user(&detach_device_args, argp, sizeof(detach_device_args))) {
-                return -EFAULT;
-        }
-        if (detach_device_args.context_id >= pxd_num_contexts_exported) {
-                printk("%s : invalid context: %d\n", __func__, detach_device_args.context_id);
-                return -EFAULT;
-        }
-
-        ctx =  &pxd_contexts[detach_device_args.context_id];
-        if (!ctx || ctx->id >= pxd_num_contexts_exported) {
-                return -EFAULT;
-        }
-
-        ret = pxd_remove_dev(&ctx->fc, detach_device_args.dev_id, false /* force */);
-        return ret;
-}
-
 static long pxd_ioctl_fp_cleanup(struct file *file, void __user *argp)
 {
 	struct pxd_context *ctx = NULL;
@@ -412,8 +388,6 @@ static long pxd_control_ioctl(struct file *file, unsigned int cmd, unsigned long
 		return pxd_ioctl_fp_cleanup(file, (void __user *)arg);
 	case PXD_IOC_IO_FLUSHER:
 		return pxd_ioflusher_state((void __user *)arg);
-	case PXD_IOC_DETACH_DEVICE:
-		return pxd_ioctl_detach_device(file, (void __user *)arg);
 	default:
 		return -ENOTTY;
 	}
@@ -1691,7 +1665,7 @@ static void pxd_finish_remove(struct work_struct *work)
 	module_put(THIS_MODULE);
 }
 
-static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
+ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	int err;
@@ -1701,7 +1675,7 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 
 	spin_lock(&ctx->lock);
 	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if (pxd_dev->dev_id == dev_id) {
+		if (pxd_dev->dev_id == remove->dev_id) {
 			spin_lock(&pxd_dev->lock);
 			break;
 		}
@@ -1715,7 +1689,7 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 		goto out_lock;
 	}
 
-	if (pxd_dev->open_count && !force) {
+	if (pxd_dev->open_count && !remove->force) {
 		err = -EBUSY;
 		goto out_lock;
 	}
@@ -1735,7 +1709,7 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 	finish_wait(&pxd_dev->remove_wait, &wait);
 	if (remtimeo == 0) {
 		pr_warn("remove device %llu scheduled but timedout waiting to complete",
-				dev_id);
+				remove->dev_id);
 	}
 	put_device(&pxd_dev->dev);
 	return 0;
@@ -1743,13 +1717,8 @@ out_lock:
 	spin_unlock(&pxd_dev->lock);
 out:
 	spin_unlock(&ctx->lock);
-	pr_err("remove device %llu failed %d\n", dev_id, err);
+	pr_err("remove device %llu failed %d\n", remove->dev_id, err);
 	return err;
-}
-
-ssize_t pxd_remove(struct fuse_conn *fc, struct pxd_remove_out *remove)
-{
-        return pxd_remove_dev(fc, remove->dev_id, remove->force);
 }
 
 ssize_t pxd_update_size(struct fuse_conn *fc, struct pxd_update_size *update_size)
