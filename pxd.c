@@ -1344,6 +1344,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
@@ -1351,6 +1352,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
+#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 #if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
