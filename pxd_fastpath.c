@@ -405,7 +405,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 
 	decode_mode(mode, modestr);
 	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) { /* valid fd exists already */
+		if (fp->file[i]) { /* valid fd exists already */
 			if (force) {
 				printk("dev %llu:%s closing file desc %px\n",
 						pxd_dev->dev_id, __func__, fp->file[i]);
@@ -457,7 +457,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 out_file_failed:
 	fp->nfd = 0;
 	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) filp_close(fp->file[i], NULL);
+		if (fp->file[i]) filp_close(fp->file[i], NULL);
 	}
 	memset(fp->file, 0, sizeof(fp->file));
 	memset(fp->device_path, 0, sizeof(fp->device_path));
@@ -501,7 +501,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 
 	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] > 0) {
+		if (fp->file[i]) {
 			if (!skipsync) {
 				int ret = vfs_fsync(fp->file[i], 0);
 				if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
@@ -609,7 +609,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 out_file_failed:
 	disableFastPath(pxd_dev, false);
 	for (i = 0; i < pxd_dev->fp.nfd; i++) {
-		if (pxd_dev->fp.file[i] > 0) filp_close(pxd_dev->fp.file[i], NULL);
+		if (pxd_dev->fp.file[i]) filp_close(pxd_dev->fp.file[i], NULL);
 	}
 	pxd_dev->fp.nfd = 0;
 	memset(pxd_dev->fp.file, 0, sizeof(pxd_dev->fp.file));
@@ -664,11 +664,20 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 	}
 
 	// ensure few block properties are still as expected.
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
+	topque->limits.max_write_zeroes_sectors = 0;
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
 	blk_queue_max_write_zeroes_sectors(topque, 0);
 #endif
+
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
+	topque->limits.logical_block_size = PXD_LBS;
+	topque->limits.physical_block_size = PXD_LBS;
+#else
 	blk_queue_logical_block_size(topque, PXD_LBS);
 	blk_queue_physical_block_size(topque, PXD_LBS);
+#endif
 	return;
 
 out:
