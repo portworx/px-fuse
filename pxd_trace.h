@@ -222,6 +222,72 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
+	pxd_queue_rq,
+	TP_PROTO(uint64_t dev_id, int minor, int dir, uint32_t op,
+		uint64_t offset, uint64_t size, unsigned short nr_phys_segments,
+		uint32_t flags),
+	TP_ARGS(dev_id, minor, dir, op, offset, size, nr_phys_segments, flags),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(int, dir)
+		__field(uint32_t, op)
+		__field(uint64_t, offset)
+		__field(uint64_t, size)
+		__field(unsigned short, nr_phys_segments)
+		__field(uint32_t, flags)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->dir = dir,
+		__entry->op = op,
+		__entry->offset = offset,
+		__entry->size = size,
+		__entry->nr_phys_segments = nr_phys_segments,
+		__entry->flags = flags
+	),
+	TP_printk(
+		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x",
+		__entry->dev_id, __entry->minor, __entry->dir, __entry->op,
+		__entry->offset, __entry->size, __entry->nr_phys_segments,
+		__entry->flags)	
+);
+
+TRACE_EVENT(
+	pxd_rq_fn,
+	TP_PROTO(uint64_t dev_id, int minor, int dir, uint32_t op,
+		uint64_t offset, uint64_t size, unsigned short nr_phys_segments,
+		uint32_t flags),
+	TP_ARGS(dev_id, minor, dir, op, offset, size, nr_phys_segments, flags),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(int, dir)
+		__field(uint32_t, op)
+		__field(uint64_t, offset)
+		__field(uint64_t, size)
+		__field(unsigned short, nr_phys_segments)
+		__field(uint32_t, flags)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->dir = dir,
+		__entry->op = op,
+		__entry->offset = offset,
+		__entry->size = size,
+		__entry->nr_phys_segments = nr_phys_segments,
+		__entry->flags = flags
+	),
+	TP_printk(
+		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x",
+		__entry->dev_id, __entry->minor, __entry->dir, __entry->op,
+		__entry->offset, __entry->size, __entry->nr_phys_segments,
+		__entry->flags)	
+);
+
+TRACE_EVENT(
 	pxd_request,
 	TP_PROTO(
 		uint64_t unique, uint32_t size, uint64_t off,
