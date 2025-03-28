@@ -25,6 +25,7 @@
 #include "pxd_bio.h"
 #include "pxd_compat.h"
 #include "pxd_core.h"
+#include "pxd_trace.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
 inline bool rq_is_special(struct request *rq) {
@@ -641,7 +642,7 @@ static void fp_handle_specialops(struct kthread_work *work) {
 	}
 #else
     // submit discard to replica
-    if (blk_queue_discard(q)) { // discard supported
+        if (blk_queue_discard(q)) { // discard supported
 	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
 	} else if (bdev_write_same(bdev)) {
@@ -659,6 +660,16 @@ static void fp_handle_specialops(struct kthread_work *work) {
 				 blk_rq_sectors(rq), GFP_NOIO);
 #endif
 	}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))  || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_EQ_SP5__))
+	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, bdev_max_discard_sectors(bdev), rq->cmd_flags, r);
+#else
+	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, blk_queue_discard(q), rq->cmd_flags, r);
 #endif
 
 	BIO_ENDIO(&cc->clone, r);
@@ -720,6 +731,7 @@ static void _end_clone_bio(struct kthread_work *work)
                 pxd_failover_initiate(fproot);
                 return;
         }
+        trace_end_clone_bio(pxd_dev->dev_id, pxd_dev->minor, bio_op(bio), BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio), req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), blkrc, rq->bio, rq->biotail);
 
         // complete cleanup of all clones
         clone_cleanup(fproot);
