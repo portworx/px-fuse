@@ -823,7 +823,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	int rc;
-	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
+	trace_pxd_request(req->in.h.unique, size, off, minor, op, flags);
 
 	switch (op) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
