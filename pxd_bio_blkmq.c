@@ -661,9 +661,16 @@ static void fp_handle_specialops(struct kthread_work *work) {
 #endif
 	}
 #endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))  || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_EQ_SP5__))
+	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, bdev_max_discard_sectors(bdev), rq->cmd_flags, r);
+#else
 	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
 		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 		rq->nr_phys_segments, blk_queue_discard(q), rq->cmd_flags, r);
+#endif
 
 	BIO_ENDIO(&cc->clone, r);
 }
