@@ -668,7 +668,7 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	int rc;
-	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
+	trace_pxd_request(req->in.h.unique, size, off, minor, op, flags);
 
 	switch (op) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
@@ -896,6 +896,9 @@ static void pxd_rq_fn(struct request_queue *q)
 		if (!rq)
 			break;
 
+		trace_pxd_rq_fn(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+			req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+			rq->nr_phys_segments, rq->cmd_flags);
 		/* Filter out block requests we don't understand. */
 		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
 			__blk_end_request_all(rq, 0);
@@ -976,6 +979,9 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
+	trace_pxd_queue_rq(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, rq->cmd_flags, rq->bio, rq->biotail);
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
