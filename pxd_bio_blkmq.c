@@ -25,6 +25,7 @@
 #include "pxd_bio.h"
 #include "pxd_compat.h"
 #include "pxd_core.h"
+#include "pxd_trace.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
 inline bool rq_is_special(struct request *rq) {
@@ -660,6 +661,9 @@ static void fp_handle_specialops(struct kthread_work *work) {
 #endif
 	}
 #endif
+	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, blk_queue_discard(q), rq->cmd_flags, r);
 
 	BIO_ENDIO(&cc->clone, r);
 }
