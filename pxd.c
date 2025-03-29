@@ -1173,7 +1173,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
-	printk(KERN_INFO "%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+	printk(KERN_INFO "%s: dev m %d g %lld %s at %lld len %d  %d pages "
 		   "op = %d flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",

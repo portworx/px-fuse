@@ -420,7 +420,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         if (S_ISBLK(get_mode(fileh)))
                 BIO_SET_DEV(clone_bio, bdev);
         
-        printk("in %s: clone_bio = %p dev_id = %llu offset = %lld len = %d op = %d \n", __func__, clone_bio, pxd_dev->dev_id, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq));
+        printk("in %s: clone_bio = %p dev_id = %llu offset = %lld len = %d op = %d  cc = %p\n", __func__, clone_bio, pxd_dev->dev_id, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), cc);
         clone_bio->bi_private = fproot;
         clone_bio->bi_end_io = end_clone_bio;
 
