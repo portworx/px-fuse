@@ -292,6 +292,39 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
+	end_clone_bio,
+	TP_PROTO(uint64_t dev_id, int minor, uint32_t bio_op, uint64_t bio_offset, uint64_t bio_size,
+	uint32_t rq_op, uint64_t rq_offset, uint64_t rq_size, int status),
+	TP_ARGS(dev_id, minor, bio_op, bio_offset, bio_size, rq_op, rq_offset, rq_size, status),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(uint32_t, bio_op)
+		__field(uint64_t, bio_offset)
+		__field(uint64_t, bio_size)
+		__field(uint32_t, rq_op)
+		__field(uint64_t, rq_offset)
+		__field(uint64_t, rq_size)
+		__field(int, status)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->bio_op = bio_op,
+		__entry->bio_offset = bio_offset,
+		__entry->bio_size = bio_size,
+		__entry->rq_op = rq_op,
+		__entry->rq_offset = rq_offset,
+		__entry->rq_size = rq_size,
+		__entry->status = status
+	),
+	TP_printk(
+		"dev_id %llu minor %d bio_op %u bio_offset %llu bio_size %llu rq_op %u rq_offset %llu rq_size %llu status %d",
+		__entry->dev_id, __entry->minor, __entry->bio_op, __entry->bio_offset, __entry->bio_size,
+		__entry->rq_op, __entry->rq_offset, __entry->rq_size, __entry->status)
+);
+
+TRACE_EVENT(
 	pxd_rq_fn,
 	TP_PROTO(uint64_t dev_id, int minor, int dir, uint32_t op,
 		uint64_t offset, uint64_t size, unsigned short nr_phys_segments,
