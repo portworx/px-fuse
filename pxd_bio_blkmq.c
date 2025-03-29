@@ -723,7 +723,9 @@ static void _end_clone_bio(struct kthread_work *work)
                     (unsigned long long)(BIO_SECTOR(bio) * SECTOR_SIZE),
                     BIO_SIZE(bio), bio_segments(bio), (long unsigned int)flags);
         }
-
+        
+        printk(KERN_INFO "in %s : fproot = %p nactive = %d blkrc = %d bio offset = %lld len = %d data dir = %d, rq offset = %lld len = %d op = %d flags = %x\n", __func__, fproot, atomic_read(&fproot->nactive), blkrc,
+        (unsigned long long)BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio), bio_data_dir(bio), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), rq->cmd_flags);
         // cache status within context
         cc->status = blkrc;
         printk(KERN_INFO "in %s: fproot = %p nactive = %d blkrc 0 = %d\n", __func__, fproot, atomic_read(&fproot->nactive), blkrc);
@@ -754,6 +756,7 @@ static void _end_clone_bio(struct kthread_work *work)
         blk_end_request(rq, blkrc, blk_rq_bytes(rq));
         fuse_request_free(fproot_to_fuse_request(fproot));
 #else
+        printk(KERN_INFO "in %s : ending the blk request: offset = %ld len = %d op = %d blkrc = %d\n", __func__, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), blkrc);
         blk_mq_end_request(rq, errno_to_blk_status(blkrc));
 #endif
 
