@@ -266,9 +266,12 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 #endif
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
+        printk(KERN_INFO "dev id = %llu specialops = %d op = %drq->bio = %p rq->bio == rq->biotail = %d\n", fproot_to_pxd(fproot)->dev_id, specialops, req_op(rq), rq->bio, rq->bio == rq->biotail);
         // it is possible for sync request to carry no bio
-        if (!rq->bio)
+        if (!rq->bio) {
+                printk(KERN_INFO "dev id = %llu op = %d, specialops = %d\n", fproot_to_pxd(fproot)->dev_id, req_op(rq), specialops);
                 return 0;
+        }
 
         // single bio request
         if (rq->bio == rq->biotail) {
@@ -317,6 +320,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         bio->bi_private = fproot;
 
         if (specialops) {
+                printk(KERN_INFO "dev : %llu offset = %lld len = %d, specialops = %d, BIO_SIZE = %d\n", fproot_to_pxd(fproot)->dev_id, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), specialops, blk_rq_bytes(rq));
                 BIO_SIZE(bio) = blk_rq_bytes(rq);
         } else {
                 if (blk_rq_bytes(rq) != 0) {
@@ -332,6 +336,8 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         BUG_ON(BIO_SECTOR(bio) != blk_rq_pos(rq));
         BUG_ON(BIO_SIZE(bio) != blk_rq_bytes(rq));
 
+
+        printk(KERN_INFO "dev id = %llu op = %d, specialops = %d fproot = %p fproot->bio = %p\n", fproot_to_pxd(fproot)->dev_id, req_op(rq), specialops, fproot, fproot->bio);
         fproot->bio = bio;
         return 0;
 }
@@ -358,6 +364,7 @@ static void clone_cleanup(struct fp_root_context *fproot) {
                 atomic_dec(&nrootbios);
         }
 
+        printk("in %s: done with req : offset = %lld len = %d op = %d root bio ref count = %d\n", __func__, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), atomic_read(&nrootbios));
         fproot->bio = NULL;
         fproot->magic = ~FP_ROOT_MAGIC;
 }
@@ -371,7 +378,8 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         struct block_device *bdev = get_bdev(fileh);
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
-
+        
+        printk("in %s: fproot->bio = %p dev_id = %llu \n", __func__, fproot->bio, pxd_dev->dev_id);
         if (!fproot->bio) { // can only be flush request
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_EQ_SP5__))
 	clone_bio = bio_alloc_bioset(NULL, 0, 0, GFP_KERNEL, get_fpbioset());
@@ -411,6 +419,8 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
 
         if (S_ISBLK(get_mode(fileh)))
                 BIO_SET_DEV(clone_bio, bdev);
+        
+        printk("in %s: clone_bio = %p dev_id = %llu offset = %lld len = %d op = %d \n", __func__, clone_bio, pxd_dev->dev_id, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq));
         clone_bio->bi_private = fproot;
         clone_bio->bi_end_io = end_clone_bio;
 
@@ -474,7 +484,7 @@ clone_and_map(struct fp_root_context *fproot) {
 
         rc = prep_root_bio(fproot);
         if (rc) {
-                printk("blkmq fastpath: prep_root_bio failing %d\n", rc);
+                printk(KERN_ERR "blkmq fastpath: prep_root_bio failing %d\n", rc);
 #ifndef __PX_BLKMQ__
                 r = rc;
 #else
@@ -483,6 +493,7 @@ clone_and_map(struct fp_root_context *fproot) {
                 goto err;
         }
 
+        printk(KERN_INFO "dev id = %llu op = %d, specialops = %d, nfd = %d\n", fproot_to_pxd(fproot)->dev_id, req_op(rq), rq_is_special(rq), pxd_dev->fp.nfd);
         // prepare clone contexts
         for (i = 0; i < pxd_dev->fp.nfd; i++) {
                 clone = clone_root(fproot, i);
@@ -702,7 +713,7 @@ static void _end_clone_bio(struct kthread_work *work)
 #endif
 
         if (blkrc != 0) {
-                printk_ratelimited(
+                printk( KERN_ERR
                     "blkmq fastpath: FAILED IO %s (err=%d): dev m %d g %lld %s "
                     "at %lld len "
                     "%d bytes %d pages "
@@ -715,6 +726,7 @@ static void _end_clone_bio(struct kthread_work *work)
 
         // cache status within context
         cc->status = blkrc;
+        printk(KERN_INFO "in %s: fproot = %p nactive = %d blkrc 0 = %d\n", __func__, fproot, atomic_read(&fproot->nactive), blkrc);
         if (!atomic_dec_and_test(&fproot->nactive)) {
                 // not all clones completed.
                 return;
@@ -722,6 +734,7 @@ static void _end_clone_bio(struct kthread_work *work)
 
         // final reconciled status
         blkrc = reconcile_status(fproot);
+        printk(KERN_INFO "in %s: fproot = %p nactive = %d blkrc = %d \n", __func__, fproot, atomic_read(&fproot->nactive), blkrc);
         // debug condition for force fail
         if (pxd_dev->fp.force_fail)
                 blkrc = -EIO;
@@ -737,6 +750,7 @@ static void _end_clone_bio(struct kthread_work *work)
 // CAREFUL NOW - fproot will be lost once end_request below gets called
 // finish the original request
 #ifndef __PX_BLKMQ__
+        printk(KERN_INFO "in %s : ending the blk request: offset = %ld len = %d op = %d blkrc = %d\n", __func__, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), blkrc);
         blk_end_request(rq, blkrc, blk_rq_bytes(rq));
         fuse_request_free(fproot_to_fuse_request(fproot));
 #else
@@ -762,6 +776,7 @@ static void end_clone_bio(struct bio *bio, int error)
 #else
     cc->status = error;
 #endif
+    printk(KERN_ALERT "in %s: bio = %p status = %d\n", __func__, bio, cc->status);
     fastpath_queue_work(&cc->work, true);
 }
 

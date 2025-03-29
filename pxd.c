@@ -1173,12 +1173,12 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
-	pxd_printk("%s: dev m %d g %lld %s at %ld len %d bytes %d pages "
-		   "flags  %x\n", __func__,
+	printk(KERN_INFO "%s: dev m %d g %lld %s at %lld len %d bytes %d pages "
+		   "op = %d flags  %x\n", __func__,
 		pxd_dev->minor, pxd_dev->dev_id,
 		rq_data_dir(rq) == WRITE ? "wr" : "rd",
 		blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
-		rq->nr_phys_segments, rq->cmd_flags);
+		rq->nr_phys_segments, req_op(rq), rq->cmd_flags);
 
 	fuse_request_init(req);
 
@@ -1190,6 +1190,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 #ifdef __PX_FASTPATH__
 {
 	struct fp_root_context *fproot = &req->fproot;
+	printk(KERN_INFO "op = %d, offset = %lld len = %d, allocated fproot = %p fastpath = %d\n", req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), fproot, pxd_dev->fp.fastpath);
 	fp_root_context_init(fproot);
 	if (pxd_dev->fp.fastpath) {
 		// route through fastpath
