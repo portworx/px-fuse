@@ -225,8 +225,8 @@ TRACE_EVENT(
 	pxd_queue_rq,
 	TP_PROTO(uint64_t dev_id, int minor, int dir, uint32_t op,
 		uint64_t offset, uint64_t size, unsigned short nr_phys_segments,
-		uint32_t flags),
-	TP_ARGS(dev_id, minor, dir, op, offset, size, nr_phys_segments, flags),
+		uint32_t flags, void *bio, void *bio_tail),
+	TP_ARGS(dev_id, minor, dir, op, offset, size, nr_phys_segments, flags, bio, bio_tail),
 	TP_STRUCT__entry(
 		__field(uint64_t, dev_id)
 		__field(int, minor)
@@ -236,6 +236,8 @@ TRACE_EVENT(
 		__field(uint64_t, size)
 		__field(unsigned short, nr_phys_segments)
 		__field(uint32_t, flags)
+		__field(void *, bio)
+		__field(void *, bio_tail)
 	),
 	TP_fast_assign(
 		__entry->dev_id = dev_id,
@@ -245,13 +247,15 @@ TRACE_EVENT(
 		__entry->offset = offset,
 		__entry->size = size,
 		__entry->nr_phys_segments = nr_phys_segments,
-		__entry->flags = flags
+		__entry->flags = flags,
+		__entry->bio = bio,
+		__entry->bio_tail = bio_tail
 	),
 	TP_printk(
-		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x",
+		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x bio %p bio_tail %p",
 		__entry->dev_id, __entry->minor, __entry->dir, __entry->op,
 		__entry->offset, __entry->size, __entry->nr_phys_segments,
-		__entry->flags)	
+		__entry->flags, __entry->bio, __entry->bio_tail)	
 );
 
 TRACE_EVENT(
