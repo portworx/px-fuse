@@ -756,7 +756,7 @@ static void _end_clone_bio(struct kthread_work *work)
         blk_end_request(rq, blkrc, blk_rq_bytes(rq));
         fuse_request_free(fproot_to_fuse_request(fproot));
 #else
-        printk(KERN_INFO "in %s : ending the blk request: offset = %ld len = %d op = %d blkrc = %d\n", __func__, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), blkrc);
+        printk(KERN_INFO "in %s : ending the blk request: offset = %lld len = %d op = %d blkrc = %d\n", __func__, blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), req_op(rq), blkrc);
         blk_mq_end_request(rq, errno_to_blk_status(blkrc));
 #endif
 
