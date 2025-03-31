@@ -487,7 +487,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
 			!fastpath_active(pxd_dev)) {
-		pxd_dev->fp.active_failover = false;
+		pxd_dev->fp.nfd = 0;
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
@@ -514,7 +514,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 	fp->nfd = 0;
 	pxd_dev->fp.fastpath = false;
-	pxd_dev->fp.can_failover = false;
 
 	pxd_resume_io(pxd_dev);
 }
