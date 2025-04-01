@@ -22,7 +22,10 @@
 #define HAVE_BVEC_ITER
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0) || defined(REQ_PREFLUSH)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0)
+#define BLK_QUEUE_FLUSH(q) \
+	q->limits.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0) || defined(REQ_PREFLUSH)
 #define BLK_QUEUE_FLUSH(q) \
 	blk_queue_write_cache(q, true, true)
 #else
@@ -141,7 +144,11 @@ static inline unsigned int get_op_flags(struct bio *bio)
 // Pulled from v5.19.17/source/block/genhd.c
 static inline char *bdevname(struct block_device *bdev, char *buf) {
         struct gendisk *hd = bdev->bd_disk;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
 	int partno = bdev->bd_partno;
+#else
+	int partno = BD_PARTNO; 
+#endif
 
 	if (!partno)
 		snprintf(buf, BDEVNAME_SIZE, "%s", hd->disk_name);
