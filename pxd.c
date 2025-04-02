@@ -1254,8 +1254,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
 		  .max_segment_size = SEGMENT_SIZE,
-		  .max_segments = SEGMENT_SIZE / PXD_LBS,
-		  .max_hw_sectors = SEGMENT_SIZE / SECTOR_SIZE,
+		  .max_segments = PXD_MAX_IO / PXD_LBS,
+		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
 		  .discard_alignment = PXD_MAX_DISCARD_GRANULARITY,
 		  .discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
 		  .io_min = PXD_LBS,
@@ -1320,7 +1320,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 	blk_queue_max_hw_sectors(q, SEGMENT_SIZE / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
-	blk_queue_max_segments(q, (SEGMENT_SIZE / PXD_LBS));
+	blk_queue_max_segments(q, (PXD_MAX_IO / PXD_LBS));
 	blk_queue_io_min(q, PXD_LBS);
 	blk_queue_io_opt(q, PXD_LBS);
 	blk_queue_logical_block_size(q, PXD_LBS);
@@ -1343,7 +1343,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
 	if (pxd_dev->discard_size < SECTOR_SIZE)
-		q->limits.max_discard_sectors = SEGMENT_SIZE / SECTOR_SIZE;
+		q->limits.max_discard_sectors = PXD_MAX_IO / SECTOR_SIZE;
 	else
 		q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 

@@ -98,7 +98,10 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 #define SECTOR_SHIFT (9)
 #endif
 
-#define SEGMENT_SIZE (1024 * 1024)
+// the SEGMENT_SIZE is set to 512K because of a limitation
+// in __fuse_notify_read_data, which could process atmost
+// 128 iovecs per bio_vec (128 * 4096 = 512K)
+#define SEGMENT_SIZE (512 * 1024)
 
 #ifdef __PXD_BIO_MAKEREQ__
 void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
