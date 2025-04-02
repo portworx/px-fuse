@@ -688,8 +688,8 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
 				if (copied != len) {
-					printk(KERN_ERR "%s: copy failed new iovec\n",
-						__func__);
+					printk(KERN_ERR "%s: copy failed new iovec, bio_vec : page = %p len = %d offset = %d\n",
+						__func__, BVEC(bvec).bv_page, BVEC(bvec).bv_len, BVEC(bvec).bv_offset);
 					return -EFAULT;
 				}
 			}
@@ -755,8 +755,8 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
 				if (copied != len) {
-					printk(KERN_ERR "%s: copy failed new iovec\n",
-						__func__);
+					printk(KERN_ERR "%s: copy failed new iovec, bio_vec : page = %p len = %d offset = %d\n",
+						__func__, BVEC(bvec).bv_page, BVEC(bvec).bv_len, BVEC(bvec).bv_offset);
 					return -EFAULT;
 				}
 			}
