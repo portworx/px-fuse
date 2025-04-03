@@ -1522,7 +1522,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	}
 
 	if (add->discard_size < SECTOR_SIZE)
-		pxd_dev->discard_size = SEGMENT_SIZE;
+		pxd_dev->discard_size = PXD_MAX_IO;
 	else
 		pxd_dev->discard_size = add->discard_size;
 
