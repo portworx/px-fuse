@@ -413,6 +413,11 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         clone_bio->bi_private = fproot;
         clone_bio->bi_end_io = end_clone_bio;
 
+#ifdef CONFIG_BLK_CGROUP
+        clone_bio->bi_blkg = NULL;
+        bio_associate_blkg_from_css(clone_bio, blkcg_root_css);
+#endif
+
         atomic_inc(&nclones);
         return clone_bio;
 }
