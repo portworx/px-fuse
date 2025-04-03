@@ -13,6 +13,7 @@
 #include <linux/genhd.h>
 #endif
 #include <linux/workqueue.h>
+#include <linux/smp.h>
 
 #include "pxd_bio.h"
 #include "pxd.h"
@@ -259,7 +260,7 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 	// incompat device
 	if (!fastpath_enabled(pxd_dev)) {
 		printk("device %llu ioswitch request failed (fpenabled %d, fastpath %d)\n",
-			   pxd_dev->dev_id, fastpath_enabled(pxd_dev), fp->fastpath);
+			   pxd_dev->dev_id, fastpath_enabled(pxd_dev), atomic_read(&fp->fastpath));
 		return -EINVAL;
 	}
 
@@ -335,7 +336,7 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 
 	pxd_suspend_io(pxd_dev);
 
-	if (skip_flush || !fp->fastpath) return 0;
+	if (skip_flush || !atomic_read(&fp->fastpath)) return 0;
 
 	rc = wait_for_sync(pxd_dev, skip_flush);
 	if (rc)
@@ -414,7 +415,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	char modestr[32];
 
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd) {
-		pxd_dev->fp.fastpath = false;
+		atomic_set(&pxd_dev->fp.fastpath, 0);
 		return;
 	}
 
@@ -462,11 +463,11 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		}
 	}
 
-	pxd_dev->fp.fastpath = true;
+	atomic_set(&pxd_dev->fp.fastpath, 1);
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
-		pxd_dev->dev_id, fp->fastpath, mode, fp->nfd,
+		pxd_dev->dev_id, atomic_read(&fp->fastpath), mode, fp->nfd,
 		fp->file[0], fp->file[1], fp->file[2]);
 
 	return;
@@ -479,7 +480,7 @@ out_file_failed:
 	memset(fp->file, 0, sizeof(fp->file));
 	memset(fp->device_path, 0, sizeof(fp->device_path));
 
-	pxd_dev->fp.fastpath = false;
+	atomic_set(&pxd_dev->fp.fastpath, 0);
 	/// volume still remains suspended waiting for CLEANUP request to reopen IO.
 	printk(KERN_INFO"%s: Device %llu no backing volume setup, will take slow path\n",
 		__func__, pxd_dev->dev_id);
@@ -505,11 +506,16 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
 			!fastpath_active(pxd_dev)) {
 		pxd_dev->fp.nfd = 0;
-		pxd_dev->fp.fastpath = false;
+		atomic_set(&pxd_dev->fp.fastpath, 0);
 		return;
 	}
 
 	pxd_suspend_io(pxd_dev);
+	// set fastpath to false and then flush
+	// order matters, fp.pathpath must be cleared
+	// before calling fastpath_flush_work
+	atomic_set(&pxd_dev->fp.fastpath, 0);
+	smp_mb();
 	fastpath_flush_work();
 
 	if (PXD_ACTIVE(pxd_dev)) {
@@ -543,7 +549,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		}
 	}
 	fp->nfd = 0;
-	pxd_dev->fp.fastpath = false;
 
 	pxd_resume_io(pxd_dev);
 }
@@ -632,7 +637,7 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	enableFastPath(pxd_dev, true);
 	pxd_resume_io(pxd_dev);
 
-	if (!pxd_dev->fp.fastpath) goto out_file_failed;
+	if (!atomic_read(&pxd_dev->fp.fastpath)) goto out_file_failed;
 	printk("dev%llu completed setting up %d paths\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
 	return 0;
 out_file_failed:
@@ -766,7 +771,7 @@ int pxd_debug_switch_fastpath(struct pxd_device* pxd_dev)
 
 int pxd_debug_switch_nativepath(struct pxd_device* pxd_dev)
 {
-	if (pxd_dev->fp.fastpath) {
+	if (atomic_read(&pxd_dev->fp.fastpath)) {
 		printk(KERN_WARNING"pxd_dev %llu in fastpath, forcing failover\n",
 				pxd_dev->dev_id);
 		pxd_dev->fp.force_fail = true;

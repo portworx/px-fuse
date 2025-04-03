@@ -82,7 +82,7 @@ bool fastpath_enabled(struct pxd_device *pxd_dev) {
 // current IO status - fastpath vs nativepath
 static inline
 bool fastpath_active(struct pxd_device *pxd_dev) {
-	return pxd_dev->fp.fastpath;
+	return atomic_read(&pxd_dev->fp.fastpath);
 }
 
 void pxd_check_q_congested(struct pxd_device *pxd_dev);

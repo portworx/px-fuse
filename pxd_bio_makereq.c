@@ -401,7 +401,7 @@ static void pxd_io_failover(struct work_struct *ws) {
 
         spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
         if (!pxd_dev->fp.active_failover) {
-                if (pxd_dev->fp.fastpath) {
+                if (atomic_read(&pxd_dev->fp.fastpath)) {
                         pxd_dev->fp.active_failover = true;
                         __pxd_add2failQ(pxd_dev, head);
                         cleanup = true;
@@ -748,7 +748,7 @@ void pxd_bio_make_request_entryfn(struct request_queue *q, struct bio *bio)
 
         pxd_check_q_congested(pxd_dev);
         read_lock(&pxd_dev->fp.suspend_lock);
-        if (!pxd_dev->fp.fastpath) {
+        if (!atomic_read(&pxd_dev->fp.fastpath)) {
                 atomic_inc(&pxd_dev->fp.nslowPath);
                 pxd_reroute_slowpath(q, bio);
                 read_unlock(&pxd_dev->fp.suspend_lock);

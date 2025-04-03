@@ -21,6 +21,9 @@
 
 /// @file px_fuse/pxd.h
 
+// fastpath specific UT enable flag
+#define TEST_FP_RACE 0
+
 #define PXD_POISON (0xdeadbeef)
 #define PXD_CONTROL_DEV "/dev/pxd/pxd-control"	/**< control device prefix */
 #define PXD_DEV  	"pxd/pxd"		/**< block device prefix */
