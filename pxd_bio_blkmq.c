@@ -577,6 +577,7 @@ static void pxd_io_failover(struct kthread_work *work) {
         spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 
         if (cleanup) {
+                trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_IOFAILURE);
                 rc = pxd_initiate_failover(pxd_dev);
                 // If userspace cannot be informed of a failover event, force
                 // abort all IO.
