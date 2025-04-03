@@ -339,7 +339,14 @@ enum {
 	TRANSITION_REISSUE_FAILQ,
 	TRANSITION_PXD_IO_FAILOVER
 };
+
+enum {
+	FAILOVER_REASON_IOFAILURE = 0,
+	FAILOVER_REASON_USERSPACE
+};
 #endif /* TRACE_ENUM_DEFINED */
+
+
 
 TRACE_EVENT(
 	pxd_reroute_slowpath_transition,
@@ -514,6 +521,61 @@ TRACE_EVENT(
 	TP_printk(
 		"status %d eintr %d",
 		__entry->status, __entry->eintr)
+);
+
+TRACE_EVENT(
+	pxd_initiate_failover,
+	TP_PROTO(uint64_t dev_id, int minor, int reason),
+	TP_ARGS(dev_id, minor, reason),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(int, reason)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->reason = reason
+	),
+	TP_printk(
+		"dev_id %llu minor %d reason %d",
+		__entry->dev_id, __entry->minor, __entry->reason)
+);
+
+TRACE_EVENT(
+	pxd_initiate_fallback,
+	TP_PROTO(uint64_t dev_id, int minor),
+	TP_ARGS(dev_id, minor),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor
+	),
+	TP_printk(
+		"dev_id %llu minor %d",
+		__entry->dev_id, __entry->minor)
+);
+
+TRACE_EVENT(
+	pxd_ioswitch_complete,
+	TP_PROTO(uint64_t dev_id, int minor, int opcode),
+	TP_ARGS(dev_id, minor, opcode),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(int, opcode)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->opcode = opcode
+	),
+	TP_printk(
+		"dev_id %llu minor %d opcode %d",
+		__entry->dev_id, __entry->minor, __entry->opcode)
 );
 #endif /* _PXD_TP_H */
 
