@@ -376,8 +376,8 @@ TRACE_EVENT(
 	),
 	TP_printk(
 		"dev_id %llu minor %d transition %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x",
-		__entry->dev_id, __entry->minor, __entry->transition, __entry->dir, __entry->op,
-		__entry->offset, __entry->size, __entry->nr_phys_segments,
+		__entry->dev_id, __entry->minor, __entry->transition,
+		__entry->dir, __entry->op, __entry->offset, __entry->size, __entry->nr_phys_segments,
 		__entry->flags)
 );
 
@@ -576,6 +576,21 @@ TRACE_EVENT(
 	TP_printk(
 		"dev_id %llu minor %d opcode %d",
 		__entry->dev_id, __entry->minor, __entry->opcode)
+);
+
+TRACE_EVENT(
+	pxd_close_ctrl_fd,
+	TP_PROTO(int ctx_id),
+	TP_ARGS(ctx_id),
+	TP_STRUCT__entry(
+		__field(int, ctx_id)
+	),
+	TP_fast_assign(
+		__entry->ctx_id = ctx_id
+	),
+	TP_printk(
+		"closed control fd for px : %d",
+		__entry->ctx_id)
 );
 #endif /* _PXD_TP_H */
 
