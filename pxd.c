@@ -11,6 +11,7 @@
 #include <linux/uio.h>
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
+#include <linux/delay.h>
 
 #if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION) && defined(__EL8__)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
@@ -1053,7 +1054,7 @@ void pxdmq_reroute_slowpath(struct fuse_req *req)
     struct pxd_device *pxd_dev = req->pxd_dev;
     struct request *rq = req->rq;
 
-    BUG_ON(pxd_dev->fp.fastpath);
+    BUG_ON(atomic_read(&pxd_dev->fp.fastpath));
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
     if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
@@ -1112,7 +1113,7 @@ static void pxd_rq_fn(struct request_queue *q)
 {
 		struct fp_root_context *fproot = &req->fproot;
 		fp_root_context_init(fproot);
-		if (pxd_dev->fp.fastpath) {
+		if (atomic_read(&pxd_dev->fp.fastpath)) {
 			// route through fastpath
 			fastpath_queue_work(&fproot->work, false);
 			spin_lock_irq(&pxd_dev->qlock);
@@ -1145,7 +1146,7 @@ void pxdmq_reroute_slowpath(struct fuse_req *req)
     struct pxd_device *pxd_dev = req->pxd_dev;
     struct request *rq = req->rq;
 
-    BUG_ON(pxd_dev->fp.fastpath);
+    BUG_ON(atomic_read(&pxd_dev->fp.fastpath));
 
     if (pxd_request(req, blk_rq_bytes(rq), blk_rq_pos(rq) * SECTOR_SIZE,
         pxd_dev->minor, req_op(rq), rq->cmd_flags)) {
@@ -1185,7 +1186,13 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 {
 	struct fp_root_context *fproot = &req->fproot;
 	fp_root_context_init(fproot);
-	if (pxd_dev->fp.fastpath) {
+	if (atomic_read(&pxd_dev->fp.fastpath)) {
+
+#if TEST_FP_RACE
+		// increase the race window
+		printk(KERN_INFO "sleeping for 6 seconds after reading pxd->fp.fastpath as true\n");
+		msleep(6000);
+#endif
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
@@ -1846,7 +1853,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.suspend = 0;
 		// resume from userspace IO suspends after px restarts
 		pxd_request_resume(pxd_dev);
-		if (pxd_dev->fp.fastpath) id.fastpath = 1;
+		if (atomic_read(&pxd_dev->fp.fastpath)) id.fastpath = 1;
 		if (copy_to_iter(&id, sizeof(id), iter) != sizeof(id)) {
 			printk(KERN_ERR "%s: copy dev id error copied %ld\n", __func__,
 				copied);
@@ -2063,7 +2070,7 @@ static ssize_t pxd_fastpath_state(struct device *dev,
 					 struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	return sprintf(buf, "%d\n", pxd_dev->fp.fastpath);
+	return sprintf(buf, "%d\n", atomic_read(&pxd_dev->fp.fastpath));
 }
 
 static char* __strtok_r(char *src, const char delim, char **saveptr) {

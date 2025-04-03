@@ -36,7 +36,7 @@ struct pxd_fastpath_extension {
 #else
 	rwlock_t suspend_lock;
 #endif
-	bool fastpath;
+	atomic_t fastpath;
 	int nfd;
 	struct file *file[MAX_PXD_BACKING_DEVS];
 	struct pxd_sync_ws syncwi[MAX_PXD_BACKING_DEVS];

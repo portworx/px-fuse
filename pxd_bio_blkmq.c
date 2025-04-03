@@ -551,7 +551,7 @@ static void pxd_io_failover(struct kthread_work *work) {
 
         spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
         if (!pxd_dev->fp.active_failover) {
-                if (pxd_dev->fp.fastpath) {
+                if (atomic_read(&pxd_dev->fp.fastpath)) {
                         pxd_dev->fp.active_failover = true;
                         list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
                         cleanup = true;
@@ -764,10 +764,40 @@ void fp_handle_io(struct kthread_work *work) {
 #else
         blk_status_t r;
 #endif
+        // ensure that fastpath is still active, otherwise
+        // reroute to native path
+        // the order of operations matter here
+        // 1. disableFastPath sets pxd_dev->fp.fastpath to false
+        // 2. disableFastPath calls fastpath_flush_work()
+        // If the IO is in a state where it checked pxd_dev->fp.fastpath to true
+        // in pxd_queue_rq but before it calls fastpath_queue_work, the following
+        // scenarios can happen (and in all scenarios, the IO would be rerouted to native path)
+        // 1. disableFastPath completes, the IO on getting queued to fastpath
+        // kthread would be rerouted
+        // 2. disableFastPath doesn't complete the flush and the IO gets scheduled
+        // on a kthread that hasn't yet been flushed => IO would be rerouted to
+        // native path
+        // 3. disableFastPath doesn't complete the flush and the IO gets scheduled
+        // on a kthread that has been flushed => IO would be rerouted to native path
+        if (!atomic_read(&pxd_dev->fp.fastpath)) {
+                pxdmq_reroute_slowpath(fproot_to_fuse_request(fproot));
+                return;
+        }
+
+        // if an IO is here at the time of disableFastPath
+        // i.e it has read that pxd_dev->fp.fastpath is true
+        // then it is okay for it to be continued via fastpath
+        // since the fastpath fd would still be valid until this IO completes
+        // as part of fastpath_flush_work()
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+#if TEST_FP_RACE
+        // increase the race window
+        printk(KERN_INFO "sleeping for 6 seconds after reading pxd->fp.fastpath as true in %s\n", __func__);
+        msleep(6000);
+#endif
         r = clone_and_map(fproot);
 #ifndef __PX_BLKMQ__
         if (r != 0) {
