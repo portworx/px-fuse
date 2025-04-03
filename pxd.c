@@ -2474,6 +2474,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
+	trace_pxd_close_ctrl_fd(ctx->id);
 	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
 		ctx->open_seq);
 	return 0;
