@@ -910,6 +910,8 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	printk("device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.h.opcode, status);
 
+	trace_pxd_ioswitch_complete(pxd_dev->dev_id, pxd_dev->minor, req->in.h.opcode);
+
 	if (req->in.h.opcode == PXD_FAILOVER_TO_USERSPACE) {
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
@@ -998,6 +1000,8 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
 	}
+
+	trace_pxd_initiate_fallback(pxd_dev->dev_id, pxd_dev->minor);
 
 	rc = pxd_request_suspend_internal(pxd_dev, true, false);
 	if (rc) {
