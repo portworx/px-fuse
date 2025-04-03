@@ -255,7 +255,7 @@ TRACE_EVENT(
 		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x bio %p bio_tail %p",
 		__entry->dev_id, __entry->minor, __entry->dir, __entry->op,
 		__entry->offset, __entry->size, __entry->nr_phys_segments,
-		__entry->flags, __entry->bio, __entry->bio_tail)	
+		__entry->flags, __entry->bio, __entry->bio_tail)
 );
 
 TRACE_EVENT(
@@ -292,7 +292,7 @@ TRACE_EVENT(
 		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u discard = %d flags %x status %d",
 		__entry->dev_id, __entry->minor, __entry->dir, __entry->op,
 		__entry->offset, __entry->size, __entry->nr_phys_segments, __entry->discard,
-		__entry->flags, __entry->status)	
+		__entry->flags, __entry->status)
 );
 
 TRACE_EVENT(
@@ -332,6 +332,48 @@ TRACE_EVENT(
 		__entry->rq_op, __entry->rq_offset, __entry->rq_size, __entry->status, __entry->bio, __entry->biotail)
 );
 
+#ifndef TRACE_ENUM_DEFINED
+#define TRACE_ENUM_DEFINED
+enum {
+	TRANSITION_FP_HANDLE_IO = 0,
+	TRANSITION_REISSUE_FAILQ,
+	TRANSITION_PXD_IO_FAILOVER
+};
+#endif /* TRACE_ENUM_DEFINED */
+
+TRACE_EVENT(
+	pxd_reroute_slowpath_transition,
+	TP_PROTO(uint64_t dev_id, int minor, int transition, int dir, uint32_t op, uint64_t offset, uint64_t size, unsigned short nr_phys_segments, uint32_t flags),
+	TP_ARGS(dev_id, minor, transition, dir, op, offset, size, nr_phys_segments, flags),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(int, transition)
+		__field(int, dir)
+		__field(uint32_t, op)
+		__field(uint64_t, offset)
+		__field(uint64_t, size)
+		__field(unsigned short, nr_phys_segments)
+		__field(uint32_t, flags)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->transition = transition,
+		__entry->dir = dir,
+		__entry->op = op,
+		__entry->offset = offset,
+		__entry->size = size,
+		__entry->nr_phys_segments = nr_phys_segments,
+		__entry->flags = flags
+	),
+	TP_printk(
+		"dev_id %llu minor %d transition %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x",
+		__entry->dev_id, __entry->minor, __entry->transition, __entry->dir, __entry->op,
+		__entry->offset, __entry->size, __entry->nr_phys_segments,
+		__entry->flags)
+);
+
 TRACE_EVENT(
 	pxd_rq_fn,
 	TP_PROTO(uint64_t dev_id, int minor, int dir, uint32_t op,
@@ -362,16 +404,17 @@ TRACE_EVENT(
 		"dev_id %llu minor %d dir %d op %u offset %llu size %llu nr_phys_segments %u flags %x",
 		__entry->dev_id, __entry->minor, __entry->dir, __entry->op,
 		__entry->offset, __entry->size, __entry->nr_phys_segments,
-		__entry->flags)	
+		__entry->flags)
 );
 
 TRACE_EVENT(
 	pxd_request,
 	TP_PROTO(
-		uint64_t unique, uint32_t size, uint64_t off,
+		uint64_t dev_id, uint64_t unique, uint32_t size, uint64_t off,
 		uint32_t minor, uint32_t op, uint32_t flags),
-	TP_ARGS(unique, size, off, minor, op, flags),
+	TP_ARGS(dev_id, unique, size, off, minor, op, flags),
 	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
 		__field(uint64_t, unique)
 		__field(uint32_t, size)
 		__field(uint64_t, off)
@@ -380,6 +423,7 @@ TRACE_EVENT(
 		__field(uint32_t, flags)
 	),
 	TP_fast_assign(
+		__entry->dev_id = dev_id,
 		__entry->unique = unique,
 		__entry->size = size,
 		__entry->off = off,
@@ -388,9 +432,39 @@ TRACE_EVENT(
 		__entry->flags = flags
 	),
 	TP_printk(
-		"unique %llu size %u off %llu minor %u op %uflags %x",
-		__entry->unique, __entry->size, __entry->off,
+		"dev_id %llu unique %llu size %u off %llu minor %u op %uflags %x",
+		__entry->dev_id, __entry->unique, __entry->size, __entry->off,
 		__entry->minor, __entry->op, __entry->flags)
+);
+
+TRACE_EVENT(
+	pxd_request_complete,
+	TP_PROTO(uint64_t dev_id, int minor, uint64_t unique, uint64_t offset, uint64_t len, uint32_t op, uint32_t flags, int status),
+	TP_ARGS(dev_id, minor, unique, offset, len, op, flags, status),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(uint64_t, unique)
+		__field(uint64_t, offset)
+		__field(uint64_t, len)
+		__field(uint32_t, op)
+		__field(uint32_t, flags)
+		__field(int, status)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->unique = unique,
+		__entry->offset = offset,
+		__entry->len = len,
+		__entry->op = op,
+		__entry->flags = flags,
+		__entry->status = status
+	),
+	TP_printk(
+		"dev_id %llu minor %d unique %llu offset %llu len %llu op %u flags %x status %d",
+		__entry->dev_id, __entry->minor, __entry->unique, __entry->offset,
+		__entry->len, __entry->op, __entry->flags, __entry->status)
 );
 
 TRACE_EVENT(
