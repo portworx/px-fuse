@@ -18,6 +18,7 @@
 #include "pxd.h"
 #include "pxd_core.h"
 #include "pxd_compat.h"
+#include "pxd_trace.h"
 #include "kiolib.h"
 
 // global fastpath IO work queue
@@ -228,7 +229,7 @@ int fastpath_init(void)
 			}
 		}
 	}
-	// always confirm default 
+	// always confirm default
 	if (fpdefault == NULL) {
 		// fastpath init failed.
 		printk(KERN_ERR"found no online node with online cpus\n");
@@ -359,6 +360,7 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 		printk("device %llu initiated failover\n", pxd_dev->dev_id);
 		// IO path blocked, a future path refresh will take it to native path
 		// enqueue a failover request to userspace on this device.
+		trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_USERSPACE);
 		return pxd_initiate_failover(pxd_dev);
 	case PXD_FALLBACK_TO_KERNEL:
 		// IO path already routed to userspace.
