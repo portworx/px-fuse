@@ -226,6 +226,8 @@ void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
                             "%s: pxd%llu: resuming IO in native path.\n",
                             __func__, pxd_dev->dev_id);
                         atomic_inc(&pxd_dev->fp.nslowPath);
+                        trace_pxd_reroute_slowpath_transition(pxd_dev->dev_id, pxd_dev->minor, TRANSITION_REISSUE_FAILQ, rq_data_dir(req->rq), req_op(req->rq),
+                                blk_rq_pos(req->rq) * SECTOR_SIZE, blk_rq_bytes(req->rq), req->rq->nr_phys_segments, req->rq->cmd_flags);
                         pxdmq_reroute_slowpath(req);
                         continue;
                 }
@@ -584,6 +586,9 @@ static void pxd_io_failover(struct kthread_work *work) {
                                    __func__, pxd_dev->dev_id);
                 atomic_inc(&pxd_dev->fp.nslowPath);
                 clone_cleanup(fproot);
+                trace_pxd_reroute_slowpath_transition(pxd_dev->dev_id, pxd_dev->minor, TRANSITION_PXD_IO_FAILOVER, rq_data_dir(fproot_to_request(fproot)), 
+                        req_op(fproot_to_request(fproot)), blk_rq_pos(fproot_to_request(fproot)) * SECTOR_SIZE, blk_rq_bytes(fproot_to_request(fproot)),
+                        fproot_to_request(fproot)->nr_phys_segments, fproot_to_request(fproot)->cmd_flags);
                 pxdmq_reroute_slowpath(fproot_to_fuse_request(fproot));
         }
 }
@@ -727,6 +732,7 @@ static void _end_clone_bio(struct kthread_work *work)
                 blkrc = -EIO;
 
         if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
+                trace_end_clone_bio(pxd_dev->dev_id, pxd_dev->minor, bio_op(bio), BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio), req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), blkrc, rq->bio, rq->biotail);
                 atomic_inc(&pxd_dev->fp.nerror);
                 pxd_failover_initiate(fproot);
                 return;
