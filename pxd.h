@@ -234,6 +234,7 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
 #define PXD_FEATURE_ATTACH_OPTIMIZED (0x2)
+// supports disabling discards, discard granularity at 2M(large)
 #define PXD_FEATURE_DISCARD_CONTROL (0x4)
 
 static inline
