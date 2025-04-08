@@ -26,6 +26,10 @@
 #include "pxd_compat.h"
 #include "pxd_core.h"
 
+#ifdef CONFIG_BLK_CGROUP
+#include <linux/blk-cgroup.h>
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
 inline bool rq_is_special(struct request *rq) {
         return (req_op(rq) == REQ_OP_DISCARD);
