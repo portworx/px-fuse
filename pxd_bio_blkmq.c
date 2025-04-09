@@ -26,6 +26,10 @@
 #include "pxd_compat.h"
 #include "pxd_core.h"
 
+#ifdef CONFIG_BLK_CGROUP
+#include <linux/blk-cgroup.h>
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
 inline bool rq_is_special(struct request *rq) {
         return (req_op(rq) == REQ_OP_DISCARD);
@@ -410,6 +414,16 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
                 BIO_SET_DEV(clone_bio, bdev);
         clone_bio->bi_private = fproot;
         clone_bio->bi_end_io = end_clone_bio;
+
+#ifdef CONFIG_BLK_CGROUP
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) && defined(__EL8__))
+        if (clone_bio->bi_blkg == NULL)
+        	bio_associate_blkg_from_css(clone_bio, blkcg_root_css);
+#else
+        if (clone_bio->bi_css == NULL)
+        	bio_associate_blkcg(clone_bio, blkcg_root_css);
+#endif
+#endif
 
         atomic_inc(&nclones);
         return clone_bio;
