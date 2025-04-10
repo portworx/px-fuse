@@ -214,10 +214,11 @@ void __pxd_abortfailQ(struct pxd_device *pxd_dev) {
 // no locking needed, @ios is a local list of IO to be reissued.
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
                       int status) {
-        while (!list_empty(ios)) {
-                struct fp_root_context *fproot = list_first_entry(
-                    &pxd_dev->fp.failQ, struct fp_root_context, wait);
-                struct fuse_req *req = fproot_to_fuse_request(fproot);
+        struct fp_root_context *fproot;
+        struct fp_root_context *tmp;
+
+        list_for_each_entry_safe(fproot, tmp, ios, wait) {
+                struct fuse_req* req = fproot_to_fuse_request(fproot);
                 BUG_ON(fproot->magic != FP_ROOT_MAGIC);
                 list_del(&fproot->wait);
                 clone_cleanup(fproot);
@@ -452,8 +453,6 @@ clone_and_map(struct fp_root_context *fproot) {
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
 
-        atomic_inc(&pxd_dev->ncount);
-
 // filter out only supported requests
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
         switch (req_op(rq)) {
@@ -544,6 +543,7 @@ clone_and_map(struct fp_root_context *fproot) {
                 }
         }
 
+        atomic_inc(&pxd_dev->ncount);
         return 0;
 err:
         clone_cleanup(fproot);
@@ -729,6 +729,7 @@ static void _end_clone_bio(struct kthread_work *work)
         if (pxd_dev->fp.force_fail)
                 blkrc = -EIO;
 
+        atomic_dec(&pxd_dev->ncount);
         if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
                 atomic_inc(&pxd_dev->fp.nerror);
                 pxd_failover_initiate(fproot);
@@ -747,7 +748,6 @@ static void _end_clone_bio(struct kthread_work *work)
 #endif
 
         atomic_inc(&pxd_dev->fp.ncomplete);
-        atomic_dec(&pxd_dev->ncount);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)

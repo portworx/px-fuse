@@ -280,12 +280,48 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 	}
 }
 
+#define SYNC_TIMEOUT (60000)
+static int wait_for_sync(struct pxd_device *pxd_dev, bool skipsync)
+{
+        struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+        int i;
+        // assumes fastpath_enabled() is true
+        // and IO is already suspended
+        BUG_ON(!fastpath_enabled(pxd_dev));
+        BUG_ON(!atomic_read(&fp->suspend));
+
+        if (skipsync) return 0;
+
+        if (pxd_sync_work_pending(pxd_dev)) {
+                printk(KERN_INFO "device %llu sync work pending\n", pxd_dev->dev_id);
+                return -EBUSY;
+        }
+
+        atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
+        reinit_completion(&fp->sync_complete);
+        for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+                queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
+        }
+
+        if (!wait_for_completion_timeout(&fp->sync_complete,
+                                                msecs_to_jiffies(SYNC_TIMEOUT))) {
+                // suspend aborted as sync timedout
+                return -EBUSY;
+        }
+
+        for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+                // capture first failure
+                if (fp->syncwi[i].rc) return fp->syncwi[i].rc;
+        }
+
+        return 0;
+}
+
 // shall be called internally during iopath switching.
 int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 		bool skip_flush, bool coe)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
-	int i;
 	int rc;
 
 	if (!fastpath_enabled(pxd_dev)) {
@@ -301,28 +337,9 @@ int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
 
 	if (skip_flush || !fp->fastpath) return 0;
 
-	atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
-	reinit_completion(&fp->sync_complete);
-	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-		queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
-	}
-
-#define SYNC_TIMEOUT (60000)
-	rc = 0;
-	if (!wait_for_completion_timeout(&fp->sync_complete,
-						msecs_to_jiffies(SYNC_TIMEOUT))) {
-		// suspend aborted as sync timedout
-		rc = -EBUSY;
+	rc = wait_for_sync(pxd_dev, skip_flush);
+	if (rc)
 		goto fail;
-	}
-
-	// consolidate responses
-	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-		// capture first failure
-		rc = fp->syncwi[i].rc;
-		if (rc) goto fail;
-	}
-
 	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
 	return 0;
 fail:
@@ -487,7 +504,7 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 
 	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
 			!fastpath_active(pxd_dev)) {
-		pxd_dev->fp.active_failover = false;
+		pxd_dev->fp.nfd = 0;
 		pxd_dev->fp.fastpath = false;
 		return;
 	}
@@ -500,21 +517,23 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 			__func__, pxd_dev->dev_id, PXD_ACTIVE(pxd_dev));
 	}
 
+	if (!skipsync) {
+		int rc;
+		rc = wait_for_sync(pxd_dev, skipsync);
+		if (unlikely(rc) && rc != -EINVAL && rc != -EIO) {
+			printk(KERN_ERR"device %llu sync failed %d, continuing with disable\n",
+					pxd_dev->dev_id, rc);
+		}
+	}
+
 	for (i = 0; i < nfd; i++) {
-		if (fp->file[i]) {
-			if (!skipsync) {
-				int ret = vfs_fsync(fp->file[i], 0);
-				if (unlikely(ret && ret != -EINVAL && ret != -EIO)) {
-					printk(KERN_WARNING"device %llu fsync failed with %d\n", pxd_dev->dev_id, ret);
-				}
-			}
+		if (fp->file[i] != NULL) {
 			filp_close(fp->file[i], NULL);
 			fp->file[i] = NULL;
 		}
 	}
 	fp->nfd = 0;
 	pxd_dev->fp.fastpath = false;
-	pxd_dev->fp.can_failover = false;
 
 	pxd_resume_io(pxd_dev);
 }
