@@ -606,6 +606,11 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 	}
 
 	pxd_suspend_io(pxd_dev);
+	WRITE_ONCE(pxd_dev->fp.fastpath, false);
+	// in pxd_queue_rq, if there are existing readers in the RCU read side critical section
+	// synchronize_rcu will wait for them to end (queue to fastpath kthread)
+	synchronize_rcu();
+	// at this point, all readers would see pxd_dev->fp.fastpath = false
 	fastpath_flush_work();
 
 	if (PXD_ACTIVE(pxd_dev)) {
@@ -629,7 +634,6 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		}
 	}
 	fp->nfd = 0;
-	pxd_dev->fp.fastpath = false;
 
 	pxd_resume_io(pxd_dev);
 }
