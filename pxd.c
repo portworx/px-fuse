@@ -1372,8 +1372,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
+    // given unaligned discards are ignored at replica targets, it cannot be guaranteed zeroes after discard
+    // so never commit to zeroes being returned after a discard.
+    // this flag and behavior got deprecated
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
-	q->limits.discard_zeroes_data = 1;
+    q->limits.discard_zeroes_data = 0;
 #endif
 
 	/* Enable flush support. */
