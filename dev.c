@@ -828,6 +828,7 @@ static int fuse_notify_remove(struct fuse_conn *conn, unsigned int size,
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
+	trace_fuse_notify_remove(remove.dev_id, remove.force);
 	return pxd_remove(conn, &remove);
 }
 

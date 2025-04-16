@@ -400,6 +400,23 @@ TRACE_EVENT(
 		__entry->dev_id, __entry->minor, __entry->exported)
 );
 
+TRACE_EVENT(
+	fuse_notify_remove,
+	TP_PROTO(uint64_t dev_id, bool force),
+	TP_ARGS(dev_id, force),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(bool, force)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->force = force
+	),
+	TP_printk(
+		"dev_id %llu force %d",
+		__entry->dev_id, __entry->force)
+);
+
 #ifndef TRACE_ENUM_DEFINED
 #define TRACE_ENUM_DEFINED
 enum {
