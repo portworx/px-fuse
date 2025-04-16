@@ -578,6 +578,7 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
+	trace_fuse_notify_add_ext(add.dev_id, add.size, add.queue_depth, add.discard_size, add.open_mode, add.enable_fp, add.paths.count);
 	return pxd_add(conn, &add);
 }
 
