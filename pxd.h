@@ -48,8 +48,7 @@
 #define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
-#define PXD_MIN_DISCARD_GRANULARITY		PXD_LBS
-#define PXD_MAX_DISCARD_GRANULARITY		(64 * 1024)
+#define PXD_MAX_DISCARD_GRANULARITY		(2 << 20) /**< 2MiB discard granularity on pxd device to cover all pool behavior */
 
 // use by fastpath for congestion control
 #define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
@@ -235,11 +234,12 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 // No arguments necessary other than opcode
 #define PXD_FEATURE_FASTPATH (0x1)
 #define PXD_FEATURE_ATTACH_OPTIMIZED (0x2)
+#define PXD_FEATURE_DISCARD_CONTROL (0x4)
 
 static inline
 int pxd_supported_features(void)
 {
-    int features = PXD_FEATURE_ATTACH_OPTIMIZED;
+    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif
