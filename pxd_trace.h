@@ -332,6 +332,74 @@ TRACE_EVENT(
 		__entry->rq_op, __entry->rq_offset, __entry->rq_size, __entry->status, __entry->bio, __entry->biotail)
 );
 
+TRACE_EVENT(
+	pxd_fastpath_reset_device,
+	TP_PROTO(uint64_t dev_id, int minor, bool ioswitch_active, uint64_t switch_uid),
+	TP_ARGS(dev_id, minor, ioswitch_active, switch_uid),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(bool, ioswitch_active)
+		__field(uint64_t, switch_uid)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->ioswitch_active = ioswitch_active,
+		__entry->switch_uid = switch_uid
+	),
+	TP_printk(
+		"dev_id %llu minor %d ioswitch_active %d switch_uid %llu, action = %s",
+		__entry->dev_id, __entry->minor, __entry->ioswitch_active, __entry->switch_uid, __entry->ioswitch_active ? "abort IOs" : "no action")
+);
+
+TRACE_EVENT(
+	fuse_notify_add_ext,
+	TP_PROTO(uint64_t dev_id, size_t size, int32_t queue_depth, int32_t discard_size, mode_t open_mode, int enable_fp, int path_count),
+	TP_ARGS(dev_id, size, queue_depth, discard_size, open_mode, enable_fp, path_count),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(size_t, size)
+		__field(int32_t, queue_depth)
+		__field(int32_t, discard_size)
+		__field(mode_t, open_mode)
+		__field(int, enable_fp)
+		__field(int, path_count)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->size = size,
+		__entry->queue_depth = queue_depth,
+		__entry->discard_size = discard_size,
+		__entry->open_mode = open_mode,
+		__entry->enable_fp = enable_fp,
+		__entry->path_count = path_count
+	),
+	TP_printk(
+		"dev_id %llu size %zu queue_depth %d discard_size %d open_mode %x enable_fp %d path_count %d",
+		__entry->dev_id, __entry->size, __entry->queue_depth, __entry->discard_size,
+		__entry->open_mode, __entry->enable_fp, __entry->path_count)
+);
+
+TRACE_EVENT(
+	pxd_export,
+	TP_PROTO(uint64_t dev_id, int minor, bool exported),
+	TP_ARGS(dev_id, minor, exported),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(bool, exported)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->exported = exported
+	),
+	TP_printk(
+		"dev_id %llu minor %d exported %d",
+		__entry->dev_id, __entry->minor, __entry->exported)
+);
+
 #ifndef TRACE_ENUM_DEFINED
 #define TRACE_ENUM_DEFINED
 enum {
