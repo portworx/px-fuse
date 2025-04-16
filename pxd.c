@@ -1590,6 +1590,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	}
 
 	spin_lock(&pxd_dev->lock);
+	trace_pxd_export(pxd_dev->dev_id, pxd_dev->minor, pxd_dev->exported);
 	if (pxd_dev->exported) {
 		spin_unlock(&pxd_dev->lock);
 		return 0;
