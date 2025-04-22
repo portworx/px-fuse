@@ -486,30 +486,34 @@ TRACE_EVENT(
 	pxd_request,
 	TP_PROTO(
 		uint64_t dev_id, uint64_t unique, uint32_t size, uint64_t off,
-		uint32_t minor, uint32_t op, uint32_t flags),
-	TP_ARGS(dev_id, unique, size, off, minor, op, flags),
-	TP_STRUCT__entry(
-		__field(uint64_t, dev_id)
-		__field(uint64_t, unique)
-		__field(uint32_t, size)
-		__field(uint64_t, off)
-		__field(uint32_t, minor)
-		__field(uint32_t, op)
-		__field(uint32_t, flags)
-	),
-	TP_fast_assign(
-		__entry->dev_id = dev_id,
-		__entry->unique = unique,
-		__entry->size = size,
-		__entry->off = off,
-		__entry->minor = minor,
-		__entry->op = op,
-		__entry->flags = flags
-	),
-	TP_printk(
-		"dev_id %llu unique %llu size %u off %llu minor %u op %uflags %x",
-		__entry->dev_id, __entry->unique, __entry->size, __entry->off,
-		__entry->minor, __entry->op, __entry->flags)
+		uint32_t minor, uint32_t req_op, uint32_t req_flags, uint32_t pxd_op, uint32_t pxd_flags),
+		TP_ARGS(dev_id, unique, size, off, minor, req_op, req_flags, pxd_op, pxd_flags),
+		TP_STRUCT__entry(
+			__field(uint64_t, dev_id)
+			__field(uint64_t, unique)
+			__field(uint32_t, size)
+			__field(uint64_t, off)
+			__field(uint32_t, minor)
+			__field(uint32_t, req_op)
+			__field(uint32_t, req_flags)
+			__field(uint32_t, pxd_op)
+			__field(uint32_t, pxd_flags)
+		),
+		TP_fast_assign(
+			__entry->dev_id = dev_id;
+			__entry->unique = unique;
+			__entry->size = size;
+			__entry->off = off;
+			__entry->minor = minor;
+			__entry->req_op = req_op;
+			__entry->req_flags = req_flags;
+			__entry->pxd_op = pxd_op;
+			__entry->pxd_flags = pxd_flags;
+		),
+		TP_printk(
+			"dev_id %llu unique %llu size %u off %llu minor %u req_op %u req_flags %x pxd_op %u pxd_flags %x",
+			__entry->dev_id, __entry->unique, __entry->size, __entry->off,
+			__entry->minor, __entry->req_op, __entry->req_flags, __entry->pxd_op, __entry->pxd_flags)
 );
 
 TRACE_EVENT(
