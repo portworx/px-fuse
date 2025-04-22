@@ -245,6 +245,7 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
 	req->in.h.unique = fuse_get_unique(fc);
+	trace_pxd_request(req->pxd_dev->dev_id, req->in.h.unique, req->pxd_rdwr_in.size, req->pxd_rdwr_in.offset, req->pxd_dev->minor, req->in.h.opcode, req->pxd_rdwr_in.flags);
 	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	/*

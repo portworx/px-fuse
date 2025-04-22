@@ -825,7 +825,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	int rc;
-	trace_pxd_request(req->pxd_dev->dev_id, req->in.h.unique, size, off, minor, op, flags);
 
 	switch (op) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
@@ -863,7 +862,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags)
 {
 	int rc;
-	trace_pxd_request(req->pxd_dev->dev_id, req->in.h.unique, size, off, minor, flags, flags);
 
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
@@ -1843,12 +1841,15 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	}
 	(void)get_device(&pxd_dev->dev);
 
+	trace_pxd_ioc_update_size(pxd_dev->dev_id, pxd_dev->minor, pxd_dev->size, update_size->size);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #else
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #endif
+	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards

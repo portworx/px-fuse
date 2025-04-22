@@ -513,6 +513,27 @@ TRACE_EVENT(
 );
 
 TRACE_EVENT(
+	pxd_ioc_update_size,
+	TP_PROTO(uint64_t dev_id, int minor, uint64_t old_size, uint64_t new_size),
+	TP_ARGS(dev_id, minor, old_size, new_size),
+	TP_STRUCT__entry(
+		__field(uint64_t, dev_id)
+		__field(int, minor)
+		__field(uint64_t, old_size)
+		__field(uint64_t, new_size)
+	),
+	TP_fast_assign(
+		__entry->dev_id = dev_id,
+		__entry->minor = minor,
+		__entry->old_size = old_size,
+		__entry->new_size = new_size
+	),
+	TP_printk(
+		"dev_id %llu minor %d old_size %llu new_size %llu",
+		__entry->dev_id, __entry->minor, __entry->old_size, __entry->new_size)
+);
+
+TRACE_EVENT(
 	pxd_request_complete,
 	TP_PROTO(uint64_t dev_id, int minor, uint64_t unique, uint64_t offset, uint64_t len, uint32_t op, uint32_t flags, int status),
 	TP_ARGS(dev_id, minor, unique, offset, len, op, flags, status),
