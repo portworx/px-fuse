@@ -1173,7 +1173,7 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	trace_pxd_queue_rq(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
 		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
-		rq->nr_phys_segments, rq->cmd_flags, rq->bio, rq->biotail);
+		rq->nr_phys_segments, rq->cmd_flags, rq->bio, rq->biotail, rq->bio && rq->bio == rq->biotail, rq->bio ? BIO_SECTOR(rq->bio) * SECTOR_SIZE : -1);
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
