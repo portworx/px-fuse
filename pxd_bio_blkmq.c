@@ -334,6 +334,7 @@ static int prep_root_bio(struct fp_root_context *fproot) {
 
         BUG_ON(BIO_SECTOR(bio) != blk_rq_pos(rq));
         BUG_ON(BIO_SIZE(bio) != blk_rq_bytes(rq));
+	BUG_ON(BIO_OP(bio) != REQ_OP(rq));
 
         fproot->bio = bio;
         return 0;
@@ -384,7 +385,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0) || defined(REQ_PREFLUSH)
                 BUG_ON((REQ_OP(rq) & REQ_OP_FLUSH) != REQ_OP_FLUSH);
-                BIO_SET_OP_ATTRS(clone_bio, REQ_OP_FLUSH, REQ_FUA);
+		BIO_SET_OP_ATTRS(clone_bio, REQ_OP_WRITE, REQ_FUA);
 #else
                 BUG_ON((REQ_OP(rq) & REQ_FLUSH) != REQ_FLUSH);
                 BIO_SET_OP_ATTRS(clone_bio, REQ_FLUSH, REQ_FUA);
