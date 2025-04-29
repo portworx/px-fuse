@@ -730,7 +730,7 @@ static void _end_clone_bio(struct kthread_work *work)
                 blkrc = -EIO;
 
         atomic_dec(&pxd_dev->ncount);
-        if (pxd_dev->fp.can_failover && (blkrc == -EIO || blkrc == -ENOLINK)) {
+        if (pxd_dev->fp.can_failover && blkrc < 0) {
                 atomic_inc(&pxd_dev->fp.nerror);
                 pxd_failover_initiate(fproot);
                 return;

@@ -546,7 +546,7 @@ static void pxd_complete_io(struct bio *bio, int error)
         atomic_inc(&pxd_dev->fp.ncomplete);
         atomic_dec(&pxd_dev->ncount);
 
-        if (pxd_dev->fp.can_failover && (blkrc == -EIO || blkrc == -ENOLINK)) {
+        if (pxd_dev->fp.can_failover && blkrc < 0) {
                 atomic_inc(&pxd_dev->fp.nerror);
                 pxd_failover_initiate(pxd_dev, head);
                 pxd_check_q_decongested(pxd_dev);
