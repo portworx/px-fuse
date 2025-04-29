@@ -184,7 +184,7 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
                                     blk_opf_t op_flags)
 {
-  bio->bi_opf = op;
+  bio->bi_opf = op | op_flags;
 }
 
 #endif
