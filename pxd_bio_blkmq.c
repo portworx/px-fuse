@@ -746,7 +746,7 @@ static void _end_clone_bio(struct kthread_work *work)
                 blkrc = -EIO;
 
         atomic_dec(&pxd_dev->ncount);
-        if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
+        if (pxd_dev->fp.can_failover && blkrc < 0) {
                 trace_end_clone_bio(pxd_dev->dev_id, pxd_dev->minor, bio_op(bio), BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio), req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), blkrc, rq->bio, rq->biotail);
                 atomic_inc(&pxd_dev->fp.nerror);
                 pxd_failover_initiate(fproot);
