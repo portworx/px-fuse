@@ -515,9 +515,9 @@ TRACE_EVENT(
 			__entry->pxd_flags = pxd_flags;
 		),
 		TP_printk(
-			"dev_id %llu unique %llu size %u off %llu minor %u req_op %u req_flags %x pxd_op %u pxd_flags %x",
-			__entry->dev_id, __entry->unique, __entry->size, __entry->off,
-			__entry->minor, __entry->req_op, __entry->req_flags, __entry->pxd_op, __entry->pxd_flags)
+			"dev_id %llu minor %u unique %llu off %llu size %u req_op %u req_flags %x pxd_op %u pxd_flags %x",
+			__entry->dev_id, __entry->minor, __entry->unique, __entry->off,
+			__entry->size, __entry->req_op, __entry->req_flags, __entry->pxd_op, __entry->pxd_flags)
 );
 
 TRACE_EVENT(
