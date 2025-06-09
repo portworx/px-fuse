@@ -1275,7 +1275,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
@@ -1344,7 +1344,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__))
 	blk_queue_max_hw_sectors(q, PXD_MAX_IO / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (PXD_MAX_IO / PXD_LBS));
