@@ -48,7 +48,7 @@
 #define PXD_MAX_DEVICES	1024		/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
-#define PXD_MAX_DISCARD_GRANULARITY		(2 << 20) /**< 2MiB discard granularity on pxd device to cover all pool behavior */
+#define PXD_MAX_DISCARD_GRANULARITY		(1 << 20) /**< 1MiB discard granularity on pxd device to cover all pool behavior */
 
 // use by fastpath for congestion control
 #define DEFAULT_CONGESTION_THRESHOLD (PXD_MAX_QDEPTH)
