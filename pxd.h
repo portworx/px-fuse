@@ -45,7 +45,7 @@
 #define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 #define PXD_IOC_DETACH_DEVICE		_IO(PXD_IOCTL_MAGIC, 11)	/* 0x50580b */
 
-#define PXD_MAX_DEVICES	512			/**< maximum number of devices supported */
+#define PXD_MAX_DEVICES	1024		/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
 #define PXD_MAX_DISCARD_GRANULARITY		(1 << 20) /**< 1MiB discard granularity on pxd device to cover all pool behavior */
