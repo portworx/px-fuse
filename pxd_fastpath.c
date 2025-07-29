@@ -26,11 +26,10 @@ static struct workqueue_struct *gwq;
 extern uint32_t pxd_num_fpthreads;
 
 #define MAX_PXFP_WORKERS_PER_NODE (pxd_num_fpthreads) /// keep it power of 2.
-#define MAX_PXFP_WORKERS_PER_NODE_MASK (MAX_PXFP_WORKERS_PER_NODE-1) /// will be a bit mask.
 
 struct pxfpcontext_per_node {
 	bool valid;
-#define MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE (8)
+#define MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE (NR_CPUS)
 	struct kthread_worker *fpworker[MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE];
 };
 struct kthread_worker *fpdefault = NULL;
@@ -70,6 +69,98 @@ static void fastpath_flush_work(void) {
        }
 }
 
+int fastpath_adjust_fpthreads(int new_pxd_num_fpthreads)
+{
+	int old_pxd_num_fpthreads = pxd_num_fpthreads;
+	int node, cpu;
+	int rc = 0;
+
+	if (new_pxd_num_fpthreads > MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE) {
+		printk(KERN_WARNING"pxd_num_fpthreads(%d) over max limit(%d), reset to max\n", new_pxd_num_fpthreads, MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE);
+		new_pxd_num_fpthreads = MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE;
+	}
+	if (new_pxd_num_fpthreads == old_pxd_num_fpthreads) {
+		return 0;
+	}
+
+	if (new_pxd_num_fpthreads == 0) {
+		new_pxd_num_fpthreads = DEFAULT_PXFP_WORKERS_PER_NODE;
+	}
+
+	for_each_online_node(node) {
+		struct pxfpcontext_per_node *c = &pxfpctxt[node];
+		const cpumask_t *cpumask = cpumask_of_node(node);
+		int active;
+
+		if (cpumask_empty(cpumask)) {
+			// NUMA node with no cpu's?! - skip it.
+			printk(KERN_NOTICE"skipping online numa node %d with no attached cpus\n", node);
+			continue;
+		}
+
+		active = 0;
+		// Count already created threads and create more if required
+		for_each_cpu(cpu, cpumask) {
+			struct kthread_worker* worker;
+			if (!cpu_online(cpu)) {
+				continue;
+			}
+
+			if (active == new_pxd_num_fpthreads) {
+				break;
+			}
+
+			// Thread is already created just increment count
+			// While decreasing active will reach new_pxd_num_fpthreads
+			// without creating new threads
+			if (c->fpworker[active] != NULL) {
+				active++;
+				continue;
+			}
+
+			// We need increase num threads, so create more threads
+			printk(KERN_NOTICE"Create thread on numa node %d cpu %d\n", node, cpu);
+			worker = kthread_create_worker_on_cpu(cpu, 0, "pxfpn%dc%d", node, cpu);
+			if (IS_ERR_OR_NULL(worker)) {
+				rc = PTR_ERR(worker);
+				goto out;
+			}
+			c->valid = true;
+			c->fpworker[active++] = worker;
+			if (fpdefault == NULL) {
+				fpdefault = worker;
+			}
+		}
+
+		// If active is less than new_pxd_num_fpthreads,
+		// num cpu is less than new_pxd_num_fpthreads and we cannot create more threads
+		if (active < new_pxd_num_fpthreads) {
+			new_pxd_num_fpthreads = active;
+		}
+	}
+
+	fastpath_map_workers();
+
+	printk(KERN_NOTICE"Updated fpthreads from %d to %d", pxd_num_fpthreads, new_pxd_num_fpthreads);
+	pxd_num_fpthreads = new_pxd_num_fpthreads;
+	return 0;
+
+out:
+	printk(KERN_ERR"fastpath fpthread init failure %d\n", rc);
+	for (node=0; node < MAX_NUMNODES; node++) {
+		struct pxfpcontext_per_node *c = &pxfpctxt[node];
+		if (c->valid) {
+			int i;
+			for (i=pxd_num_fpthreads; i<MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE; i++) {
+				if (c->fpworker[i] != NULL) {
+					kthread_destroy_worker(c->fpworker[i]);
+					c->fpworker[i] = NULL;
+				}
+			}
+		}
+	}
+	return rc;
+}
 
 int fastpath_init(void)
 {
@@ -81,11 +172,6 @@ int fastpath_init(void)
 		printk(KERN_WARNING"pxd_num_fpthreads(%d) over max limit(%d), reset to max\n", MAX_PXFP_WORKERS_PER_NODE, MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE);
 		MAX_PXFP_WORKERS_PER_NODE = MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE;
 	}
-	if (((MAX_PXFP_WORKERS_PER_NODE_MASK) & (MAX_PXFP_WORKERS_PER_NODE)) != 0) {
-		printk(KERN_WARNING"pxd_num_fpthreads(%d) has to be a power of 2, reset to default(%d)\n", pxd_num_fpthreads, DEFAULT_PXFP_WORKERS_PER_NODE);
-		MAX_PXFP_WORKERS_PER_NODE = DEFAULT_PXFP_WORKERS_PER_NODE;
-	}
-
 
 #ifdef __PXD_BIO_MAKEREQ__
 	printk(KERN_INFO"PXD_BIO_MAKEREQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
@@ -124,6 +210,7 @@ int fastpath_init(void)
 			if (!cpu_online(cpu)) {
 				continue;
 			}
+			printk(KERN_NOTICE"Create thread on numa node %d cpu %d\n", node, cpu);
 			worker = kthread_create_worker_on_cpu(cpu, 0, "pxfpn%dc%d", node, cpu);
 			if (IS_ERR_OR_NULL(worker)) {
 				rc = PTR_ERR(worker);
@@ -160,9 +247,10 @@ out:
 		struct pxfpcontext_per_node *c = &pxfpctxt[node];
 		if (c->valid) {
 			int i;
-			for (i=0; i<MAX_PXFP_WORKERS_PER_NODE; i++) {
+			for (i=0; i<MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE; i++) {
 				if (c->fpworker[i] != NULL) {
 					kthread_destroy_worker(c->fpworker[i]);
+					c->fpworker[i] = NULL;
 				}
 			}
 		}
@@ -185,9 +273,10 @@ void fastpath_cleanup(void)
 	for (node=0; node < MAX_NUMNODES; node++) {
 		struct pxfpcontext_per_node *c = &pxfpctxt[node];
 		if (c->valid) {
-			for (i=0; i<MAX_PXFP_WORKERS_PER_NODE; i++) {
+			for (i=0; i<MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE; i++) {
 				if (c->fpworker[i] != NULL) {
 					kthread_destroy_worker(c->fpworker[i]);
+					c->fpworker[i] = NULL;
 				}
 			}
 		}
@@ -780,7 +869,7 @@ void fastpath_queue_work(struct kthread_work* work, bool completion)
 		struct pxfpcontext_per_node *c = &pxfpctxt[node];
 		if (c->valid) {
 			cpuid = balanceIO(c, cpuid, completion);
-			worker = c->fpworker[cpuid & MAX_PXFP_WORKERS_PER_NODE_MASK];
+			worker = c->fpworker[cpuid % MAX_PXFP_WORKERS_PER_NODE];
 		}
 	}
 	kthread_queue_work(worker, work);

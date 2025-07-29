@@ -73,6 +73,8 @@ struct pxd_fastpath_extension {
 int fastpath_init(void);
 void fastpath_cleanup(void);
 
+int fastpath_adjust_fpthreads(int new_pxd_num_fpthreads);
+
 struct workqueue_struct* fastpath_workqueue(void);
 
 struct pxd_update_path_out;
