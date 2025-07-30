@@ -1941,10 +1941,47 @@ static ssize_t pxd_num_fpthreads_store(struct device *dev, struct device_attribu
 	return count;
 }
 
+static ssize_t pxd_timeout_show(struct device *dev,
+			 struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", pxd_timeout_secs);
+}
+
+static ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	uint32_t new_timeout_secs = 0;
+	struct pxd_context *ctx = pxd_dev->ctx;
+
+	if (ctx == NULL)
+		return -ENXIO;
+
+	sscanf(buf, "%u", &new_timeout_secs);
+	if (new_timeout_secs < PXD_TIMER_SECS_MIN ||
+			new_timeout_secs > PXD_TIMER_SECS_MAX) {
+		return -EINVAL;
+	}
+
+	if (!READ_ONCE(ctx->fc.connected)) {
+		cancel_delayed_work_sync(&ctx->abort_work);
+	}
+	spin_lock(&ctx->lock);
+	pxd_timeout_secs = new_timeout_secs;
+	if (!READ_ONCE(ctx->fc.connected)) {
+		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
+	}
+	spin_unlock(&ctx->lock);
+
+	return count;
+}
+
 static DEVICE_ATTR(pxd_num_fpthreads, S_IRUGO|S_IWUSR, pxd_num_fpthreads_show, pxd_num_fpthreads_store);
+static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
 
 static struct attribute *pxd_root_attrs[] = {
 	&dev_attr_pxd_num_fpthreads.attr,
+	&dev_attr_timeout.attr,
 	NULL
 };
 
@@ -1994,41 +2031,6 @@ static ssize_t pxd_minor_show(struct device *dev,
 
 	return sprintf(buf, "%llu\n",
 			(unsigned long long)pxd_dev->minor);
-}
-
-static ssize_t pxd_timeout_show(struct device *dev,
-			 struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%u\n", pxd_timeout_secs);
-}
-
-static ssize_t pxd_timeout_store(struct device *dev, struct device_attribute *attr,
-			   const char *buf, size_t count)
-{
-	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	uint32_t new_timeout_secs = 0;
-	struct pxd_context *ctx = pxd_dev->ctx;
-
-	if (ctx == NULL)
-		return -ENXIO;
-
-	sscanf(buf, "%u", &new_timeout_secs);
-	if (new_timeout_secs < PXD_TIMER_SECS_MIN ||
-			new_timeout_secs > PXD_TIMER_SECS_MAX) {
-		return -EINVAL;
-	}
-
-	if (!READ_ONCE(ctx->fc.connected)) {
-		cancel_delayed_work_sync(&ctx->abort_work);
-	}
-	spin_lock(&ctx->lock);
-	pxd_timeout_secs = new_timeout_secs;
-	if (!READ_ONCE(ctx->fc.connected)) {
-		schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
-	}
-	spin_unlock(&ctx->lock);
-
-	return count;
 }
 
 static ssize_t pxd_active_show(struct device *dev,
@@ -2338,7 +2340,6 @@ static ssize_t pxd_release_store(struct device *dev,
 static DEVICE_ATTR(size, S_IRUGO, pxd_size_show, NULL);
 static DEVICE_ATTR(major, S_IRUGO, pxd_major_show, NULL);
 static DEVICE_ATTR(minor, S_IRUGO, pxd_minor_show, NULL);
-static DEVICE_ATTR(timeout, S_IRUGO|S_IWUSR, pxd_timeout_show, pxd_timeout_store);
 static DEVICE_ATTR(active, S_IRUGO, pxd_active_show, NULL);
 static DEVICE_ATTR(congested, S_IRUGO|S_IWUSR, pxd_congestion_show, pxd_congestion_set);
 static DEVICE_ATTR(fastpath, S_IRUGO|S_IWUSR, pxd_fastpath_state, pxd_fastpath_update);
@@ -2351,7 +2352,6 @@ static struct attribute *pxd_attrs[] = {
 	&dev_attr_size.attr,
 	&dev_attr_major.attr,
 	&dev_attr_minor.attr,
-	&dev_attr_timeout.attr,
 	&dev_attr_active.attr,
 	&dev_attr_congested.attr,
 	&dev_attr_fastpath.attr,
