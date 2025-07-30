@@ -79,6 +79,7 @@ uint32_t pxd_num_contexts_exported = PXD_NUM_CONTEXT_EXPORTED;
 uint32_t pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 uint32_t pxd_detect_zero_writes = 0;
 uint32_t pxd_num_fpthreads = DEFAULT_PXFP_WORKERS_PER_NODE;
+struct mutex sysfs_lock;
 
 module_param(pxd_num_contexts_exported, uint, 0644);
 module_param(pxd_num_contexts, uint, 0644);
@@ -1907,6 +1908,11 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	spin_unlock(&ctx->lock);
 }
 
+static struct pxd_device *dev_to_pxd_dev(struct device *dev)
+{
+	return container_of(dev, struct pxd_device, dev);
+}
+
 static struct bus_type pxd_bus_type = {
 	.name		= "pxd",
 };
@@ -1915,15 +1921,53 @@ static void pxd_root_dev_release(struct device *dev)
 {
 }
 
+static ssize_t pxd_num_fpthreads_show(struct device *dev,
+			 struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", pxd_num_fpthreads);
+}
+
+static ssize_t pxd_num_fpthreads_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	uint32_t new_pxd_num_fpthreads = 0;
+
+	sscanf(buf, "%u", &new_pxd_num_fpthreads);
+
+	mutex_lock(&sysfs_lock);
+	fastpath_adjust_fpthreads(new_pxd_num_fpthreads);
+	mutex_unlock(&sysfs_lock);
+
+	return count;
+}
+
+static DEVICE_ATTR(pxd_num_fpthreads, S_IRUGO|S_IWUSR, pxd_num_fpthreads_show, pxd_num_fpthreads_store);
+
+static struct attribute *pxd_root_attrs[] = {
+	&dev_attr_pxd_num_fpthreads.attr,
+	NULL
+};
+
+static struct attribute_group pxd_root_attr_group = {
+	.attrs = pxd_root_attrs,
+};
+
+static const struct attribute_group *pxd_root_attr_groups[] = {
+	&pxd_root_attr_group,
+	NULL
+};
+
+static struct device_type pxd_root_device_type = {
+	.name		= "pxd",
+	.groups		= pxd_root_attr_groups,
+	.release	= pxd_root_dev_release,
+};
+
 static struct device pxd_root_dev = {
 	.init_name =    "pxd",
 	.release =      pxd_root_dev_release,
+	.type = &pxd_root_device_type,
 };
-
-static struct pxd_device *dev_to_pxd_dev(struct device *dev)
-{
-	return container_of(dev, struct pxd_device, dev);
-}
 
 static ssize_t pxd_size_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
@@ -2368,6 +2412,7 @@ static int pxd_sysfs_init(void)
 {
 	int err;
 
+	mutex_init(&sysfs_lock);
 	err = device_register(&pxd_root_dev);
 	if (err < 0)
 		return err;
@@ -2594,6 +2639,7 @@ static int pxd_init(void)
 		printk(KERN_ERR "pxd: fastpath initialization failed: %d\n", err);
 		goto out_blkdev;
 	}
+
 #ifdef __PX_BLKMQ__
 	printk(KERN_INFO "pxd: blk-mq driver loaded version %s, features %#x\n",
 			gitversion, pxd_supported_features());
