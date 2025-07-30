@@ -62,6 +62,7 @@
 #define PROC_PX_CONTROL		"px"
 #define PROC_PX_TOOL		"pxd"
 #define PROC_PX_UT			"t"
+#define PROC_PX_TEST 		"pxd_test"
 
 /** fuse opcodes */
 enum pxd_opcode {
@@ -302,7 +303,7 @@ struct rdwr_in {
 };
 
 struct rdwr_in_v1 {
-	struct fuse_in_header_v1 in;	/**< fuse header */
+	struct fuse_in_header in;	/**< fuse header */
 	struct pxd_rdwr_in rdwr;	/**< read/write request */
 };
 
