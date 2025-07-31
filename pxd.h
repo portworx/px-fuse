@@ -62,6 +62,7 @@
 #define PROC_PX_CONTROL		"px"
 #define PROC_PX_TOOL		"pxd"
 #define PROC_PX_UT			"t"
+#define PROC_PX_TEST            "pxd_test"
 
 /** fuse opcodes */
 enum pxd_opcode {
