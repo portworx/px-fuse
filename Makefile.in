@@ -180,7 +180,7 @@ install:
 test_clean:
 	@/bin/rm -f test/pxd_test
 
-pxd_test: pxd_test.cc
+pxd_test: test/pxd_test.cc
 	@echo "Building Test ..."
 	g++ -I. -std=c++11 test/pxd_test.cc -lgtest -lboost_iostreams -lpthread -o test/pxd_test
 
