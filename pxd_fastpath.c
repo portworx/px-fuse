@@ -124,7 +124,9 @@ int fastpath_init(void)
 			if (!cpu_online(cpu)) {
 				continue;
 			}
-			worker = kthread_create_worker_on_cpu(cpu, 0, "pxfpn%dc%d", node, cpu);
+			char namefmt[64];
+			snprintf(namefmt, sizeof(namefmt), "pxfpn%dc%d", node, cpu);
+			worker = kthread_create_worker_on_cpu(cpu, 0, namefmt);
 			if (IS_ERR_OR_NULL(worker)) {
 				rc = PTR_ERR(worker);
 				goto out;
