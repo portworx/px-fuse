@@ -2,7 +2,6 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <linux/fuse.h>
 #include <sys/poll.h>
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <sys/uio.h>
@@ -13,6 +12,8 @@
 #include <sys/ioctl.h>
 #include <thread>
 #include <vector>
+#include <fstream>
+#include <algorithm>
 #include "pxd.h"
 #include "fuse.h"
 
@@ -29,9 +30,11 @@ std::string control_device(unsigned int driver_context_id)
 
 class PxdTest : public ::testing::Test {
 protected:
+	bool killed{false};
 	int ctl_fd;		// control file descriptor
 	std::set<uint64_t> added_ids;
 	const size_t write_len = PXD_LBS * 4;
+	const size_t test_off = 4 * 4096;
 
 	PxdTest() : ctl_fd(-1) {}
 	virtual ~PxdTest() {
@@ -43,14 +46,137 @@ protected:
 	virtual void TearDown();
 
 	void dev_add(pxd_add_out &add, int &minor, std::string &name);
+	void dev_add_ext(pxd_add_ext_out &add_ext, int &minor, std::string &name);
+	void dev_export(uint64_t dev_id, const std::string &expected_name);
 	void dev_remove(uint64_t dev_id);
 	int wait_msg(int timeout); // timeout in seconds
 	void read_block(fuse_in_header *in, pxd_rdwr_in *rd);
+	void validate_device_properties(const std::string &device_name, uint64_t expected_discard_granularity = 1048576, uint64_t expected_max_discard_bytes = 1048576);
 
 public:
+	void fail_io(rdwr_in*);
 	void write_thread(const char *name);
 	void read_thread(const char *name);
+	void cleaner();
 };
+
+TEST_F(PxdTest, simple)
+{
+	std::cout << "simple test" << std::endl;
+}
+
+void PxdTest::dev_add_ext(pxd_add_ext_out &add_ext, int &minor, std::string &name)
+{
+    fuse_out_header oh;
+    struct iovec iov[2];
+
+    ASSERT_TRUE(added_ids.find(add_ext.dev_id) == added_ids.end());
+
+    oh.unique = 0;
+    oh.error = PXD_ADD_EXT;
+    oh.len = sizeof(oh) + sizeof(add_ext);
+
+    iov[0].iov_base = &oh;
+    iov[0].iov_len = sizeof(oh);
+    iov[1].iov_base = &add_ext;
+    iov[1].iov_len = sizeof(add_ext);
+
+    ssize_t write_bytes = writev(ctl_fd, iov, 2);
+    ASSERT_GT(write_bytes, 0);
+
+    std::cout << "dev_add_ext: PXD_ADD_EXT completed, wrote " << write_bytes << " bytes" << std::endl;
+    std::cout << "dev_add_ext: device ID = " << add_ext.dev_id << std::endl;
+
+    added_ids.insert(add_ext.dev_id);
+    minor = write_bytes;
+    name = std::string(PXD_DEV_PATH) + std::to_string(add_ext.dev_id);
+
+    dev_export(minor, name);
+    std::cout << "dev_add_ext: expected device path = " << name << std::endl;
+}
+
+void PxdTest::dev_export(uint64_t dev_id, const std::string &expected_name)
+{
+    fuse_out_header oh;
+    struct iovec iov[2];
+
+    oh.unique = 0;
+    oh.error = PXD_EXPORT_DEV;
+    oh.len = sizeof(oh) + sizeof(dev_id);
+
+    iov[0].iov_base = &oh;
+    iov[0].iov_len = sizeof(oh);
+    iov[1].iov_base = &dev_id;
+    iov[1].iov_len = sizeof(dev_id);
+
+    ssize_t write_bytes = writev(ctl_fd, iov, 2);
+    ASSERT_GT(write_bytes, 0);
+
+    std::cout << "dev_export: PXD_EXPORT completed, wrote " << write_bytes << " bytes" << std::endl;
+    std::cout << "dev_export: device ID = " << dev_id << std::endl;
+    std::cout << "dev_export: expected device path = " << expected_name << std::endl;
+
+    // Wait for device file to appear
+    for (int i = 0; i < 10; i++) {
+        sleep(1);
+	if (access(expected_name.c_str(), F_OK) == 0) {
+            std::cout << "dev_export: device file appeared after " << (i+1) << " seconds" << std::endl;
+            return;
+        }
+        std::cout << "dev_export: waiting for device file... (" << (i+1) << "/10)" << std::endl;
+    }
+
+    std::cout << "dev_export: WARNING - device file never appeared!" << std::endl;
+}
+
+void PxdTest::validate_device_properties(const std::string &device_name,
+                                        uint64_t expected_discard_granularity,
+                                        uint64_t expected_max_discard_bytes)
+{
+	std::cout << "validating pxd device: " << device_name << std::endl;
+
+	// Convert device name to sysfs path format
+	std::string sysfs_name = device_name;
+	// /dev/pxd/pxd123 -> pxd!pxd123
+	if (sysfs_name.find("/dev/pxd/") == 0) {
+		sysfs_name = sysfs_name.substr(9); // Remove "/dev/pxd/"
+		sysfs_name = "pxd!" + sysfs_name;
+	}
+
+	std::string sysfs_path = "/sys/block/" + sysfs_name + "/queue/";
+	// Helper lambda to read sysfs file and return value
+	auto read_sysfs_value = [](const std::string &path) -> uint64_t {
+		std::cout << "reading sysfs path: " << path << std::endl;
+		std::ifstream file(path);
+		EXPECT_TRUE(file.is_open()) << "Failed to open: " << path;
+		uint64_t value;
+		file >> value;
+		EXPECT_TRUE(file.good()) << "Failed to read from: " << path;
+		return value;
+	};
+	// Validate rotational (should be 1 for traditional spinning disk behavior)
+	// unstable across distros RHEL has it off, while others on
+	// EXPECT_EQ(1, read_sysfs_value(sysfs_path + "rotational"));
+	// Validate block sizes (all should be 4096)
+	EXPECT_EQ(4096, read_sysfs_value(sysfs_path + "minimum_io_size"));
+	EXPECT_EQ(4096, read_sysfs_value(sysfs_path + "optimal_io_size"));
+	EXPECT_EQ(4096, read_sysfs_value(sysfs_path + "logical_block_size"));
+	EXPECT_EQ(4096, read_sysfs_value(sysfs_path + "physical_block_size"));
+
+	// Validate segment properties
+	EXPECT_EQ(256, read_sysfs_value(sysfs_path + "max_segments"));
+	EXPECT_EQ(524288, read_sysfs_value(sysfs_path + "max_segment_size"));
+
+	// Validate discard properties (configurable)
+	EXPECT_EQ(expected_discard_granularity, read_sysfs_value(sysfs_path + "discard_granularity"));
+	EXPECT_EQ(expected_max_discard_bytes, read_sysfs_value(sysfs_path + "discard_max_bytes"));
+	EXPECT_EQ(1, read_sysfs_value(sysfs_path + "max_discard_segments"));
+
+	// Validate other properties
+	EXPECT_EQ(1, read_sysfs_value(sysfs_path + "fua"));
+	EXPECT_EQ(128, read_sysfs_value(sysfs_path + "nr_requests"));
+	EXPECT_EQ(128, read_sysfs_value(sysfs_path + "read_ahead_kb"));
+}
 
 void PxdTest::SetUp()
 {
@@ -110,6 +236,9 @@ void PxdTest::dev_add(pxd_add_out &add, int &minor, std::string &name)
 
 	minor = write_bytes;
 	name = std::string(PXD_DEV_PATH) + std::to_string(add.dev_id);
+
+	dev_export(minor, name);
+	validate_device_properties(name, 1024*1024, 1024*1024);
 }
 
 int PxdTest::wait_msg(int timeout_secs)
@@ -122,21 +251,20 @@ int PxdTest::wait_msg(int timeout_secs)
 
 	ret = poll(&fds, 1, timeout_secs * 1000);
 
-	switch (ret) {
-	case 1:
-		return 0;
-	case 0:
-		return -ETIMEDOUT;
-	default:
-		return -errno;
-	}
+	if (ret > 0) return 0;
+	if (ret == 0) return -ETIMEDOUT;
+
+	// should never arise?!
+	ret = -errno;
+	EXPECT_GE(ret, 0);
+	return ret;
 }
 
 static ::testing::AssertionResult verify_pattern(void *buf, size_t len)
 {
-	uint64_t *d = (uint64_t *)buf;
-	for (size_t i = 0; i < len / sizeof(uint64_t); ++i) {
-		if (d[i] != i) {
+	uint8_t *d = (uint8_t *)buf;
+	for (size_t i = 0; i < len; ++i) {
+		if (d[i] != (i % UINT8_MAX)) {
 			return ::testing::AssertionFailure() << "at " <<
 					i << " val " << d[i];
 		}
@@ -144,11 +272,11 @@ static ::testing::AssertionResult verify_pattern(void *buf, size_t len)
 	return ::testing::AssertionSuccess();
 }
 
-static std::vector<uint64_t> make_pattern(size_t size)
+static std::vector<uint8_t> make_pattern(size_t size)
 {
-	std::vector<uint64_t> v(size / sizeof(uint64_t));
+	std::vector<uint8_t> v(size);
 	for (size_t i = 0; i < v.size(); ++i)
-		v[i] = i;
+		v[i] = i % UINT8_MAX;
 	return v;
 }
 
@@ -172,9 +300,12 @@ void PxdTest::read_block(fuse_in_header *hdr, pxd_rdwr_in *req)
 	char buf[req->size];
 	size_t ret = 0;
 
+
+	fprintf(stderr, "request opc(%d) offset (%ld) len (%d)", hdr->opcode, req->offset, req->size);
+
 	// Setup request header and payload
 	fuse_notify_header oh(PXD_READ_DATA, sizeof(pxd_read_data_out) + iovlen);
-	pxd_read_data_out rd_out = {hdr->unique, iovcnt, (uint32_t)req->offset};
+	pxd_read_data_out rd_out = {hdr->unique, iovcnt, 0};
 
 	memset(buf, 0, req->size);
 	iov[0].iov_base = buf;
@@ -191,23 +322,37 @@ void PxdTest::read_block(fuse_in_header *hdr, pxd_rdwr_in *req)
 
 void PxdTest::write_thread(const char *name)
 {
-	std::vector<uint64_t> v(make_pattern(write_len));
+	std::vector<uint8_t> v(make_pattern(write_len));
 	boost::iostreams::file_descriptor dev_fd(name);
 
-	ssize_t write_bytes = write(dev_fd.handle(), v.data(), write_len);
+	ssize_t write_bytes = pwrite(dev_fd.handle(), v.data(), write_len, test_off);
 	ASSERT_EQ(write_bytes, write_len);
 	fprintf(stderr, "%s: bytes written: %lu\n", __func__, write_bytes);
 }
 
 void PxdTest::read_thread(const char *name)
 {
-	std::vector<uint64_t> v(make_pattern(write_len));
+	std::vector<uint8_t> v(make_pattern(write_len));
 	boost::iostreams::file_descriptor dev_fd(name);
 
+	// explicitly read non-zero offset
 	fprintf(stderr, "%s: submit read req: size: %lu\n", __func__, write_len);
-	ssize_t read_bytes = read(dev_fd.handle(), v.data(), write_len);
+	ssize_t read_bytes = pread(dev_fd.handle(), v.data(), write_len, test_off);
 	fprintf(stderr, "%s: bytes read req: %lu\n", __func__, read_bytes);
 	ASSERT_EQ(read_bytes, write_len);
+}
+
+
+void PxdTest::cleaner()
+{
+	struct rdwr_in rdwr;
+        // Now read in the request from kernel
+        while (!killed) {
+                size_t ret = wait_msg(1);
+		if (ret == -ETIMEDOUT) { sleep(1); continue; }
+                size_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
+		fail_io(&rdwr);
+        }
 }
 
 void PxdTest::dev_remove(uint64_t dev_id)
@@ -216,6 +361,12 @@ void PxdTest::dev_remove(uint64_t dev_id)
 	fuse_out_header oh;
 	struct iovec iov[2];
 
+	std::thread cleaner(&PxdTest::cleaner, this);
+	sleep(2);
+	killed = true;
+	cleaner.join();
+	killed = false;
+	
 	while (1) {
 		oh.unique = 0;
 		oh.error = PXD_REMOVE;
@@ -239,6 +390,7 @@ void PxdTest::dev_remove(uint64_t dev_id)
 	}
 
 	added_ids.erase(dev_id);
+	sleep(10);
 }
 
 TEST_F(PxdTest, device_size)
@@ -262,7 +414,30 @@ TEST_F(PxdTest, device_size)
 	ASSERT_EQ(0, ret);
 	ASSERT_EQ(dev_size, target_dev_size);
 
+	dev_fd.close();
+
 	dev_remove(add.dev_id);
+}
+
+void PxdTest::fail_io(struct rdwr_in *rdwr)
+{
+	struct pxd_rdwr_in *req;
+	fuse_out_header oh;
+	struct iovec iov[1];
+
+        req = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
+
+        // Reply to the kernel
+        oh.len = sizeof(oh);
+        oh.error = -EIO;
+        oh.unique = rdwr->in.unique;
+        iov[0].iov_base = &oh;
+        iov[0].iov_len = sizeof(oh);
+
+        fprintf(stderr, "%s: opc (%d) reply to kernel: status: %d iovcnt: %d\n",
+                __func__, rdwr->in.opcode, oh.error, 1);
+        size_t ret = writev(ctl_fd, iov, 1);
+	ASSERT_GE(ret, 0);
 }
 
 TEST_F(PxdTest, write)
@@ -290,22 +465,25 @@ TEST_F(PxdTest, write)
 	// Now read in the request from kernel
 	while (1) {
 		int ret = wait_msg(1);
-		ASSERT_EQ(0, ret);
+		if (ret == -ETIMEDOUT) { sleep(1); continue; }
+		ASSERT_EQ(ret, 0);
 
 		read_bytes = read(ctl_fd, msg_buf, sizeof(msg_buf));
 		rdwr = reinterpret_cast<rdwr_in *>(msg_buf);
+		wr = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
 
-		if (rdwr->in.opcode == PXD_WRITE) {
+		if (rdwr->in.opcode == PXD_WRITE && rdwr->rdwr.offset == test_off) {
 			read_block(&rdwr->in, reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr));
 			break;
+		} else {
+			fail_io(rdwr);
 		}
 	}
 
 	// Process the write request
-	wr = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
 	ASSERT_EQ(rdwr->in.opcode, PXD_WRITE);
-	ASSERT_EQ(wr->minor, minor);
-	ASSERT_EQ(wr->offset, 0);
+	ASSERT_EQ(wr->dev_minor, minor);
+	ASSERT_EQ(wr->offset, test_off);
 	ASSERT_EQ(wr->size, write_len);
 	
 	// Reply to the kernel
@@ -340,7 +518,7 @@ TEST_F(PxdTest, read)
 	add.dev_id = 1;
 	add.size = 1024 * 1024;
 	add.queue_depth = 128;
-	add.discard_size = PXD_LBS;
+	add.discard_size = PXD_MAX_DISCARD_GRANULARITY;
 	dev_add(add, minor, name);
 
 	// Start a thread to perform reads on the attached device
@@ -349,25 +527,28 @@ TEST_F(PxdTest, read)
 	// Now read in the request from kernel
 	while (1) {
 		int ret = wait_msg(1);
-		ASSERT_EQ(0, ret);
+		if (ret == -ETIMEDOUT) { sleep(1); continue; }
+		ASSERT_EQ(ret, 0);
 
 		read_bytes = read(ctl_fd, msg_buf, sizeof(msg_buf));
 		rdwr = reinterpret_cast<rdwr_in *>(msg_buf);
+		rd = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
 
-		if (rdwr->in.opcode == PXD_READ) {
+		if (rdwr->in.opcode == PXD_READ && rd->offset == test_off) {
 			break;
+		} else {
+			fail_io(rdwr);
 		}
 	}
 
 	// Process the read request
-	rd = reinterpret_cast<pxd_rdwr_in *>(&rdwr->rdwr);
 	ASSERT_EQ(rdwr->in.opcode, PXD_READ);
-	ASSERT_EQ(rd->minor, minor);
-	ASSERT_EQ(rd->offset, 0);
+	ASSERT_EQ(rd->dev_minor, minor);
+	ASSERT_EQ(rd->offset, test_off);
 	//XXX: for some reason read req size we recieve here
 	// is greater than what read_thread issued. Ignore it
 	// for now and respond with the new size.
-	//ASSERT_EQ(rd->size, write_len);
+	ASSERT_EQ(rd->size, write_len);
 
 	// Reply to the kernel
 	iovcnt = rd->size / PXD_LBS;
