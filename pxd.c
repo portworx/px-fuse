@@ -1659,7 +1659,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	spin_unlock(&pxd_dev->lock);
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
-	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
 #else
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
