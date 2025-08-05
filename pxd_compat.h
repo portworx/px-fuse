@@ -22,7 +22,17 @@
 #define HAVE_BVEC_ITER
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+#define BLK_QUEUE_FLUSH(q)  q->limits.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0) || defined(REQ_PREFLUSH)
+#define BLK_QUEUE_FLUSH(q) \
+       blk_queue_write_cache(q, true, true)
+#else
+#define BLK_QUEUE_FLUSH(q) \
+       blk_queue_flush(q, REQ_FLUSH | REQ_FUA)
+#endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
 #define BLK_QUEUE_FLUSH(q) \
 	q->limits.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0) || defined(REQ_PREFLUSH)
@@ -180,13 +190,20 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 #endif
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 3)
 static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
                                     blk_opf_t op_flags)
 {
   bio->bi_opf = op | op_flags;
 }
-
+#endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
+static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
+                                    blk_opf_t op_flags)
+{
+  bio->bi_opf = op | op_flags;
+}
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0)

@@ -1305,7 +1305,11 @@ const struct file_operations fuse_dev_operations = {
 #else
 const struct file_operations fuse_dev_operations = {
 	.owner		= THIS_MODULE,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,0,0)
 	.llseek		= no_llseek,
+#else
+	.llseek         = NULL,
+#endif
 	.read_iter	= fuse_dev_read_iter,
 	.splice_read	= fuse_dev_splice_read,
 	.write_iter	= fuse_dev_write_iter,

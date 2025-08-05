@@ -1213,7 +1213,7 @@ static const struct blk_mq_ops pxd_mq_ops = {
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_BLKMQ__ */
 
-static int pxd_init_disk(struct pxd_device *pxd_dev)
+static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_flag)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
@@ -1265,7 +1265,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+#endif
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
 
@@ -1276,7 +1278,26 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+	  struct queue_limits lim = {
+		  .logical_block_size = PXD_LBS,
+		  .physical_block_size = PXD_LBS,
+		  .max_segment_size = SEGMENT_SIZE,
+		  .max_segments = PXD_MAX_IO / PXD_LBS,
+		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
+		  .discard_alignment = PXD_MAX_DISCARD_GRANULARITY,
+		  .discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
+		  .io_min = PXD_LBS,
+		  .io_opt = PXD_LBS,
+		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE
+	  };
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
+#else
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
+#endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
@@ -1345,7 +1366,17 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__))
+#if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9,6) && LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
+	blk_queue_max_hw_sectors(q, PXD_MAX_IO / SECTOR_SIZE);
+	blk_queue_max_segment_size(q, SEGMENT_SIZE);
+	blk_queue_max_segments(q, (PXD_MAX_IO / PXD_LBS));
+	blk_queue_io_min(q, PXD_LBS);
+	blk_queue_io_opt(q, PXD_LBS);
+	blk_queue_logical_block_size(q, PXD_LBS);
+	blk_queue_physical_block_size(q, PXD_LBS);
+#endif
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__))
 	blk_queue_max_hw_sectors(q, PXD_MAX_IO / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (PXD_MAX_IO / PXD_LBS));
@@ -1393,7 +1424,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	pxd_dev->disk = disk;
 
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
+	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#else
 	blk_mq_freeze_queue(q);
+#endif
 #endif
 
 	return 0;
@@ -1571,6 +1606,7 @@ out_module:
 
 ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
+	unsigned int blk_mq_queue_flag = 0;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 	int err = 0;
@@ -1591,7 +1627,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		goto cleanup;
 	}
 
-	err = pxd_init_disk(pxd_dev);
+	err = pxd_init_disk(pxd_dev, &blk_mq_queue_flag);
 	if (err) {
 		module_put(THIS_MODULE);
 		goto cleanup;
@@ -1623,7 +1659,11 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
+#else
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
 #endif
 	return 0;
 cleanup:
@@ -2438,7 +2478,8 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	if (strcmp(current->comm, PROC_PX_STORAGE) != 0 &&
 		strcmp(current->comm, PROC_PX_CONTROL) != 0 &&
 		strcmp(current->comm, PROC_PX_UT) != 0 &&
-		strcmp(current->comm, PROC_PX_TOOL) != 0) {
+		strcmp(current->comm, PROC_PX_TOOL) != 0 &&
+		strcmp(current->comm, PROC_PX_TEST) != 0) {
 		printk_ratelimited(KERN_INFO "%s: invalid access comm=%s",
 			__func__, current->comm);
 		return -EACCES;

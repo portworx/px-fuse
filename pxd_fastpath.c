@@ -74,6 +74,7 @@ int fastpath_adjust_fpthreads(int new_pxd_num_fpthreads)
 	int old_pxd_num_fpthreads = pxd_num_fpthreads;
 	int node, cpu;
 	int rc = 0;
+	char namefmt[64];
 
 	if (new_pxd_num_fpthreads > MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE) {
 		printk(KERN_WARNING"pxd_num_fpthreads(%d) over max limit(%d), reset to max\n", new_pxd_num_fpthreads, MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE);
@@ -119,8 +120,8 @@ int fastpath_adjust_fpthreads(int new_pxd_num_fpthreads)
 			}
 
 			// We need increase num threads, so create more threads
-			printk(KERN_NOTICE"Create thread on numa node %d cpu %d\n", node, cpu);
-			worker = kthread_create_worker_on_cpu(cpu, 0, "pxfpn%dc%d", node, cpu);
+			snprintf(namefmt, sizeof(namefmt), "pxfpn%dc%d", node, cpu);
+			worker = kthread_create_worker_on_cpu(cpu, 0, namefmt);
 			if (IS_ERR_OR_NULL(worker)) {
 				rc = PTR_ERR(worker);
 				goto out;
@@ -166,6 +167,7 @@ int fastpath_init(void)
 {
 	int rc = 0;
 	int node, cpu;
+	char namefmt[64];
 
 	// sanity check the pxfp worker thread values from mod param
 	if (MAX_PXFP_WORKERS_PER_NODE > MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE) {
@@ -210,8 +212,8 @@ int fastpath_init(void)
 			if (!cpu_online(cpu)) {
 				continue;
 			}
-			printk(KERN_NOTICE"Create thread on numa node %d cpu %d\n", node, cpu);
-			worker = kthread_create_worker_on_cpu(cpu, 0, "pxfpn%dc%d", node, cpu);
+			snprintf(namefmt, sizeof(namefmt), "pxfpn%dc%d", node, cpu);
+			worker = kthread_create_worker_on_cpu(cpu, 0, namefmt);
 			if (IS_ERR_OR_NULL(worker)) {
 				rc = PTR_ERR(worker);
 				goto out;
