@@ -455,7 +455,11 @@ void PxdTest::validate_device_properties(const std::string &device_name,
 
 	// Validate other properties
 	EXPECT_EQ(128, read_sysfs_value(sysfs_path + "nr_requests"));
-	EXPECT_EQ(128, read_sysfs_value(sysfs_path + "read_ahead_kb"));
+
+	// read_ahead_kb value is set by kernel based on physical storage performance
+	// For HDDs it is 256 or higher, for SSDs it could be 128 or lower
+	// Some older kernel version also set it to 512 kbs by default.
+	EXPECT_GE(read_sysfs_value(sysfs_path + "read_ahead_kb"), 128);
 
 	// Check if FUA file exists before trying to read it
     std::string fua_path = sysfs_path + "fua";
