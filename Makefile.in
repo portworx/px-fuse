@@ -1,4 +1,4 @@
-px-objs = pxd.o dev.o iov_iter.o px_version.o kiolib.o pxd_bio_makereq.o pxd_bio_blkmq.o pxd_fastpath.o
+px-objs = pxd.o dev.o iov_iter.o px_version.o kiolib.o pxd_bio_blkmq.o pxd_fastpath.o
 obj-m = px.o
 
 KBUILD_CPPFLAGS := -D__KERNEL__
@@ -46,8 +46,6 @@ blkmq_minor=$(call minorfn, ${BLKMQ_MINKVER})
 kmajor=$(call majorfn, ${KERNELVER})
 kminor=$(call minorfn, ${KERNELVER})
 
-#makereq interface supports fastpath in all version (not recommended)
-#PXDEFINES := -D__PXKERNEL__ -D__PXD_BIO_MAKEREQ__
 #FPATH_MINKVER=${kmajor}.${kminor}
 
 #blkmq mode has version check for fastpath (default, enabled)
