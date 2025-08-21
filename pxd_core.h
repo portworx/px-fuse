@@ -103,11 +103,7 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev);
 // 128 iovecs per bio_vec (128 * 4096 = 512K)
 #define SEGMENT_SIZE (512 * 1024)
 
-#ifdef __PXD_BIO_MAKEREQ__
-void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio);
-#else
 void pxdmq_reroute_slowpath(struct fuse_req*);
-#endif
 int pxd_initiate_fallback(struct pxd_device *pxd_dev);
 int pxd_initiate_failover(struct pxd_device *pxd_dev);
 

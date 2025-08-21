@@ -175,11 +175,7 @@ int fastpath_init(void)
 		MAX_PXFP_WORKERS_PER_NODE = MAX_ALLOC_PXFP_WORKER_THREADS_PER_NODE;
 	}
 
-#ifdef __PXD_BIO_MAKEREQ__
-	printk(KERN_INFO"PXD_BIO_MAKEREQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
-#else
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
-#endif
 	printk(KERN_INFO"pxd inited with %d workers per numa node\n", MAX_PXFP_WORKERS_PER_NODE);
 	gwq = alloc_workqueue("pxwq", WQ_HIGHPRI, 0);
 	if (!gwq) {
