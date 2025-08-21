@@ -1366,6 +1366,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	disk->private_data = pxd_dev;
 	set_capacity(disk, pxd_dev->size / SECTOR_SIZE);
 
+#if defined __PX_BLKMQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
+	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#else
+	blk_mq_freeze_queue(q);
+#endif
+#endif
+
 #if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
 #if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9,6) && LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
 	blk_queue_max_hw_sectors(q, PXD_MAX_IO / SECTOR_SIZE);
@@ -1422,14 +1430,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	disk->queue = q;
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
-
-#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
-	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
-#else
-	blk_mq_freeze_queue(q);
-#endif
-#endif
 
 	return 0;
 }
