@@ -477,7 +477,9 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev)
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req, int status)
 {
-	trace_pxd_request_complete(req->pxd_dev->dev_id, req->pxd_dev->minor, req->in.h.unique, blk_rq_pos(req->rq) * SECTOR_SIZE, blk_rq_bytes(req->rq), req_op(req->rq), req->rq->cmd_flags, status);
+	trace_pxd_request_complete(req->pxd_dev->dev_id, req->pxd_dev->minor, req->in.h.unique,
+		blk_rq_pos(req->rq) * SECTOR_SIZE, blk_rq_bytes(req->rq), req_op(req->rq),
+		req->rq->cmd_flags, status);
 	atomic_dec(&req->pxd_dev->ncount);
 	pxd_check_q_decongested(req->pxd_dev);
 	pxd_printk("%s: receive reply to %px(%lld) at %lld err %d\n",
