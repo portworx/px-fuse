@@ -785,6 +785,7 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 	struct pxd_context *ctx = pxd_dev->ctx;
 	struct fuse_conn *fc = &ctx->fc;
 	struct fuse_req *req;
+	bool ioswitch_active;
 
 	if (!fastpath_enabled(pxd_dev)) {
 		return;
@@ -792,11 +793,13 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 
 	disableFastPath(pxd_dev, true);
 
+	ioswitch_active = atomic_read(&fp->ioswitch_active);
 	// abort any inflight ioswitch
-	if (atomic_read(&fp->ioswitch_active)) {
+	if (ioswitch_active) {
 		req = request_find(fc, pxd_dev->fp.switch_uid);
 		if (!IS_ERR_OR_NULL(req)) {
-			trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor, atomic_read(&fp->ioswitch_active), pxd_dev->fp.switch_uid);
+			trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
+				ioswitch_active, pxd_dev->fp.switch_uid);
 			// overwrite switch request to fail all pending IOs
 			req->in.h.opcode = PXD_FAILOVER_TO_USERSPACE;
 			req->out.h.error = -EIO; // force failure status
@@ -806,7 +809,8 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 			atomic_set(&fp->ioswitch_active, 0);
 		}
 	} else {
-		trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor, atomic_read(&fp->ioswitch_active), 0);
+		trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
+			ioswitch_active, 0);
 	}
 
 	// resume from userspace IO suspends

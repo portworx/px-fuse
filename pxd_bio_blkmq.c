@@ -661,7 +661,7 @@ static void fp_handle_specialops(struct kthread_work *work) {
 	}
 #else
     // submit discard to replica
-        if (blk_queue_discard(q)) { // discard supported
+    if (blk_queue_discard(q)) { // discard supported
 	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
 	} else if (bdev_write_same(bdev)) {
