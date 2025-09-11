@@ -425,18 +425,7 @@ static const struct block_device_operations pxd_bd_ops = {
 	.open			= pxd_open,
 	.release		= pxd_release,
 };
-
-#if defined(__PXD_BIO_MAKEREQ__) && LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-static const struct block_device_operations pxd_bd_fpops = {
-    .owner          = THIS_MODULE,
-    .open           = pxd_open,
-    .release        = pxd_release,
-    .submit_bio     = pxd_bio_make_request_entryfn,
-};
-#define get_bd_fpops() (&pxd_bd_fpops)
-#else
 #define get_bd_fpops() (&pxd_bd_ops)
-#endif
 
 
 static bool __pxd_device_qfull(struct pxd_device *pxd_dev)
@@ -495,79 +484,6 @@ static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req, int
 			req->pxd_rdwr_in.offset, status);
 }
 
-#ifdef __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
-static void pxd_update_stats(struct fuse_req *req, int sgrp, unsigned int count)
-#else
-static void pxd_update_stats(struct fuse_req *req, int rw, unsigned int count)
-#endif
-{
-		struct pxd_device *pxd_dev = req->queue->queuedata;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0) || defined(__EL8__)
-{
-		struct block_device *p = pxd_dev->disk->part0;
-		if (!p) return;
-
-
-		part_stat_lock();
-		part_stat_add(p, sectors[sgrp], count);
-		part_stat_inc(p, ios[sgrp]);
-}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,0,0) || defined(__EL8__)
-		part_stat_lock();
-		part_stat_inc(&pxd_dev->disk->part0, ios[rw]);
-		part_stat_add(&pxd_dev->disk->part0, sectors[rw], count);
-#else
-		int cpu = part_stat_lock();
-		part_stat_inc(cpu, &pxd_dev->disk->part0, ios[rw]);
-		part_stat_add(cpu, &pxd_dev->disk->part0, sectors[rw], count);
-#endif
-		part_stat_unlock();
-}
-
-static bool pxd_process_read_reply(struct fuse_conn *fc, struct fuse_req *req,
-		int status)
-{
-	trace_pxd_reply(req->in.h.unique, 0u);
-	pxd_update_stats(req, 0, BIO_SIZE(req->bio) / SECTOR_SIZE);
-	BIO_ENDIO(req->bio, status);
-	pxd_request_complete(fc, req, status);
-
-	return true;
-}
-
-static bool pxd_process_write_reply(struct fuse_conn *fc, struct fuse_req *req,
-		int status)
-{
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	trace_pxd_reply(req->in.h.unique, REQ_OP_WRITE);
-#else
-	trace_pxd_reply(req->in.h.unique, REQ_WRITE);
-#endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
-{
-        const struct bio* bio = req->bio;
-        int statgrp = STAT_WRITE;
-        size_t sz = BIO_SIZE(bio) / SECTOR_SIZE;
-
-        if (!bio) statgrp = STAT_FLUSH;
-        else if (!op_is_write(bio->bi_opf)) statgrp = STAT_READ;
-        else if (op_is_flush(bio->bi_opf) && (sz == 0)) statgrp = STAT_FLUSH;
-        else statgrp = STAT_WRITE;
-
-        pxd_update_stats(req, statgrp, sz);
-}
-#else
-	pxd_update_stats(req, 1, BIO_SIZE(req->bio) / SECTOR_SIZE);
-#endif
-	BIO_ENDIO(req->bio, status);
-	pxd_request_complete(fc, req, status);
-
-	return true;
-}
-
-#else
 
 /* only used by the USE_REQUESTQ_MODEL definition */
 static bool pxd_process_read_reply_q(struct fuse_conn *fc, struct fuse_req *req,
@@ -597,7 +513,6 @@ static bool pxd_process_write_reply_q(struct fuse_conn *fc, struct fuse_req *req
 	return false;
 #endif
 }
-#endif
 
 static struct fuse_req *pxd_fuse_req(struct pxd_device *pxd_dev)
 {
@@ -652,66 +567,12 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
  * when block device is registered in non blk mq mode, device limits are not
  * honoured. Handle it appropriately.
  */
-#ifdef __PXD_BIO_MAKEREQ__
-static
-int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
-		unsigned int op)
-{
-	struct request_queue *q = req->pxd_dev->disk->queue;
-	sector_t max_sectors, rq_sectors;
-
-	if (!fastpath_enabled(req->pxd_dev)) {
-		return 0;
-	}
-
-	rq_sectors = *size >> SECTOR_SHIFT;
-	BUG_ON(rq_sectors != bio_sectors(req->bio));
-
-	max_sectors = blk_queue_get_max_sectors(q, op);
-	if (!max_sectors) {
-		return -EOPNOTSUPP;
-	}
-
-	while (rq_sectors > max_sectors) {
-		struct bio *b;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0) || \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0) && \
-     defined(bvec_iter_sectors))
-		b = bio_split(req->bio, max_sectors, GFP_NOIO, &fs_bio_set);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
-		b = bio_split(req->bio, max_sectors, GFP_NOIO, fs_bio_set);
-#else
-		// This issue has so far been seen only with 4.20 and 5.x kernels
-		// bio split signature way too different to be handled.
-		printk_ratelimited(KERN_ERR"device %llu IO queue limits (rq/max %lu/%lu sectors) exceeded\n",
-			req->pxd_dev->dev_id, rq_sectors, max_sectors);
-		return -EIO;
-#endif
-		if (!b) {
-			return -ENOMEM;
-		}
-
-		bio_chain(b, req->bio);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
-		generic_make_request(b);
-#else
-		submit_bio_noacct(b);
-#endif
-		rq_sectors -= max_sectors;
-		*off += (max_sectors << SECTOR_SHIFT);
-	}
-
-	*size = rq_sectors << SECTOR_SHIFT;
-	return 0;
-}
-#else
 static inline
 int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
 		unsigned int op)
 {
 	return 0;
 }
-#endif
 
 static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
@@ -728,12 +589,7 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 
 	req->in.h.opcode = PXD_READ;
-#ifdef __PXD_BIO_MAKEREQ__
-	req->end = pxd_process_read_reply;
-#else
 	req->end = pxd_process_read_reply_q;
-#endif
-
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
 }
@@ -753,11 +609,7 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	}
 
 	req->in.h.opcode = PXD_WRITE;
-#ifdef __PXD_BIO_MAKEREQ__
-	req->end = pxd_process_write_reply;
-#else
 	req->end = pxd_process_write_reply_q;
-#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 
@@ -782,11 +634,7 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 	}
 
 	req->in.h.opcode = PXD_DISCARD;
-#ifdef __PXD_BIO_MAKEREQ__
-	req->end = pxd_process_write_reply;
-#else
 	req->end = pxd_process_write_reply_q;
-#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
@@ -809,11 +657,7 @@ static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t 
 	}
 
 	req->in.h.opcode = PXD_WRITE_SAME;
-#ifdef __PXD_BIO_MAKEREQ__
-	req->end = pxd_process_write_reply;
-#else
 	req->end = pxd_process_write_reply_q;
-#endif
 
 	pxd_req_misc(req, size, off, minor, flags);
 	return 0;
@@ -1014,39 +858,6 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 	return rc;
 }
 
-#ifdef __PXD_BIO_MAKEREQ__
-// similar function to make_request_slowpath only optimized to ensure its a reroute
-// from fastpath on IO fail.
-void pxd_reroute_slowpath(struct request_queue *q, struct bio *bio)
-{
-	struct pxd_device *pxd_dev = q->queuedata;
-	struct fuse_req *req;
-
-	req = pxd_fuse_req(pxd_dev);
-	if (IS_ERR_OR_NULL(req)) {
-		bio_io_error(bio);
-		return;
-	}
-
-	req->pxd_dev = pxd_dev;
-	req->bio = bio;
-	req->queue = q;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		pxd_dev->minor, bio_op(bio), bio->bi_opf)) {
-#else
-	if (pxd_request(req, BIO_SIZE(bio), BIO_SECTOR(bio) * SECTOR_SIZE,
-		    pxd_dev->minor, bio->bi_rw)) {
-#endif
-		fuse_request_free(req);
-		bio_io_error(bio);
-		return;
-	}
-
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
-}
-#endif
-
 #ifdef __PXD_BIO_BLKMQ__
 #if !defined(__PX_BLKMQ__)
 void pxdmq_reroute_slowpath(struct fuse_req *req)
@@ -1229,37 +1040,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	}
 #endif
 
-#ifdef __PXD_BIO_MAKEREQ__
-		pxd_printk("adding disk as makereq device %llu", pxd_dev->dev_id);
-		/* Create gendisk info. */
-		disk = alloc_disk(1);
-		if (!disk) {
-			return -ENOMEM;
-		}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,9,0)
-	 	q = blk_alloc_queue(NUMA_NO_NODE);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,7,0)
-		q = blk_alloc_queue(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
-#elif LINUX_VERSION_CODE == KERNEL_VERSION(4,18,0) && defined(__EL8__) && defined(QUEUE_FLAG_NOWAIT)
-        q = blk_alloc_queue_rh(pxd_bio_make_request_entryfn, NUMA_NO_NODE);
-#else
-		q = blk_alloc_queue(GFP_KERNEL);
-#endif
-		if (!q) {
-			put_disk(disk);
-			return -ENOMEM;
-		}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,9,0)
-		// add hooks to control congestion only while using fastpath
-		PXD_SETUP_CONGESTION_HOOK(q->backing_dev_info, pxd_device_congested, pxd_dev);
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,7,0) && !defined(QUEUE_FLAG_NOWAIT)
-		blk_queue_make_request(q, pxd_bio_make_request_entryfn);
-#endif
-
-#else /* ! __PXD_BIO_MAKEREQ__ */
-
 #ifdef __PX_BLKMQ__
 	  memset(&pxd_dev->tag_set, 0, sizeof(pxd_dev->tag_set));
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
@@ -1347,7 +1127,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 		return -ENOMEM;
 	  }
 #endif /* __PX_BLKMQ__ */
-#endif /* __PXD_BIO_MAKEREQ__ */
 
 	// Disk and queue initialization
 	snprintf(disk->disk_name, sizeof(disk->disk_name),
@@ -1413,11 +1192,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 	/* Enable flush support. */
 	BLK_QUEUE_FLUSH(q);
-
-	/* adjust queue limits to be compatible with backing device */
-#ifdef __PXD_BIO_MAKEREQ__
-	pxd_fastpath_adjust_limits(pxd_dev, q);
-#endif
 
 	disk->queue = q;
 	q->queuedata = pxd_dev;
@@ -1865,11 +1639,7 @@ ssize_t pxd_read_init(struct fuse_conn *fc, struct iov_iter *iter)
 		id.dev_id = pxd_dev->dev_id;
 		id.local_minor = pxd_dev->minor;
 		id.fastpath = 0;
-#ifdef __PXD_BIO_MAKEREQ__
-		id.blkmq_device = 0;
-#else
 		id.blkmq_device = 1;
-#endif
 		id.suspend = 0;
 		// resume from userspace IO suspends after px restarts
 		pxd_request_resume(pxd_dev);
