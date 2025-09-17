@@ -346,12 +346,12 @@ void PxdTest::cleaner()
 	fprintf(stderr, "cleaner thread active\n");
 	// Now read in the request from kernel
 	while (!killed) {
-		size_t ret = wait_msg(1);
+		int ret = wait_msg(1);
 		if (ret == -ETIMEDOUT) {
 			sleep(1);
 			continue;
 		}
-		size_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
+		ssize_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
 		if (read_bytes < 0) {
 			EXPECT_EQ(read_bytes, -EAGAIN);
 		} else if (read_bytes > 0) {
@@ -481,23 +481,26 @@ void PxdTest::SetUp()
 {
 	fprintf(stderr, "%s\n", __func__);
 	seteuid(0);
-	ASSERT_EQ(0, system("/usr/bin/sudo /sbin/insmod px.ko"));
+	auto insmod_ret =  system("/usr/bin/sudo /sbin/insmod px.ko");
 
-	std::cout << "Opening control dev: " << control_device(0) << "\n";
-	// ctl_fd = open(control_device(0).c_str(), O_RDWR | O_NONBLOCK);
-	ctl_fd = open(control_device(0).c_str(), O_RDWR);
-	ASSERT_GT(ctl_fd, 0);
+	if (insmod_ret != 0 && (system("/usr/bin/sudo /sbin/lsmod | grep px") != 0)) {
+		FAIL() << "Failed to load px module";
+	} else {
+		std::cout << "Opening control dev: " << control_device(0) << "\n";
+		ctl_fd = open(control_device(0).c_str(), O_RDWR);
+		ASSERT_GT(ctl_fd, 0);
 
-	pxd_ioctl_init_args args;
-	auto ret = ioctl(ctl_fd, PXD_IOC_INIT, &args);
-	if (ret < 0) {
-		fprintf(stderr, "%s: init ioctl failed: %d(%s)", __func__, errno, strerror(errno));
+		pxd_ioctl_init_args args;
+		auto ret = ioctl(ctl_fd, PXD_IOC_INIT, &args);
+		if (ret < 0) {
+			fprintf(stderr, "%s: init ioctl failed: %d(%s)", __func__, errno, strerror(errno));
+		}
+
+		auto read_bytes = static_cast<size_t>(ret);
+		ASSERT_EQ(sizeof(pxd_init_in), read_bytes);
+		ASSERT_EQ(0, args.hdr.num_devices);
+		ASSERT_EQ(PXD_VERSION, args.hdr.version);
 	}
-
-	auto read_bytes = static_cast<size_t>(ret);
-	ASSERT_EQ(sizeof(pxd_init_in), read_bytes);
-	ASSERT_EQ(0, args.hdr.num_devices);
-	ASSERT_EQ(PXD_VERSION, args.hdr.version);
 }
 
 void PxdTest::TearDown()
