@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <cstdlib>
@@ -697,6 +698,119 @@ TEST_F(PxdTest, read)
 	}
 
 	rt.join();
+	// Detach block device
+	dev_remove(add.dev_id);
+}
+
+TEST_F(PxdTest, blkdiscard_ioctl)
+{
+	struct pxd_add_out add;
+	std::string name;
+	int minor = 0;
+	struct rdwr_in rdwr;
+	ssize_t read_bytes = 0;
+	const uint64_t device_size = 16 * 1024 * 1024; // 16MB device
+	const uint64_t discard_granularity = 1024 * 1024; // 1MB granularity
+	const uint64_t discard_offset = 4 * 1024 * 1024; // 4MB offset (aligned to granularity)
+	const uint64_t discard_length = 2 * 1024 * 1024; // 2MB length
+	const uint64_t expected_kernel_discard_size = discard_granularity; // Kernel may align to granularity
+
+	std::cout << "Starting BLKDISCARD ioctl test" << std::endl;
+
+	// Attach a kernel block device with discard support
+	add.dev_id = 1;
+	add.size = device_size;
+	add.queue_depth = 128;
+	add.discard_size = discard_granularity;
+	dev_add(add, minor, name);
+
+	std::cout << "Device created: " << name << std::endl;
+
+    int timeout_attempts = 0;
+    const int max_timeout_attempts = 30;
+    bool discard_issued = false;
+    std::thread discard_thread;
+    uint64_t total_discarded = 0;
+    const uint64_t expected_total_discard = discard_length;
+    
+    while (total_discarded < expected_total_discard) {
+        // Issue BLKDISCARD on first iteration after we're ready to handle requests
+        if (!discard_issued) {
+            discard_thread = std::thread([&]() {
+                int fd = open(name.c_str(), O_RDWR);
+                ASSERT_GT(fd, 0) << "Failed to open device: " << name;
+
+                uint64_t range[2] = {discard_offset, discard_length};
+
+                std::cout << "Issuing BLKDISCARD ioctl: offset=" << discard_offset
+                          << ", length=" << discard_length << std::endl;
+
+                int ret = ioctl(fd, BLKDISCARD, range);
+                std::cout << "BLKDISCARD ioctl completed with ret=" << ret << std::endl;
+                ASSERT_EQ(ret, 0) << "BLKDISCARD ioctl failed";
+
+                close(fd);
+            });
+            discard_issued = true;
+            std::cout << "Started BLKDISCARD thread, now listening for kernel requests..." << std::endl;
+        }
+
+        int ret = wait_msg(2);
+        if (ret == -ETIMEDOUT) {
+            timeout_attempts++;
+            std::cout << "Timeout waiting for discard request (attempt " << timeout_attempts << ")" << std::endl;
+            if (timeout_attempts >= max_timeout_attempts) {
+                std::cout << "ERROR: Max timeouts reached" << std::endl;
+                break;
+            }
+            continue;
+        }
+        ASSERT_EQ(ret, 0);
+
+        read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
+        ASSERT_GT(read_bytes, 0);
+
+        struct pxd_rdwr_in *rd = reinterpret_cast<pxd_rdwr_in *>(&rdwr.rdwr);
+
+        std::cout << "Received request: opcode=" << rdwr.in.opcode
+                  << ", offset=" << rd->offset << ", size=" << rd->size << std::endl;
+
+        if (rdwr.in.opcode == PXD_DISCARD) {
+            std::cout << "SUCCESS: Received PXD_DISCARD request" << std::endl;
+
+            // Reply success to the kernel
+            fuse_out_header oh;
+            oh.len = sizeof(oh);
+            oh.error = 0;
+            oh.unique = rdwr.in.unique;
+            ssize_t write_ret = ::write(ctl_fd, &oh, sizeof(oh));
+            ASSERT_EQ(sizeof(oh), write_ret);
+
+            // Track total discarded
+            total_discarded += rd->size;
+            std::cout << "SUCCESS: Processed " << rd->size << " bytes, total: " 
+                      << total_discarded << "/" << expected_total_discard << std::endl;
+        } else {
+            // Handle other operations normally
+            finish_io(&rdwr);
+        }
+    }
+
+    // Clean up thread
+    if (discard_thread.joinable()) {
+		discard_thread.join();
+    }
+    
+    if (total_discarded) {
+        std::cout << "SUCCESS: BLKDISCARD ioctl test completed successfully" << std::endl;
+    } else {
+        std::cout << "ERROR: BLKDISCARD test failed - no discard request received" << std::endl;
+    }
+
+    ASSERT_TRUE(total_discarded) << "Did not receive expected discard request";
+
+	std::cout << "BLKDISCARD ioctl test completed successfully" << std::endl;
+
 	// Detach block device
 	dev_remove(add.dev_id);
 }
