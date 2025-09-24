@@ -559,6 +559,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	}
 
 	pxd_dev->fp.fastpath = true;
+
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
@@ -737,70 +738,6 @@ out_file_failed:
 	// Allow fallback to native path and not report failure outside.
 	printk("device %llu setup through nativepath (%d)\n", pxd_dev->dev_id, err);
 	return 0;
-}
-
-void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue *topque)
-{
-	int i;
-	struct file *file;
-	struct inode *inode;
-	struct block_device *bdev;
-	struct gendisk *disk;
-	struct request_queue *bque;
-	char name[BDEVNAME_SIZE];
-
-	printk(KERN_INFO"pxd device %llu: adjusting queue limits nfd %d\n", pxd_dev->dev_id, pxd_dev->fp.nfd);
-
-	for (i = 0; i < pxd_dev->fp.nfd; i++) {
-		file = pxd_dev->fp.file[i];
-		BUG_ON(!file || !file->f_mapping);
-		inode = file->f_mapping->host;
-		if (!S_ISBLK(inode->i_mode)) {
-			// not needed for non-block based backing devices
-			continue;
-		}
-
-		bdev = I_BDEV(inode);
-		if (!bdev || IS_ERR(bdev)) {
-			printk(KERN_ERR"pxd device %llu: backing block device lookup for path %s failed %ld\n",
-				pxd_dev->dev_id, pxd_dev->fp.device_path[i], PTR_ERR(bdev));
-			goto out;
-		}
-
-		disk = bdev->bd_disk;
-		if (disk) {
-			bque = bdev_get_queue(bdev);
-			if (bque) {
-				printk(KERN_INFO"pxd device %llu queue limits adjusted with block dev %p(%s)\n",
-					pxd_dev->dev_id, bdev, bdevname(bdev, name));
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,8,0)
-				blk_queue_stack_limits(topque, bque);
-#else
-				blk_stack_limits(&topque->limits, &bque->limits, 0);
-#endif
-			}
-		}
-	}
-
-	// ensure few block properties are still as expected.
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
-	topque->limits.max_write_zeroes_sectors = 0;
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
-	blk_queue_max_write_zeroes_sectors(topque, 0);
-#endif
-
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
-	topque->limits.logical_block_size = PXD_LBS;
-	topque->limits.physical_block_size = PXD_LBS;
-#else
-	blk_queue_logical_block_size(topque, PXD_LBS);
-	blk_queue_physical_block_size(topque, PXD_LBS);
-#endif
-	return;
-
-out:
-	disableFastPath(pxd_dev, false);
 }
 
 // reset device called during device cleanup actions from any internal state.
