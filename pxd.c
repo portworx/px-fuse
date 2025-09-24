@@ -640,6 +640,27 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 	return 0;
 }
 
+static int pxd_write_zeroes_request(struct fuse_req *req, uint32_t size, uint64_t off,
+                                   uint32_t minor, uint32_t flags)
+{
+    int rc;
+	
+    // Handle device limits check
+    rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_ZEROES);
+    if (rc) {
+        return rc;
+    }
+
+    req->in.h.opcode = PXD_WRITE_ZEROES;  // New FUSE opcode
+#ifdef __PXD_BIO_MAKEREQ__
+    req->end = pxd_process_write_reply;
+#else
+    req->end = pxd_process_write_reply_q;
+#endif
+    pxd_req_misc(req, size, off, minor, flags);
+    return 0;
+}
+
 static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
@@ -669,15 +690,16 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
-
 	switch (op) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
 	case REQ_OP_WRITE_ZEROES:
-#else
+		rc = pxd_write_zeroes_request(req, size, off, minor, flags);
+		break;
+// #else
 	case REQ_OP_WRITE_SAME:
-#endif
 		rc = pxd_write_same_request(req, size, off, minor, flags);
 		break;
+// #endif
 	case REQ_OP_WRITE:
 		rc = pxd_write_request(req, size, off, minor, flags);
 		break;
@@ -1164,6 +1186,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+	blk_queue_max_write_zeroes_sectors(q, PXD_MAX_DISCARD_GRANULARITY / SECTOR_SIZE);
+#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 #if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
@@ -1183,11 +1208,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
-    // given unaligned discards are ignored at replica targets, it cannot be guaranteed zeroes after discard
+    // given unaligned discards are ignored at targets, it cannot be guaranteed zeroes after discard
     // so never commit to zeroes being returned after a discard.
     // this flag and behavior got deprecated
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
-    q->limits.discard_zeroes_data = 0;
+	q->limits.discard_zeroes_data = 0;
 #endif
 
 	/* Enable flush support. */
