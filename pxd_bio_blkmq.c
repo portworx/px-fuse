@@ -644,7 +644,7 @@ static void fp_handle_specialops(struct kthread_work *work) {
 	  r = blkdev_issue_zeroout(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
 	}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) 
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
 	if (blk_queue_discard(q)) { // discard supported
 	  r = blkdev_issue_discard(bdev, blk_rq_pos(rq),
 				   blk_rq_sectors(rq), GFP_NOIO, 0);
