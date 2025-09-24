@@ -539,9 +539,13 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 	}
 
 	memset(&add_ext, 0, sizeof(add_ext));
-	memcpy(&add_ext, &add, sizeof(add));
-	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
-	return pxd_add(conn, &add_ext);
+	add_ext.dev_id = add.dev_id;
+	add_ext.size = add.size;
+	add_ext.queue_depth = add.queue_depth;
+	add_ext.discard_size = add.discard_size;
+	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME;
+	add_ext.enable_fp = 0;
+	return pxd_add(conn, &add_ext, false);  // v1 structure
 }
 
 static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
@@ -554,8 +558,41 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
+
 	trace_fuse_notify_add_ext(add.dev_id, add.size, add.queue_depth, add.discard_size, add.open_mode, add.enable_fp, add.paths.count);
-	return pxd_add(conn, &add);
+	return pxd_add(conn, &add, false);  // v1 structure
+}
+
+static int fuse_notify_add_ext_v2(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter)
+{
+	struct pxd_add_ext_out_v2 add;
+	// Calculate size without padding: offset of last field + size of last field
+	size_t expected_size = offsetof(struct pxd_add_ext_out_v2, reserved) + sizeof(uint64_t);
+	size_t len;
+
+	if (size < expected_size) {
+		printk(KERN_ERR "%s: invalid size %u (expected %zu)\n", __func__, size, expected_size);
+		return -EINVAL;
+	}
+
+	len = expected_size;
+	memset(&add, 0, sizeof(add));  // Zero-initialize to handle any padding
+
+	if (copy_from_iter(&add, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg (expected %zu bytes)\n", __func__, len);
+		return -EFAULT;
+	}
+
+	// Validate reserved field is zero (for future compatibility)
+	if (add.reserved != 0) {
+		printk(KERN_WARNING "%s: reserved field is non-zero (%llu), ignoring\n",
+		       __func__, add.reserved);
+	}
+
+	// Cast to pxd_add_ext_out for pxd_add() - the extra fields are at the end
+	trace_fuse_notify_add_ext(add.dev_id, add.size, add.queue_depth, add.discard_size, add.open_mode, add.enable_fp, add.paths.count);
+	return pxd_add(conn, (struct pxd_add_ext_out *)&add, true);  // v2 structure
 }
 
 
@@ -848,6 +885,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_update_size(fc, size, iter);
 	case PXD_ADD_EXT:
 		return fuse_notify_add_ext(fc, size, iter);
+	case PXD_ADD_EXT_V2:
+		return fuse_notify_add_ext_v2(fc, size, iter);
 	case PXD_GET_FEATURES:
 		return fuse_notify_get_features(fc, size, iter);
 	case PXD_SUSPEND:
@@ -861,6 +900,7 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 	case PXD_EXPORT_DEV:
 		return fuse_notify_export(fc, size, iter);
 	default:
+		printk(KERN_WARNING "fuse_notify: unknown opcode=%d\n", (int)code);
 		return -EINVAL;
 	}
 }
