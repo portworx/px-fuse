@@ -87,6 +87,7 @@ enum pxd_opcode {
 	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
 	PXD_EXPORT_DEV,     /**< export the attached device to the kernel */
+	PXD_WRITE_ZEROES,   /**< write_zeroes operation */
 	PXD_LAST,
 };
 
@@ -320,8 +321,10 @@ static inline uint64_t pxd_aligned_len(uint64_t len, uint64_t offset)
 static inline uint64_t pxd_wr_blocks(const struct rdwr_in *rdwr)
 {
 	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
-	if (prw->size && rdwr->in.opcode == PXD_WRITE_SAME)
+	if (prw->size && (rdwr->in.opcode == PXD_WRITE_SAME))
 		return 1;
+	else if (prw->size && (rdwr->in.opcode == PXD_WRITE_ZEROES))
+		return pxd_aligned_len(prw->size, prw->offset) / PXD_LBS;
 	else
 		return prw->size && rdwr->in.opcode == PXD_WRITE ?
 	       	pxd_aligned_len(prw->size, prw->offset) / PXD_LBS : 0;
