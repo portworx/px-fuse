@@ -59,6 +59,8 @@ struct pxd_device {
 	unsigned int nr_congestion_off;
 
 	struct work_struct remove_work;
+	struct completion remove_completion;
+	int remove_result;
 
 	wait_queue_head_t remove_wait;
 	wait_queue_head_t suspend_wq;
