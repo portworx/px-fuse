@@ -198,10 +198,11 @@ docker-build: docker-build-dev
 
 px_version.c:
 	@COMMIT_HASH=$$(git rev-parse HEAD); \
-	BRANCH_NAME=$$(git branch -r --contains $$COMMIT_HASH | grep -E 'origin/v[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9_-]+)?' | sed 's|.*origin/||' | tail -n 1); \
-	if [ -z "$$BRANCH_NAME" ]; then \
-		BRANCH_NAME=$$(git name-rev --name-only HEAD | sed 's/remotes\/origin\///g'); \
+	if [ ! -f .version ]; then \
+		echo "Error: .version file not found"; \
+		exit 1; \
 	fi; \
+	BRANCH_NAME=$$(cat .version | tr -d '\n'); \
 	echo "const char *gitversion = \"$$BRANCH_NAME:$$COMMIT_HASH\";" > $@
 
 distclean: clean
