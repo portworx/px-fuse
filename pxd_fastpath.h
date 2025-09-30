@@ -12,6 +12,7 @@
 #include <linux/fs.h>
 #include <linux/falloc.h>
 #include <linux/bio.h>
+#include <linux/mutex.h>
 
 #include "pxd_bio.h"
 
@@ -43,6 +44,13 @@ struct pxd_fastpath_extension {
 	struct completion sync_complete;
 	atomic_t sync_done;
 	uint64_t switch_uid; // switch IO request unique id
+
+	// device operation serialization lock
+	// protects against concurrent IO_switch and host detach operations
+	// ensures mutual exclusion between:
+	// - ALL IO switch operations (failover/fallback) - both user and automatic
+	// - host detach operations
+	struct mutex device_op_lock;
 
 	// failover work item
 	spinlock_t  fail_lock;

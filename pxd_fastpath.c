@@ -347,6 +347,7 @@ bool pxd_sync_work_pending(struct pxd_device *pxd_dev)
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+	int rc;
 
 	// incompat device
 	if (!fastpath_enabled(pxd_dev)) {
@@ -355,22 +356,40 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 		return -EINVAL;
 	}
 
+	// Check FUSE connection before attempting ioswitch
+	if (!pxd_dev->ctx || !READ_ONCE(pxd_dev->ctx->fc.connected)) {
+		printk(KERN_WARNING "device %llu ioswitch failed: FUSE disconnected.\n",
+			pxd_dev->dev_id);
+		return -ENOTCONN;
+	}
+
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu ioswitch failed: device detached\n", pxd_dev->dev_id);
+		rc = -ENODEV;
+		return rc;
+	}
+
 	switch (code) {
 	case PXD_FAILOVER_TO_USERSPACE:
 		printk("device %llu initiated failover\n", pxd_dev->dev_id);
 		// IO path blocked, a future path refresh will take it to native path
 		// enqueue a failover request to userspace on this device.
 		trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_USERSPACE);
-		return pxd_initiate_failover(pxd_dev);
+		rc = pxd_initiate_failover(pxd_dev);
+		break;
 	case PXD_FALLBACK_TO_KERNEL:
 		// IO path already routed to userspace.
 		// enqueue a fallback marker request to userspace on this device.
 		printk("device %llu initiated fallback\n", pxd_dev->dev_id);
-		return pxd_initiate_fallback(pxd_dev);
+		rc = pxd_initiate_fallback(pxd_dev);
+		break;
 	default:
 		// unsupported opcode
-		return -EINVAL;
+		rc = -EINVAL;
+		break;
 	}
+	return rc;
 }
 
 // shall be called internally during iopath switching.
@@ -637,6 +656,9 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 		fp->syncwi[i].pxd_dev = pxd_dev;
 		fp->syncwi[i].rc = 0;
 	}
+
+	// device operation serialization init
+	mutex_init(&fp->device_op_lock);
 
 	// failover init
 	spin_lock_init(&fp->fail_lock);
