@@ -787,6 +787,16 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 		return -EINVAL;
 	}
 
+	if (!pxd_dev->ctx || !READ_ONCE(pxd_dev->ctx->fc.connected)) {
+		printk(KERN_WARNING "device %llu ioswitch failed: FUSE disconnected.\n",
+			pxd_dev->dev_id);
+		return -ENOTCONN;
+	}
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu ioswitch failed: device detached\n", pxd_dev->dev_id);
+		return -ENODEV;
+	}
+
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
 		return -ENOMEM;
@@ -814,6 +824,12 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return -EINVAL;
 	}
 
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu failover failed: device detached\n", pxd_dev->dev_id);
+		return -ENODEV;
+	}
+
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return 0; // already initiated, skip it.
 	}
@@ -829,7 +845,6 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		pxd_request_resume(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
-
 	return rc;
 }
 
@@ -842,6 +857,14 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 		return -EINVAL;
 	}
 
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu fallback failed: device detached\n", pxd_dev->dev_id);
+		return -ENODEV;
+	}
+
+	// Serialize all fallback operations with device detach
+	// Try to acquire lock immediately, fail if not available
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
 	}
@@ -859,7 +882,6 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 		pxd_request_resume_internal(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
-
 	return rc;
 }
 
@@ -1467,7 +1489,6 @@ cleanup:
 static void pxd_finish_remove(struct work_struct *work)
 {
 	struct pxd_device *pxd_dev = container_of(work, struct pxd_device, remove_work);
-
 	pr_info("%s: dev %llu\n", __func__, pxd_dev->dev_id);
 
 	pxd_fastpath_reset_device(pxd_dev);
@@ -1517,7 +1538,6 @@ static void pxd_finish_remove(struct work_struct *work)
 	spin_unlock(&pxd_dev->ctx->lock);
 
 	put_device(&pxd_dev->dev);
-
 	module_put(THIS_MODULE);
 }
 
@@ -1551,6 +1571,11 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 	}
 
 	if (!pxd_dev->removing) {
+		if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) != 0) {
+			printk(KERN_ERR "device %llu detach: failed to acquire ioswitch_active\n", pxd_dev->dev_id);
+			err = -EBUSY;
+			goto out_lock;
+		}
 		pxd_dev->removing = true;
 		INIT_WORK(&pxd_dev->remove_work, pxd_finish_remove);
 		schedule_work(&pxd_dev->remove_work);
