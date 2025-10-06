@@ -151,14 +151,27 @@ static inline unsigned int get_op_flags(struct bio *bio)
 
 #include <linux/ctype.h>
 
+// Helper to get partition number - bd_partno was removed in kernel 6.14 and backported to RHEL 9.6+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,10,0)
+	// Use bdev_partno() function if available (kernel 6.10+)
+	#define GET_PARTNO(bdev) bdev_partno(bdev)
+#elif defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+	#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+		// RHEL 9.6+ backported the removal of bd_partno, use bdev_partno() if available
+		#define GET_PARTNO(bdev) bdev_partno(bdev)
+	#else
+		// Older RHEL kernels have bd_partno field
+		#define GET_PARTNO(bdev) ((bdev)->bd_partno)
+	#endif
+#else
+	// Older kernels have bd_partno field
+	#define GET_PARTNO(bdev) ((bdev)->bd_partno)
+#endif
+
 // Pulled from v5.19.17/source/block/genhd.c
 static inline char *bdevname(struct block_device *bdev, char *buf) {
         struct gendisk *hd = bdev->bd_disk;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
-	int partno = bdev->bd_partno;
-#else
-	int partno = BD_PARTNO; 
-#endif
+	int partno = GET_PARTNO(bdev);
 
 	if (!partno)
 		snprintf(buf, BDEVNAME_SIZE, "%s", hd->disk_name);
