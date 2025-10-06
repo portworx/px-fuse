@@ -1276,8 +1276,15 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
+	  // BLK_MQ_F_SHOULD_MERGE was removed in kernel 6.14 and backported to RHEL 9.6+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
-	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+	#ifdef RHEL_RELEASE_CODE
+	#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
+		pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+	#endif
+	#else
+		pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+	#endif
 #endif
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
@@ -1435,10 +1442,17 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	pxd_dev->disk = disk;
 
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	// blk_mq_freeze_queue signature changed in kernel 6.14 and backported to RHEL 9.6+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
 	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#elif defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+	#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+		*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+	#else
+		(void)blk_mq_freeze_queue(q);
+	#endif
 #else
-	blk_mq_freeze_queue(q);
+	(void)blk_mq_freeze_queue(q);
 #endif
 #endif
 
@@ -1671,8 +1685,15 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+	// blk_mq_unfreeze_queue signature changed in kernel 6.14 and backported to RHEL 9.6+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
+#elif defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+	#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+		blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
+	#else
+		blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+	#endif
 #else
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
