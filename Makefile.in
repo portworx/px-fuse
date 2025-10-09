@@ -98,6 +98,11 @@ ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9].*\.x86_64'; echo $$?),0
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
 endif
 
+# Oracle UEK Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9]uek\.x86_64'; echo $$?),0)
+PXDEFINES += -D__ORACLE_UEK__
+endif
+
 # Check for Suse
 ifeq ($(shell test -f "/host-os-release"; echo $$?),0)   # inside PX container
 ifeq ($(shell cat "/host-os-release" | grep ID_LIKE | grep -q suse; echo $$?),0)
