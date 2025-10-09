@@ -1166,7 +1166,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
 #endif
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__))
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__) || defined(__ORACLE_UEK__))
 	blk_queue_max_hw_sectors(q, PXD_MAX_IO / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (PXD_MAX_IO / PXD_LBS));
