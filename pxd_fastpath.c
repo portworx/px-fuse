@@ -355,6 +355,13 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 		return -EINVAL;
 	}
 
+	// Check FUSE connection before attempting ioswitch
+	if (!pxd_dev->ctx || !READ_ONCE(pxd_dev->ctx->fc.connected)) {
+		printk(KERN_WARNING "device %llu ioswitch failed: FUSE disconnected.\n",
+			pxd_dev->dev_id);
+		return -ENOTCONN;
+	}
+
 	switch (code) {
 	case PXD_FAILOVER_TO_USERSPACE:
 		printk("device %llu initiated failover\n", pxd_dev->dev_id);

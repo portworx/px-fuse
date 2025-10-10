@@ -5,6 +5,7 @@
 #include <linux/sysfs.h>
 #include <linux/crc32.h>
 #include <linux/ctype.h>
+#include <linux/delay.h>
 #include <linux/sched.h>
 #include "fuse_i.h"
 #include "pxd.h"
@@ -964,14 +965,21 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
-
 	if (!fastpath_active(pxd_dev)) {
 		// already in native path
 		return -EINVAL;
 	}
 
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
-		return 0; // already initiated, skip it.
+		rc = 0; // already initiated, skip it.
+		return rc;
+	}
+
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu failover failed: device detached\n", pxd_dev->dev_id);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+		return -ENODEV;
 	}
 
 	rc = pxd_request_suspend_internal(pxd_dev, false, true);
@@ -985,7 +993,6 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		pxd_request_resume(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
-
 	return rc;
 }
 
@@ -998,8 +1005,18 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 		return -EINVAL;
 	}
 
+	// Serialize all fallback operations with device detach
+	// Try to acquire lock immediately, fail if not available
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
-		return -EBUSY;
+		rc = -EBUSY;
+		return rc;
+	}
+
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu fallback failed: device detached\n", pxd_dev->dev_id);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+		return -ENODEV;
 	}
 
 	trace_pxd_initiate_fallback(pxd_dev->dev_id, pxd_dev->minor);
@@ -1015,7 +1032,6 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 		pxd_request_resume_internal(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
-
 	return rc;
 }
 
@@ -1553,6 +1569,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
 	init_waitqueue_head(&pxd_dev->remove_wait);
+	pxd_dev->remove_result = 0;
 	// hard coded congestion limits within driver
 	atomic_set(&pxd_dev->congested, 0);
 	pxd_dev->qdepth = DEFAULT_CONGESTION_THRESHOLD;
@@ -1694,8 +1711,37 @@ cleanup:
 static void pxd_finish_remove(struct work_struct *work)
 {
 	struct pxd_device *pxd_dev = container_of(work, struct pxd_device, remove_work);
+	int retry_count = 0;
+	const int max_retries = 3; // 3 seconds total wait time
+	const int retry_delay_ms = 1000; // 1 second between retries
 
 	pr_info("%s: dev %llu\n", __func__, pxd_dev->dev_id);
+
+	// Wait to acquire device_op_lock with timeout and retry
+	while (retry_count < max_retries) {
+		printk(KERN_DEBUG "device %llu detach: attempting to acquire ioswitch_active (attempt %d/%d)\n",
+		       pxd_dev->dev_id, retry_count + 1, max_retries);
+
+		if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) == 0) {
+			printk(KERN_DEBUG "device %llu detach: acquired ioswitch_active\n", pxd_dev->dev_id);
+			break;
+		}
+
+		retry_count++;
+		if (retry_count < max_retries) {
+			msleep(retry_delay_ms);
+		}
+	}
+
+	// If we couldn't acquire the lock after retries, return EBUSY
+	if (retry_count >= max_retries) {
+		printk(KERN_WARNING "device %llu detach: timeout waiting for ioswitch_active, returning EBUSY\n",
+		       pxd_dev->dev_id);
+		pxd_dev->remove_result = -EBUSY;
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+		module_put(THIS_MODULE);
+		return;
+	}
 
 	pxd_fastpath_reset_device(pxd_dev);
 
@@ -1745,6 +1791,15 @@ static void pxd_finish_remove(struct work_struct *work)
 
 	put_device(&pxd_dev->dev);
 
+	// Release device operation lock after all cleanup is complete (if we acquired it)
+	if (retry_count < max_retries) {
+		printk(KERN_DEBUG "device %llu detach: releasing device_op_lock\n", pxd_dev->dev_id);
+		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+	}
+
+	// Signal successful completion
+	pxd_dev->remove_result = 0;
+
 	module_put(THIS_MODULE);
 }
 
@@ -1783,19 +1838,27 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 		schedule_work(&pxd_dev->remove_work);
 	}
 	get_device(&pxd_dev->dev);
-	prepare_to_wait(&pxd_dev->remove_wait, &wait, TASK_INTERRUPTIBLE);
 	spin_unlock(&pxd_dev->lock);
 	spin_unlock(&ctx->lock);
+
 	// future proof against device removal bugs
 	// schedule and forget if not done in reasonable time.
-	remtimeo = schedule_timeout(msecs_to_jiffies(500));
+	remtimeo = schedule_timeout(msecs_to_jiffies(3500));
 	finish_wait(&pxd_dev->remove_wait, &wait);
 	if (remtimeo == 0) {
-		pr_warn("remove device %llu scheduled but timedout waiting to complete",
-				dev_id);
+		pr_warn("remove device %llu scheduled but timed out waiting to complete", dev_id);
+		return -ETIMEDOUT;
 	}
+
+	// Get the result from the removal operation
+	err = pxd_dev->remove_result;
 	put_device(&pxd_dev->dev);
-	return 0;
+
+	if (err) {
+		pr_err("remove device %llu failed %d\n", dev_id, err);
+	}
+
+	return err;
 out_lock:
 	spin_unlock(&pxd_dev->lock);
 out:
@@ -2316,6 +2379,14 @@ static ssize_t pxd_debug_store(struct device *dev,
 	case 'x': /* switch fastpath*/
 		printk("dev:%llu - IO fast path switch\n", pxd_dev->dev_id);
 		pxd_debug_switch_fastpath(pxd_dev);
+		break;
+	case 'F': /* controlled failover through locking mechanism */
+		printk("dev:%llu - controlled failover (with locking)\n", pxd_dev->dev_id);
+		pxd_request_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
+		break;
+	case 'B': /* controlled fallback through locking mechanism */
+		printk("dev:%llu - controlled fallback (with locking)\n", pxd_dev->dev_id);
+		pxd_request_ioswitch(pxd_dev, PXD_FALLBACK_TO_KERNEL);
 		break;
 	case 'S': /* app suspend */
 		printk("dev:%llu - requesting IO suspend\n", pxd_dev->dev_id);
