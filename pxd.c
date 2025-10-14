@@ -1276,7 +1276,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0) && !defined(__EL9_STREAM__)
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 #endif
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
@@ -1435,7 +1435,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	pxd_dev->disk = disk;
 
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__EL9_STREAM__)
 	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
 #else
 	blk_mq_freeze_queue(q);
@@ -1671,7 +1671,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__EL9_STREAM__)
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
 #else
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
