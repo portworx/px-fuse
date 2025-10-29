@@ -535,8 +535,14 @@ static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 	}
 
 	memset(&add_ext, 0, sizeof(add_ext));
-	memcpy(&add_ext, &add, sizeof(add));
+	// Copy fields explicitly to avoid alignment issues
+	add_ext.dev_id = add.dev_id;
+	add_ext.size = add.size;
+	add_ext.queue_depth = add.queue_depth;
+	add_ext.discard_size = add.discard_size;
+	add_ext.enable_write_zeroes_support = add.enable_write_zeroes_support;
 	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
+	add_ext.enable_fp = 0; // native path (not fastpath)
 	return pxd_add(conn, &add_ext);
 }
 
