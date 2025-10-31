@@ -32,7 +32,7 @@
 #define BLK_QUEUE_FLUSH(q) \
        blk_queue_flush(q, REQ_FLUSH | REQ_FUA)
 #endif
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,11,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(__ORACLE_UEK__))
 #define BLK_QUEUE_FLUSH(q) \
 	q->limits.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,7,0) || defined(REQ_PREFLUSH)
@@ -155,9 +155,13 @@ static inline unsigned int get_op_flags(struct bio *bio)
 static inline char *bdevname(struct block_device *bdev, char *buf) {
         struct gendisk *hd = bdev->bd_disk;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
-	int partno = bdev->bd_partno;
+#ifdef __EL9_STREAM__
+	int partno = bdev_partno(bdev);
 #else
-	int partno = BD_PARTNO; 
+	int partno = bdev->bd_partno;
+#endif
+#else
+	int partno = BD_PARTNO;
 #endif
 
 	if (!partno)

@@ -26,6 +26,7 @@
 #include "pxd_compat.h"
 #include "pxd_fastpath.h"
 #include "pxd_core.h"
+#include "pxd_trace.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -244,6 +245,9 @@ void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
 	req->in.h.unique = fuse_get_unique(fc);
+	trace_pxd_request(req->pxd_dev->dev_id, req->in.h.unique, req->pxd_rdwr_in.size,
+		req->pxd_rdwr_in.offset, req->pxd_dev->minor, req->rq != NULL ? req_op(req->rq): -1,
+		req->rq != NULL ? req->rq->cmd_flags : -1, req->in.h.opcode, req->pxd_rdwr_in.flags);
 	fc->request_map[req->in.h.unique & (FUSE_MAX_REQUEST_IDS - 1)] = req;
 
 	/*
@@ -550,6 +554,7 @@ static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
+	trace_fuse_notify_add_ext(add.dev_id, add.size, add.queue_depth, add.discard_size, add.open_mode, add.enable_fp, add.paths.count);
 	return pxd_add(conn, &add);
 }
 
@@ -590,6 +595,7 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 	int iovcnt;
 	size_t len;
 
+	trace_copy_in_read_data_iovec(read_data->unique, read_data->iovcnt, read_data->iovcnt - min(read_data->iovcnt, IOV_BUF_SIZE));
 	if (!read_data->iovcnt)
 		return -EFAULT;
 
@@ -600,6 +606,7 @@ static int copy_in_read_data_iovec(struct iov_iter *iter,
 		return -EFAULT;
 	}
 	read_data->iovcnt -= iovcnt;
+
 
 	iov_iter_init(data_iter, READ, iov, iovcnt, iov_length(iov, iovcnt));
 
@@ -625,13 +632,21 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 	if (ret)
 		return ret;
 
+	trace_fuse_notify_read_data_request(req->pxd_dev->dev_id, read_data_p->unique, blk_rq_pos(req->rq) * SECTOR_SIZE,
+		blk_rq_bytes(req->rq), req->pxd_rdwr_in.offset, read_data_p->offset);
+
 	/* advance the iterator if data is unaligned */
-	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK))
+	if (unlikely(req->pxd_rdwr_in.offset & PXD_LBS_MASK)) {
 		iov_iter_advance(&data_iter,
 				 req->pxd_rdwr_in.offset & PXD_LBS_MASK);
+	}
 
 	rq_for_each_segment(bvec, req->rq, breq_iter) {
 		ssize_t len = BVEC(bvec).bv_len;
+
+		trace_fuse_notify_read_data_segment_info(req->pxd_dev->dev_id, read_data_p->unique,
+			BVEC(bvec).bv_offset,
+			BVEC(bvec).bv_len);
 		copied = 0;
 		if (skipped < read_data_p->offset) {
 			if (read_data_p->offset - skipped >= len) {
@@ -646,6 +661,10 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 			size_t copy_this = copy_page_to_iter(BVEC(bvec).bv_page,
 				BVEC(bvec).bv_offset + copied,
 				len - copied, &data_iter);
+
+			trace_fuse_notify_read_data_copy(req->pxd_dev->dev_id, read_data_p->unique, copied, copy_this,
+				BVEC(bvec).bv_offset, BVEC(bvec).bv_offset + copied,
+				BVEC(bvec).bv_len, len - copied, iter->count);
 			if (copy_this != len - copied) {
 				if (!iter->count)
 					return 0;
@@ -659,6 +678,9 @@ static int __fuse_notify_read_data(struct fuse_conn *conn,
 				copied = copy_page_to_iter(BVEC(bvec).bv_page,
 					BVEC(bvec).bv_offset + copied + copy_this,
 					len, &data_iter);
+				trace_fuse_notify_read_data_finalcopy(req->pxd_dev->dev_id, read_data_p->unique, len, copied,
+					BVEC(bvec).bv_offset, BVEC(bvec).bv_offset + copied + copy_this,
+					BVEC(bvec).bv_len);
 				if (copied != len) {
 					printk(KERN_ERR "%s: copy failed new iovec, bio_vec : page = %p len = %d offset = %d\n",
 						__func__, BVEC(bvec).bv_page, BVEC(bvec).bv_len, BVEC(bvec).bv_offset);

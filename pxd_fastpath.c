@@ -18,6 +18,7 @@
 #include "pxd.h"
 #include "pxd_core.h"
 #include "pxd_compat.h"
+#include "pxd_trace.h"
 #include "kiolib.h"
 
 // global fastpath IO work queue
@@ -224,7 +225,7 @@ int fastpath_init(void)
 			}
 		}
 	}
-	// always confirm default 
+	// always confirm default
 	if (fpdefault == NULL) {
 		// fastpath init failed.
 		printk(KERN_ERR"found no online node with online cpus\n");
@@ -350,11 +351,19 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 		return -EINVAL;
 	}
 
+	// Check FUSE connection before attempting ioswitch
+	if (!pxd_dev->ctx || !READ_ONCE(pxd_dev->ctx->fc.connected)) {
+		printk(KERN_WARNING "device %llu ioswitch failed: FUSE disconnected.\n",
+			pxd_dev->dev_id);
+		return -ENOTCONN;
+	}
+
 	switch (code) {
 	case PXD_FAILOVER_TO_USERSPACE:
 		printk("device %llu initiated failover\n", pxd_dev->dev_id);
 		// IO path blocked, a future path refresh will take it to native path
 		// enqueue a failover request to userspace on this device.
+		trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_USERSPACE);
 		return pxd_initiate_failover(pxd_dev);
 	case PXD_FALLBACK_TO_KERNEL:
 		// IO path already routed to userspace.
@@ -779,6 +788,7 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 	struct pxd_context *ctx = pxd_dev->ctx;
 	struct fuse_conn *fc = &ctx->fc;
 	struct fuse_req *req;
+	bool ioswitch_active;
 
 	if (!fastpath_enabled(pxd_dev)) {
 		return;
@@ -786,10 +796,13 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 
 	disableFastPath(pxd_dev, true);
 
+	ioswitch_active = atomic_read(&fp->ioswitch_active);
 	// abort any inflight ioswitch
-	if (atomic_read(&fp->ioswitch_active)) {
+	if (ioswitch_active) {
 		req = request_find(fc, pxd_dev->fp.switch_uid);
 		if (!IS_ERR_OR_NULL(req)) {
+			trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
+				ioswitch_active, pxd_dev->fp.switch_uid);
 			// overwrite switch request to fail all pending IOs
 			req->in.h.opcode = PXD_FAILOVER_TO_USERSPACE;
 			req->out.h.error = -EIO; // force failure status
@@ -798,6 +811,9 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 			pxd_dev->fp.switch_uid = 0;
 			atomic_set(&fp->ioswitch_active, 0);
 		}
+	} else {
+		trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
+			ioswitch_active, 0);
 	}
 
 	// resume from userspace IO suspends
