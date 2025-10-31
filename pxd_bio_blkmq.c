@@ -425,7 +425,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) ||                          \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) && defined(__EL8__))
         if (clone_bio->bi_blkg == NULL)
-                bio_associate_blkg_from_css(clone_bio, blkcg_root_css);
+                bio_associate_blkg_from_css(clone_bio, &blkcg_root.css);
 #endif
 #endif
 
