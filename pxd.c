@@ -1733,13 +1733,110 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 {
 	struct list_head *cur;
-	spin_lock(&ctx->lock);
-	list_for_each(cur, &ctx->list) {
-		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+	size_t ndevs;
+	struct pxd_device **snap_list;
+	struct pxd_device *pxd_dev;
+	size_t i = 0;
+	size_t j;
 
-		_pxd_setup(pxd_dev, enable);
+	if (enable) {
+		spin_lock(&ctx->lock);
+		list_for_each(cur, &ctx->list) {
+			struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+
+			_pxd_setup(pxd_dev, enable);
+		}
+		spin_unlock(&ctx->lock);
+		return;
 	}
+
+	// _pxd_setup with enable=false would call pxd_fastpath_reset_device which would
+	// call blk_mq_quiesce_queue as part of pxd_suspend_io. but blk_mq_quiesce_queue could
+	// sleep => avoid holding ctx->lock spinlock.
+	// to avoid holding spinlock at the time of _pxd_setup with enable=false, do the following
+	// 1. with ctx->lock held, get the number of entries in ctx->list
+	// 2. without ctx->lock held, allocate memory for the snapshot list
+	// 3. with ctx->lock held, copy the entries from ctx->list to the snapshot list and increment their refcount
+	// 4. without ctx->lock held, call _pxd_setup with enable=false for each entry in the snapshot list 
+	//    and then decrement their refcount
+	// 5. without ctx->lock held, free the memory allocated in step 2.
+	//
+	// incrementing the refcount in step 3 is required because there could be a parallel pxd_finish_remove which could
+	// remove the device from ctx->list => the snapshot list could have more entries than ctx->list
+	// because of the parallel pxd_finish_remove.
+	// but snapshot list can never have less entries than ctx->list.
+	// to understand the difference in behavior, let's first consider why snapshot list can never have less entries
+	// than ctx->list. Note that adding an entry to ctx->list is via PXD_ADD which requires an open
+	// fd to /dev/pxd/pxd-control. but pxd_control_open (which is called when /dev/pxd/pxd-control is opened) calls
+	// cancel_delayed_work_sync(&ctx->abort_work) which either cancels the pending abort work or waits for it to complete.
+	// => can't have a parallel PXD_ADD when there is a pending pxd_abort_work
+	// the same doesn't apply for pxd_finish_remove which is called as part of PXD_IOCTL_DETACH_DEVICE which also requires an open
+	// fd, but the pxd (pxd.cc) uses /dev/pxd/pxd-control-10 which doesn't wait for the pending abort work of /dev/pxd/pxd-control
+
+	// step 1
+	spin_lock(&ctx->lock);
+	ndevs = ctx->num_devices;
 	spin_unlock(&ctx->lock);
+
+	// step 2
+	snap_list = kcalloc(ndevs, sizeof(*snap_list), GFP_KERNEL);
+
+	if (snap_list) {
+		// step 3
+		spin_lock(&ctx->lock);
+		list_for_each_entry(pxd_dev, &ctx->list, node) {
+			if (i >= ndevs) {
+				pr_warn("%s: ctx->list has more entries than snap_list, ignoring extra entries\n", __func__);
+				break;
+			}
+			// increment the refcount because of the possibility of parallel pxd_finish_remove
+			get_device(&pxd_dev->dev);
+			snap_list[i++] = pxd_dev;
+		}
+		spin_unlock(&ctx->lock);
+
+		// step 4
+		for (j = 0; j < i; j++) {
+			_pxd_setup(snap_list[j], false);
+			put_device(&snap_list[j]->dev);
+		}
+
+		// step 5
+		kfree(snap_list);
+		return;
+	}
+
+	// unlikely scenario where kcalloc fails
+	// handle one-by-one, zero allocation but O(n^2)
+	for (;;) {
+		struct pxd_device *picked = NULL;
+
+		spin_lock(&ctx->lock);
+		list_for_each_entry(pxd_dev, &ctx->list, node) {
+			spin_lock(&pxd_dev->lock);
+			// connected = false => already processed
+			// connected = true => not processed yet
+			if (pxd_dev->connected) {
+				pxd_dev->connected = false;
+				spin_unlock(&pxd_dev->lock);
+				// increment refcount
+				get_device(&pxd_dev->dev);
+				picked = pxd_dev;
+				break;
+			}
+			spin_unlock(&pxd_dev->lock);
+		}
+		spin_unlock(&ctx->lock);
+
+		if (!picked) {
+			// processed all entries
+			break;
+		}
+
+		_pxd_setup(picked, false);
+		// decrement refcount
+		put_device(&picked->dev);
+	}
 }
 
 static struct pxd_device *dev_to_pxd_dev(struct device *dev)
