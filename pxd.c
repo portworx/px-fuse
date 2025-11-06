@@ -2032,7 +2032,8 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 		spin_lock(&ctx->lock);
 		list_for_each_entry(pxd_dev, &ctx->list, node) {
 			if (i >= ndevs) {
-				pr_warn("%s: ctx->list has more entries than snap_list, ignoring extra entries\n", __func__);
+				pr_warn("%s: ctx->list has more entries than snap_list, ignoring extra entries, devID : %llu minor %d\n", __func__,
+					pxd_dev->dev_id, pxd_dev->minor);
 				break;
 			}
 			// increment the refcount because of the possibility of parallel pxd_finish_remove
