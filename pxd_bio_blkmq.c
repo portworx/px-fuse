@@ -422,10 +422,16 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         clone_bio->bi_end_io = end_clone_bio;
 
 #ifdef CONFIG_BLK_CGROUP
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) ||                          \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) && defined(__EL8__))
-        if (clone_bio->bi_blkg == NULL)
-                bio_associate_blkg_from_css(clone_bio, &blkcg_root.css);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) && defined(__EL8__)
+// Note that following operation is not a no-op; 
+// since linux kernel internally associates with root cgroup if css is NULL.
+if (clone_bio->bi_blkg == NULL) {
+        bio_associate_blkg_from_css(clone_bio, NULL);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+if (clone_bio->bi_blkg == NULL) {
+        bio_associate_blkg_from_css(clone_bio, NULL);
+}
 #endif
 #endif
 
