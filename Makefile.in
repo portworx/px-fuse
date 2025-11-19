@@ -98,6 +98,16 @@ ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9].*\.x86_64'; echo $$?),0
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
 endif
 
+# CentOS Stream 9-10 Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(9|10)\.x86_64'; echo $$?),0)
+PXDEFINES += -D__EL9_STREAM__
+endif
+
+# Oracle UEK Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9]uek\.x86_64'; echo $$?),0)
+PXDEFINES += -D__ORACLE_UEK__
+endif
+
 # Check for Suse
 ifeq ($(shell test -f "/host-os-release"; echo $$?),0)   # inside PX container
 ifeq ($(shell cat "/host-os-release" | grep ID_LIKE | grep -q suse; echo $$?),0)
@@ -178,9 +188,9 @@ install:
 test_clean:
 	@/bin/rm -f test/pxd_test
 
-pxd_test: test/pxd_test.cc
-	@echo "Building Test ..."
-	g++ -I. -std=c++11 test/pxd_test.cc -lgtest -lboost_iostreams -lpthread -o test/pxd_test
+pxd_test: test/pxd_test.cc test/pxd_fastpath_test.cc
+	@echo "Building Tests ..."
+	g++ -I. -std=c++11 test/pxd_test.cc test/pxd_fastpath_test.cc -lgtest -lboost_iostreams -lpthread -o test/pxd_test
 
 rpm:
 	@cd rpm && ./buildrpm.sh
@@ -195,7 +205,13 @@ docker-build: docker-build-dev
 	portworx/px-fuse:dev make
 
 px_version.c:
-	echo "const char *gitversion = \"$(shell git name-rev --name-only HEAD | sed 's/remotes\/origin\///g'):$(shell git rev-parse HEAD)\";" > $@
+	@COMMIT_HASH=$$(git rev-parse HEAD); \
+	if [ ! -f .version ]; then \
+		echo "Error: .version file not found"; \
+		exit 1; \
+	fi; \
+	BRANCH_NAME=$$(cat .version | tr -d '\n'); \
+	echo "const char *gitversion = \"$$BRANCH_NAME:$$COMMIT_HASH\";" > $@
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile

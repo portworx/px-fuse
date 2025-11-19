@@ -25,6 +25,7 @@
 #include "pxd_bio.h"
 #include "pxd_compat.h"
 #include "pxd_core.h"
+#include "pxd_trace.h"
 
 #ifdef CONFIG_BLK_CGROUP
 #include <linux/blk-cgroup.h>
@@ -229,6 +230,8 @@ void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios,
                             "%s: pxd%llu: resuming IO in native path.\n",
                             __func__, pxd_dev->dev_id);
                         atomic_inc(&pxd_dev->fp.nslowPath);
+                        trace_pxd_reroute_slowpath_transition(pxd_dev->dev_id, pxd_dev->minor, TRANSITION_REISSUE_FAILQ, rq_data_dir(req->rq), req_op(req->rq),
+                                blk_rq_pos(req->rq) * SECTOR_SIZE, blk_rq_bytes(req->rq), req->rq->nr_phys_segments, req->rq->cmd_flags);
                         pxdmq_reroute_slowpath(req);
                         continue;
                 }
@@ -422,7 +425,7 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) ||                          \
     (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) && defined(__EL8__))
         if (clone_bio->bi_blkg == NULL)
-                bio_associate_blkg_from_css(clone_bio, blkcg_root_css);
+                bio_associate_blkg_from_css(clone_bio, &blkcg_root.css);
 #endif
 #endif
 
@@ -577,6 +580,7 @@ static void pxd_io_failover(struct kthread_work *work) {
         spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 
         if (cleanup) {
+                trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_IOFAILURE);
                 rc = pxd_initiate_failover(pxd_dev);
                 // If userspace cannot be informed of a failover event, force
                 // abort all IO.
@@ -596,6 +600,9 @@ static void pxd_io_failover(struct kthread_work *work) {
                                    __func__, pxd_dev->dev_id);
                 atomic_inc(&pxd_dev->fp.nslowPath);
                 clone_cleanup(fproot);
+                trace_pxd_reroute_slowpath_transition(pxd_dev->dev_id, pxd_dev->minor, TRANSITION_PXD_IO_FAILOVER, rq_data_dir(fproot_to_request(fproot)), 
+                        req_op(fproot_to_request(fproot)), blk_rq_pos(fproot_to_request(fproot)) * SECTOR_SIZE, blk_rq_bytes(fproot_to_request(fproot)),
+                        fproot_to_request(fproot)->nr_phys_segments, fproot_to_request(fproot)->cmd_flags);
                 pxdmq_reroute_slowpath(fproot_to_fuse_request(fproot));
         }
 }
@@ -674,6 +681,16 @@ static void fp_handle_specialops(struct kthread_work *work) {
 	}
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,19,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE))  || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_EQ_SP5__))
+	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, bdev_max_discard_sectors(bdev), rq->cmd_flags, r);
+#else
+	trace_fp_discard_reply(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, blk_queue_discard(q), rq->cmd_flags, r);
+#endif
+
 	BIO_ENDIO(&cc->clone, r);
 }
 
@@ -729,10 +746,12 @@ static void _end_clone_bio(struct kthread_work *work)
                 blkrc = -EIO;
 
         if (pxd_dev->fp.can_failover && (blkrc == -EIO)) {
+                trace_end_clone_bio(pxd_dev->dev_id, pxd_dev->minor, bio_op(bio), BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio), req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), blkrc, rq->bio, rq->biotail);
                 atomic_inc(&pxd_dev->fp.nerror);
                 pxd_failover_initiate(fproot);
                 return;
         }
+        trace_end_clone_bio(pxd_dev->dev_id, pxd_dev->minor, bio_op(bio), BIO_SECTOR(bio) * SECTOR_SIZE, BIO_SIZE(bio), req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq), blkrc, rq->bio, rq->biotail);
 
         // complete cleanup of all clones
         clone_cleanup(fproot);

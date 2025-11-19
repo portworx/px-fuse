@@ -477,6 +477,9 @@ void pxd_check_q_decongested(struct pxd_device *pxd_dev)
 
 static void pxd_request_complete(struct fuse_conn *fc, struct fuse_req *req, int status)
 {
+	trace_pxd_request_complete(req->pxd_dev->dev_id, req->pxd_dev->minor, req->in.h.unique,
+		blk_rq_pos(req->rq) * SECTOR_SIZE, blk_rq_bytes(req->rq), req_op(req->rq),
+		req->rq->cmd_flags, status);
 	atomic_dec(&req->pxd_dev->ncount);
 	pxd_check_q_decongested(req->pxd_dev);
 	pxd_printk("%s: receive reply to %px(%lld) at %lld err %d\n",
@@ -668,7 +671,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	int rc;
-	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
 
 	switch (op) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
@@ -706,7 +708,6 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 	uint32_t minor, uint32_t flags)
 {
 	int rc;
-	trace_pxd_request(req->in.h.unique, size, off, minor, flags);
 
 	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
 	case REQ_WRITE:
@@ -754,6 +755,8 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	printk("device %llu completed ioswitch %d with status %d\n",
 		pxd_dev->dev_id, req->in.h.opcode, status);
 
+	trace_pxd_ioswitch_complete(pxd_dev->dev_id, pxd_dev->minor, req->in.h.opcode);
+
 	if (req->in.h.opcode == PXD_FAILOVER_TO_USERSPACE) {
 		// if the status is successful, then reissue IO to userspace
 		// else fail IO to complete.
@@ -784,6 +787,16 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 		return -EINVAL;
 	}
 
+	if (!pxd_dev->ctx || !READ_ONCE(pxd_dev->ctx->fc.connected)) {
+		printk(KERN_WARNING "device %llu ioswitch failed: FUSE disconnected.\n",
+			pxd_dev->dev_id);
+		return -ENOTCONN;
+	}
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu ioswitch failed: device detached\n", pxd_dev->dev_id);
+		return -ENODEV;
+	}
+
 	req = pxd_fuse_req(pxd_dev);
 	if (IS_ERR_OR_NULL(req)) {
 		return -ENOMEM;
@@ -811,6 +824,12 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return -EINVAL;
 	}
 
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu failover failed: device detached\n", pxd_dev->dev_id);
+		return -ENODEV;
+	}
+
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return 0; // already initiated, skip it.
 	}
@@ -826,7 +845,6 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		pxd_request_resume(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
-
 	return rc;
 }
 
@@ -839,9 +857,19 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 		return -EINVAL;
 	}
 
+	// Check if device is detached/removed - early exit
+	if (pxd_dev->removing || !pxd_dev->exported) {
+		printk(KERN_WARNING "device %llu fallback failed: device detached\n", pxd_dev->dev_id);
+		return -ENODEV;
+	}
+
+	// Serialize all fallback operations with device detach
+	// Try to acquire lock immediately, fail if not available
 	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 0, 1) != 0) {
 		return -EBUSY;
 	}
+
+	trace_pxd_initiate_fallback(pxd_dev->dev_id, pxd_dev->minor);
 
 	rc = pxd_request_suspend_internal(pxd_dev, true, false);
 	if (rc) {
@@ -854,7 +882,6 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 		pxd_request_resume_internal(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
-
 	return rc;
 }
 
@@ -896,6 +923,9 @@ static void pxd_rq_fn(struct request_queue *q)
 		if (!rq)
 			break;
 
+		trace_pxd_rq_fn(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+			req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+			rq->nr_phys_segments, rq->cmd_flags);
 		/* Filter out block requests we don't understand. */
 		if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected)) {
 			__blk_end_request_all(rq, 0);
@@ -976,6 +1006,9 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	struct fuse_req *req = blk_mq_rq_to_pdu(rq);
 	struct fuse_conn *fc = &pxd_dev->ctx->fc;
 
+	trace_pxd_queue_rq(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
+		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
+		rq->nr_phys_segments, rq->cmd_flags, rq->bio, rq->biotail, rq->bio && rq->bio == rq->biotail, rq->bio ? BIO_SECTOR(rq->bio) * SECTOR_SIZE : -1);
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
@@ -1045,7 +1078,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.ops = &pxd_mq_ops;
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0) && !defined(__EL9_STREAM__)
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 #endif
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
@@ -1077,7 +1110,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 #else
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 #endif
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || ((LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)) && !defined(__ORACLE_UEK__))
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
@@ -1155,7 +1188,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
 #endif
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__))
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,14,0) || (LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0) && !defined(__EL8__) || defined(__ORACLE_UEK__))
 	blk_queue_max_hw_sectors(q, PXD_MAX_IO / SECTOR_SIZE);
 	blk_queue_max_segment_size(q, SEGMENT_SIZE);
 	blk_queue_max_segments(q, (PXD_MAX_IO / PXD_LBS));
@@ -1381,6 +1414,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	}
 
 	spin_lock(&pxd_dev->lock);
+	trace_pxd_export(pxd_dev->dev_id, pxd_dev->minor, pxd_dev->exported);
 	if (pxd_dev->exported) {
 		spin_unlock(&pxd_dev->lock);
 		return 0;
@@ -1440,7 +1474,6 @@ cleanup:
 static void pxd_finish_remove(struct work_struct *work)
 {
 	struct pxd_device *pxd_dev = container_of(work, struct pxd_device, remove_work);
-
 	pr_info("%s: dev %llu\n", __func__, pxd_dev->dev_id);
 
 	pxd_fastpath_reset_device(pxd_dev);
@@ -1490,7 +1523,6 @@ static void pxd_finish_remove(struct work_struct *work)
 	spin_unlock(&pxd_dev->ctx->lock);
 
 	put_device(&pxd_dev->dev);
-
 	module_put(THIS_MODULE);
 }
 
@@ -1524,6 +1556,11 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 	}
 
 	if (!pxd_dev->removing) {
+		if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) != 0) {
+			printk(KERN_ERR "device %llu detach: failed to acquire ioswitch_active\n", pxd_dev->dev_id);
+			err = -EBUSY;
+			goto out_lock;
+		}
 		pxd_dev->removing = true;
 		INIT_WORK(&pxd_dev->remove_work, pxd_finish_remove);
 		schedule_work(&pxd_dev->remove_work);
@@ -1589,12 +1626,15 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	}
 	(void)get_device(&pxd_dev->dev);
 
+	trace_pxd_ioc_update_size(pxd_dev->dev_id, pxd_dev->minor, pxd_dev->size, update_size->size);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #else
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #endif
+	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
@@ -2297,6 +2337,7 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
+	trace_pxd_close_ctrl_fd(ctx->id);
 	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
 		ctx->open_seq);
 	return 0;
