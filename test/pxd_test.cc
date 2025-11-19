@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include <cstdlib>
@@ -23,6 +24,8 @@
 #include "pxd.h"
 
 using namespace std::placeholders;
+
+#define ALIGN(x, a) (((x) + (a)-1) & ~((a)-1))
 
 struct fuse_notify_header : public ::fuse_out_header {
 	fuse_notify_header(int32_t opcode, uint32_t op_len);
@@ -109,8 +112,8 @@ class PxdTest : public ::testing::Test
 	int wait_msg(int timeout); // timeout in seconds
 	void read_block(fuse_in_header *in, pxd_rdwr_in *rd);
 	void validate_device_properties(const std::string &device_name,
-	                                uint64_t expected_discard_granularity = 1048576,
-	                                uint64_t expected_max_discard_bytes = 1048576);
+	                                uint64_t expected_discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
+	                                uint64_t expected_max_discard_bytes = PXD_MAX_DISCARD_GRANULARITY);
 
 	int write_pxd_timeout(int minor, int timeout_value);
 
@@ -168,7 +171,8 @@ void PxdTest::dev_add(pxd_add_out &add, int &minor, std::string &name)
 	name = std::string(PXD_DEV_PATH) + std::to_string(add.dev_id);
 
 	dev_export(minor, name);
-	validate_device_properties(name, 1024 * 1024, 1024 * 1024);
+	validate_device_properties(name, PXD_MAX_DISCARD_GRANULARITY,
+	                           ALIGN(add.discard_size, PXD_MAX_DISCARD_GRANULARITY));
 }
 
 void PxdTest::dev_add_ext(pxd_add_ext_out &add_ext, int &minor, std::string &name)
@@ -462,25 +466,28 @@ void PxdTest::validate_device_properties(const std::string &device_name,
 	EXPECT_GE(read_sysfs_value(sysfs_path + "read_ahead_kb"), 128);
 
 	// Check if FUA file exists before trying to read it
-    std::string fua_path = sysfs_path + "fua";
-    if (access(fua_path.c_str(), F_OK) == 0) {
-       EXPECT_EQ(1, read_sysfs_value(fua_path));
-       std::cout << "FUA validation passed" << std::endl;
-    } else {
-       std::cout << "WARNING: FUA sysfs attribute does not exist at: " << fua_path << std::endl;
-       // Check if the queue actually has FUA capability
-       std::string features_path = sysfs_path + "write_cache";
-       if (access(features_path.c_str(), F_OK) == 0) {
-           std::cout << "write_cache attribute exists, checking value..." << std::endl;
-           system(("cat " + features_path).c_str());
-       }
-    }
+	std::string fua_path = sysfs_path + "fua";
+	if (access(fua_path.c_str(), F_OK) == 0) {
+		EXPECT_EQ(1, read_sysfs_value(fua_path));
+		std::cout << "FUA validation passed" << std::endl;
+	} else {
+		std::cout << "WARNING: FUA sysfs attribute does not exist at: " << fua_path << std::endl;
+		// Check if the queue actually has FUA capability
+		std::string features_path = sysfs_path + "write_cache";
+		if (access(features_path.c_str(), F_OK) == 0) {
+			std::cout << "write_cache attribute exists, checking value..." << std::endl;
+			system(("cat " + features_path).c_str());
+		}
+	}
 }
 
 void PxdTest::SetUp()
 {
 	fprintf(stderr, "%s\n", __func__);
 	seteuid(0);
+	if (system("/usr/bin/sudo /sbin/lsmod | grep px") == 0) {
+		ASSERT_EQ(0, system("/usr/bin/sudo /sbin/rmmod px"));
+	}
 	auto insmod_ret =  system("/usr/bin/sudo /sbin/insmod px.ko");
 
 	if (insmod_ret != 0 && (system("/usr/bin/sudo /sbin/lsmod | grep px") != 0)) {
@@ -702,6 +709,147 @@ TEST_F(PxdTest, read)
 	rt.join();
 	// Detach block device
 	dev_remove(add.dev_id);
+}
+
+TEST_F(PxdTest, blkdiscard_ioctl)
+{
+	struct pxd_add_out add;
+	std::string name;
+	int minor = 0;
+	struct rdwr_in rdwr;
+	ssize_t read_bytes = 0;
+	const uint64_t device_size = 32 * 1024 * 1024;                    // 32MB device
+	const uint64_t discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
+	const uint64_t discard_offset = 0; // 0MB offset (aligned to granularity)
+	// const uint64_t discard_length = 2 * 1024 * 1024; // 2MB length
+	const uint64_t expected_kernel_discard_size =
+	    discard_granularity; // Kernel may align to granularity
+
+	std::cout << "Starting BLKDISCARD ioctl test" << std::endl;
+
+	std::vector<uint64_t> discard_sizes = {0,
+	                                       4096,
+	                                       PXD_MAX_DISCARD_GRANULARITY,
+	                                       PXD_MAX_DISCARD_GRANULARITY + 512 * 1024,
+	                                       PXD_MAX_DISCARD_GRANULARITY * 3,
+	                                       PXD_MAX_DISCARD_GRANULARITY * 32,
+	                                       PXD_MAX_DISCARD_GRANULARITY * 32 + 512 * 1024};
+
+	std::vector<uint64_t> discard_lengths = {0, 4096, PXD_MAX_DISCARD_GRANULARITY,
+	                                         PXD_MAX_DISCARD_GRANULARITY + 512 * 1024,
+	                                         PXD_MAX_DISCARD_GRANULARITY * 3};
+
+	// Attach a kernel block device with discard support
+	add.dev_id = 1;
+	add.size = device_size;
+	add.queue_depth = 128;
+	for (uint64_t discard_size : discard_sizes) {
+		add.discard_size = discard_size;
+		dev_add(add, minor, name);
+			validate_device_properties(name, PXD_MAX_DISCARD_GRANULARITY,
+									ALIGN(add.discard_size, PXD_MAX_DISCARD_GRANULARITY));
+			std::cout << "Device created: " << name << std::endl;
+
+		for (uint64_t discard_length : discard_lengths) {
+			
+			std::cout << "============>	Testing discard for discard size: " << discard_size
+			          << ", and discard length: " << discard_length << std::endl;
+
+			int timeout_attempts = 0;
+			const int max_timeout_attempts = 50;
+			bool discard_issued = false;
+			std::thread discard_thread;
+			uint64_t total_discarded = 0;
+			const uint64_t expected_total_discard = discard_length;
+
+			while (total_discarded < expected_total_discard) {
+				if (discard_size == 0) {
+					std::cout << "Not expecting discard ioctl since discard size is 0" << std::endl;
+					break;
+				}
+				// Issue BLKDISCARD on first iteration after we're ready to handle requests
+				if (!discard_issued) {
+					discard_thread = std::thread([&]() {
+						int fd = open(name.c_str(), O_RDWR);
+						ASSERT_GT(fd, 0) << "Failed to open device: " << name;
+
+						uint64_t range[2] = {discard_offset, discard_length};
+
+						std::cout << "Issuing BLKDISCARD ioctl: offset=" << discard_offset
+						          << ", length=" << discard_length << std::endl;
+
+						int ret = ioctl(fd, BLKDISCARD, range);
+						std::cout << "BLKDISCARD ioctl completed with ret=" << ret << std::endl;
+						ASSERT_EQ(ret, 0) << "BLKDISCARD ioctl failed";
+
+						close(fd);
+					});
+					discard_issued = true;
+					std::cout << "Started BLKDISCARD thread, now listening for kernel requests..."
+					          << std::endl;
+				}
+				int ret = wait_msg(2);
+				if (ret == -ETIMEDOUT) {
+					timeout_attempts++;
+					std::cout << "Timeout waiting for discard request (attempt " << timeout_attempts
+					          << ")" << std::endl;
+					if (timeout_attempts >= max_timeout_attempts) {
+						std::cout << "ERROR: Max timeouts reached" << std::endl;
+						break;
+					}
+					continue;
+				}
+				ASSERT_EQ(ret, 0);
+
+				read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
+				ASSERT_GT(read_bytes, 0);
+
+				struct pxd_rdwr_in *rd = reinterpret_cast<pxd_rdwr_in *>(&rdwr.rdwr);
+
+				std::cout << "Received request: opcode=" << rdwr.in.opcode
+				          << ", offset=" << rd->offset << ", size=" << rd->size << std::endl;
+
+				if (rdwr.in.opcode == PXD_DISCARD) {
+					std::cout << "Received PXD_DISCARD request" << std::endl;
+
+					// Reply success to the kernel
+					fuse_out_header oh;
+					oh.len = sizeof(oh);
+					oh.error = 0;
+					oh.unique = rdwr.in.unique;
+					ssize_t write_ret = ::write(ctl_fd, &oh, sizeof(oh));
+					ASSERT_EQ(sizeof(oh), write_ret);
+
+					// Track total discarded
+					total_discarded += rd->size;
+					std::cout << "SUCCESS: Processed " << rd->size
+					          << " bytes, total: " << total_discarded << "/"
+					          << expected_total_discard << std::endl;
+				} else {
+					// Handle other operations normally
+					finish_io(&rdwr);
+				}
+			}
+
+			// Clean up thread
+			if (discard_thread.joinable()) {
+				discard_thread.join();
+			}
+
+			if (total_discarded || !discard_size) {
+				std::cout << "SUCCESS: BLKDISCARD ioctl test completed successfully" << std::endl;
+			} else {
+				std::cerr << "ERROR: BLKDISCARD test failed - no discard request received"
+				          << std::endl;
+			}
+
+			std::cout << "============>	BLKDISCARD ioctl test completed" << std::endl;
+			
+		}
+		// Detach block device
+		dev_remove(add.dev_id);
+		sleep(1);
+	}
 }
 
 int main(int argc, char **argv)
