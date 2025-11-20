@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
+#include <chrono>
 
 #include "fuse.h"
 #include "pxd.h"
@@ -119,13 +120,14 @@ class PxdTest : public ::testing::Test
 	int finish_io(struct rdwr_in *, bool read_data = false);
 	void write_thread(const char *name);
 	void read_thread(const char *name);
+	void write_thread_timeout(const char *name);
 	void cleaner();
 };
 
 int PxdTest::write_pxd_timeout(int minor, int timeout_value)
 {
 	char sysfs_path[256];
-	snprintf(sysfs_path, sizeof(sysfs_path), "/sys/devices/pxd!pxd/%d/timeout", minor);
+	snprintf(sysfs_path, sizeof(sysfs_path), "/sys/devices/pxd/%d/timeout", minor);
 
 	FILE *fp = fopen(sysfs_path, "w");
 	if (!fp) {
@@ -698,6 +700,92 @@ TEST_F(PxdTest, read)
 
 	rt.join();
 	// Detach block device
+	dev_remove(add.dev_id);
+}
+
+void PxdTest::write_thread_timeout(const char *name)
+{
+	auto buf = aligned_buffer(write_len);
+	init_pattern(buf.get(), write_len);
+
+	int fd = open(name, O_RDWR | O_DIRECT);
+	ASSERT_TRUE(fd >= 0);
+
+	fprintf(stderr, "write thread: waiting for attach IO to complete for 10 seconds\n");
+	std::this_thread::sleep_for(std::chrono::seconds(10)); // wait for attach IO to complete
+
+	auto off = test_off * 2;
+	ssize_t write_bytes = pwrite(fd, buf.get(), write_len, off);
+	
+	ASSERT_EQ(-1, write_bytes);
+	close(fd);
+}
+
+TEST_F(PxdTest, AbortContextWithInFlightIO)
+{
+	struct pxd_add_out add;
+	std::string name;
+	int minor = 0;
+
+	add.dev_id = 1;
+	add.size = 1024 * 1024;
+	add.queue_depth = 128;
+	add.discard_size = PXD_LBS;
+	// create a /dev/pxd/pxd1 device
+	dev_add(add, minor, name);
+
+	ASSERT_TRUE(added_ids.find(1) != added_ids.end());
+
+	const int test_timeout_secs = 30; // min valid value
+	// set timeout to 30s
+	ASSERT_EQ(0, write_pxd_timeout(minor, test_timeout_secs));
+
+	// start a thread to do a write to /dev/pxd/pxd1 at test_off
+	std::thread wt(&PxdTest::write_thread_timeout, this, name.c_str());
+
+	struct rdwr_in rdwr;
+	struct pxd_rdwr_in *wr {nullptr};
+	auto off = test_off * 2;
+	while (1) {
+		// wait for upto 1 second for px-fuse to notify the ctrl fd
+		int ret = wait_msg(1);
+		if (ret == -ETIMEDOUT) {
+			continue;
+		}
+		EXPECT_EQ(ret, 0);
+
+		ssize_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr_in));
+		EXPECT_EQ(read_bytes, sizeof(rdwr_in));
+		wr = reinterpret_cast<pxd_rdwr_in*>(&rdwr.rdwr);
+		// find the test write
+		if (rdwr.in.opcode == PXD_WRITE && rdwr.rdwr.offset >= off && rdwr.rdwr.offset < off + write_len) {
+			fprintf(stderr, "found the test write: offset: %ld, len = %d\n", rdwr.rdwr.offset, rdwr.rdwr.size);
+			break;
+		} else {
+			fprintf(stderr, "opcode : %d, offset: %ld, len = %d\n", rdwr.in.opcode, rdwr.rdwr.offset, rdwr.rdwr.size);
+			// finish unrelated IO
+			finish_io(&rdwr);
+		}
+	}
+
+	// validate the write request
+	ASSERT_EQ(wr->dev_minor, minor);
+	ASSERT_EQ(wr->offset, off);
+	ASSERT_EQ(wr->size, write_len);
+
+	// close the ctrl fd to trigger pxd_abort_context
+	close(ctl_fd);
+	ctl_fd = -1; 
+
+	std::this_thread::sleep_for(std::chrono::seconds(test_timeout_secs + 5));
+	fprintf(stderr, "Test: Wait complete.\n");
+
+	wt.join();
+
+	// re-open the control fd to remove the device
+	ctl_fd = open(control_device(0).c_str(), O_RDWR);
+	ASSERT_GT(ctl_fd, 0);
+	// detach the device
 	dev_remove(add.dev_id);
 }
 
