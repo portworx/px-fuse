@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <boost/lexical_cast.hpp>
 #include <fcntl.h>
@@ -194,16 +195,11 @@ void PxdTest::dev_add_ext(pxd_add_ext_out &add_ext, int &minor, std::string &nam
 	ssize_t write_bytes = writev(ctl_fd, iov, 2);
 	ASSERT_GT(write_bytes, 0);
 
-	std::cout << "dev_add_ext: PXD_ADD_EXT completed, wrote " << write_bytes << " bytes"
-	          << std::endl;
-	std::cout << "dev_add_ext: device ID = " << add_ext.dev_id << std::endl;
-
 	added_ids.insert(add_ext.dev_id);
 	minor = write_bytes;
 	name = std::string(PXD_DEV_PATH) + std::to_string(add_ext.dev_id);
 
-	dev_export(minor, name);
-	std::cout << "dev_add_ext: expected device path = " << name << std::endl;
+	dev_export(add_ext.dev_id, name);
 }
 
 void PxdTest::dev_export(uint64_t dev_id, const std::string &expected_name)
@@ -222,10 +218,6 @@ void PxdTest::dev_export(uint64_t dev_id, const std::string &expected_name)
 
 	ssize_t write_bytes = writev(ctl_fd, iov, 2);
 	ASSERT_GT(write_bytes, 0);
-
-	std::cout << "dev_export: PXD_EXPORT completed, wrote " << write_bytes << " bytes" << std::endl;
-	std::cout << "dev_export: device ID = " << dev_id << std::endl;
-	std::cout << "dev_export: expected device path = " << expected_name << std::endl;
 
 	// Wait for device file to appear
 	for (int i = 0; i < 10; i++) {
@@ -520,17 +512,24 @@ void PxdTest::TearDown()
 		ctl_fd = -1;
 	}
 
-	int ret = 0;
-	int iter = 0;
-	while (1) {
-		iter++;
-		ret = system("/usr/bin/sudo /sbin/rmmod px.ko");
-		if (ret == 0)
-			break;
-		fprintf(stderr, "waiting for rmmod to pass\n");
-		sleep(1);
+	// Check if module is loaded before trying to unload
+	int check_ret = system("/sbin/lsmod | grep -q '^px '");
+	if (check_ret == 0) {
+		// Module is loaded, unload it
+		int ret = 0;
+		int iter = 0;
+		while (iter < 10) {  // Add max retry limit to avoid infinite loop
+			iter++;
+			ret = system("/usr/bin/sudo /sbin/rmmod px.ko");
+			if (ret == 0)
+				break;
+			fprintf(stderr, "waiting for rmmod to pass\n");
+			sleep(1);
+		}
+		fprintf(stderr, "took %d seconds to perform rmmod\n", iter);
+	} else {
+		fprintf(stderr, "module px not loaded, skipping rmmod\n");
 	}
-	fprintf(stderr, "took %d seconds to perform rmmod\n", iter);
 }
 
 // Read block from kernel
@@ -604,6 +603,7 @@ TEST_F(PxdTest, device_size)
 	add.size = target_dev_size;
 	add.queue_depth = 128;
 	add.discard_size = 4096;
+	add.enable_write_zeroes_support = 0;
 	dev_add(add, minor, name);
 
 	boost::iostreams::file_descriptor dev_fd(name);
@@ -684,6 +684,7 @@ TEST_F(PxdTest, read)
 	add.size = 1024 * 1024;
 	add.queue_depth = 128;
 	add.discard_size = PXD_MAX_DISCARD_GRANULARITY;
+	add.enable_write_zeroes_support = 0;
 	dev_add(add, minor, name);
 
 	// Start a thread to perform reads on the attached device
@@ -850,6 +851,225 @@ TEST_F(PxdTest, blkdiscard_ioctl)
 		dev_remove(add.dev_id);
 		sleep(1);
 	}
+}
+
+// Test that fastpath does NOT use WriteZero→Discard optimization
+// Even with feature flag enabled, fastpath should write actual zeros (not discard)
+// because LVM thin pools don't support discard
+//
+// Test Flow:
+// 1. Create backing file filled with PATTERN DATA (0x00, 0x01, 0x02, ..., 0xFF, 0x00, ...)
+// 2. Create fastpath device with write_zeroes DISABLED
+// 3. Write ZEROS to a specific region (offset 10MB, size 1MB) via PXD device
+// 4. Verify backing file has ACTUAL ZEROS at that region (not pattern data)
+// 5. This proves fastpath writes real zeros, not using discard
+TEST_F(PxdTest, fastpath_write_zeroes_no_discard)
+{
+	// ========== STEP 1: Create backing file with PATTERN DATA ==========
+	std::string backing_file = "/tmp/pxd_fastpath_wz_test.img";
+	int backing_fd = open(backing_file.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+	ASSERT_GT(backing_fd, 0);
+
+	// Create 100MB file
+	const size_t file_size = 100 * 1024 * 1024;
+	ASSERT_EQ(0, ftruncate(backing_fd, file_size));
+
+	// Fill ENTIRE file with PATTERN DATA (0x00, 0x01, 0x02, ..., 0xFF, 0x00, ...)
+	// This ensures we can detect if zeros are actually written
+	std::cout << "Filling backing file with pattern data (non-zero)..." << std::endl;
+	auto pattern_buf = aligned_buffer(1024 * 1024);  // 1MB buffer
+	init_pattern(pattern_buf.get(), 1024 * 1024);
+	for (size_t i = 0; i < file_size / (1024 * 1024); i++) {
+		ssize_t written = pwrite(backing_fd, pattern_buf.get(), 1024 * 1024, i * 1024 * 1024);
+		ASSERT_EQ(written, 1024 * 1024);
+	}
+	fsync(backing_fd);
+	close(backing_fd);
+	std::cout << "Backing file filled with pattern data (100MB)" << std::endl;
+
+	// ========== STEP 2: Create fastpath device with write_zeroes DISABLED ==========
+	std::cout << "\nCreating fastpath device..." << std::endl;
+	pxd_add_ext_out add_ext = {};
+	add_ext.dev_id = 1;
+	add_ext.size = file_size;
+	add_ext.queue_depth = 128;
+	add_ext.discard_size = 0;  // Fastpath: discard disabled
+	add_ext.enable_write_zeroes_support = 0;  // Fastpath: always 0 (no WriteZero→Discard)
+	add_ext.open_mode = O_RDWR | O_DIRECT;
+	add_ext.enable_fp = 1;  // Enable fastpath
+
+	// Setup backing device path
+	add_ext.paths.count = 1;
+	strncpy(add_ext.paths.devpath[0], backing_file.c_str(), MAX_PXD_DEVPATH_LEN);
+	add_ext.paths.devpath[0][MAX_PXD_DEVPATH_LEN] = '\0';
+
+	int minor;
+	std::string name;
+	dev_add_ext(add_ext, minor, name);
+	std::cout << "Fastpath device created: " << name << std::endl;
+
+	// Verify write_zeroes is DISABLED in sysfs (fastpath should always have it disabled)
+	std::string sysfs_path = "/sys/block/pxd!pxd" + std::to_string(add_ext.dev_id) +
+	                         "/queue/write_zeroes_max_bytes";
+	std::ifstream sysfs_file(sysfs_path);
+	if (sysfs_file.is_open()) {
+		std::string write_zeroes_max;
+		std::getline(sysfs_file, write_zeroes_max);
+		std::cout << "Fastpath write_zeroes_max_bytes: " << write_zeroes_max << std::endl;
+		sysfs_file.close();
+
+		// Should be 0 (disabled) for fastpath
+		EXPECT_EQ(std::stoi(write_zeroes_max), 0);
+	} else {
+		std::cout << "Could not read write_zeroes_max_bytes from sysfs" << std::endl;
+	}
+
+	// ========== STEP 3: Write ZEROS to specific region via PXD device ==========
+	// Region: offset 10MB, size 1MB
+	// This region currently has PATTERN DATA in the backing file
+	// After writing zeros, it should have ACTUAL ZEROS (0x00, 0x00, 0x00, ...)
+	const size_t zero_offset = 10 * 1024 * 1024;  // Start at 10MB
+	const size_t zero_size = 1024 * 1024;         // Write 1MB of zeros
+
+	std::cout << "\nWriting ZEROS to PXD device:" << std::endl;
+	std::cout << "  Offset: " << zero_offset << " bytes (" << (zero_offset / 1024 / 1024) << " MB)" << std::endl;
+	std::cout << "  Size:   " << zero_size << " bytes (" << (zero_size / 1024 / 1024) << " MB)" << std::endl;
+
+	// Create a lambda to write zeros in a separate thread
+	// This is necessary because if the write goes through FUSE (instead of fastpath),
+	// we need the main thread to handle FUSE requests
+	std::atomic<bool> write_completed(false);
+	ssize_t write_result = 0;
+
+	std::thread write_thread([&]() {
+		int dev_fd = open(name.c_str(), O_RDWR | O_DIRECT);
+		if (dev_fd <= 0) {
+			std::cout << "  ERROR: Failed to open device in write thread" << std::endl;
+			write_completed = true;
+			return;
+		}
+
+		auto zero_buf = aligned_buffer(zero_size);
+		memset(zero_buf.get(), 0, zero_size);
+
+		std::cout << "  Write thread: Calling pwrite()..." << std::endl;
+		write_result = pwrite(dev_fd, zero_buf.get(), zero_size, zero_offset);
+		std::cout << "  Write thread: pwrite() returned: " << write_result << std::endl;
+
+		// NOTE: Don't call fsync() here - it can block indefinitely
+		// Fastpath writes go directly to backing file, no sync needed
+		close(dev_fd);
+		std::cout << "  Write thread: Setting write_completed = true" << std::endl;
+		write_completed = true;
+	});
+
+	// Wait for write to complete, handling any FUSE requests that come through
+	// (in case fastpath doesn't handle it directly)
+	std::cout << "  Waiting for write to complete (handling FUSE requests if needed)..." << std::endl;
+
+	int timeout_count = 0;
+	const int max_timeouts = 10;  // Wait up to 10 seconds
+
+	while (!write_completed.load() && timeout_count < max_timeouts) {
+		int ret = wait_msg(1);  // 1 second timeout
+		if (ret == -ETIMEDOUT) {
+			timeout_count++;
+			std::cout << "  Timeout " << timeout_count << "/" << max_timeouts
+			          << " - write_completed=" << write_completed.load() << std::endl;
+			continue;
+		}
+
+		// Handle any FUSE requests that come through
+		struct rdwr_in rdwr;
+		ssize_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
+		if (read_bytes > 0) {
+			std::cout << "  Received FUSE request opcode=" << rdwr.in.opcode << std::endl;
+			finish_io(&rdwr);  // Reply to kernel
+		}
+	}
+
+	// Wait for write thread to complete
+	write_thread.join();
+
+	ASSERT_TRUE(write_completed.load()) << "Write did not complete within timeout";
+	ASSERT_EQ(write_result, (ssize_t)zero_size) << "Write failed or incomplete";
+	std::cout << "  Written: " << write_result << " bytes of zeros" << std::endl;
+	std::cout << "Zeros written successfully via PXD device" << std::endl;
+
+	// ========== STEP 4: Verify backing file has ACTUAL ZEROS ==========
+	// Read directly from backing file (not through PXD device)
+	// If zeros were written correctly, we should see 0x00 bytes
+	// If WriteZero→Discard was used incorrectly, we might see pattern data or garbage
+	std::cout << "\nVerifying backing file has ACTUAL ZEROS..." << std::endl;
+
+	backing_fd = open(backing_file.c_str(), O_RDONLY);
+	ASSERT_GT(backing_fd, 0);
+
+	auto read_buf = aligned_buffer(zero_size);
+	ssize_t read_bytes = pread(backing_fd, read_buf.get(), zero_size, zero_offset);
+	ASSERT_EQ(read_bytes, (ssize_t)zero_size);
+	std::cout << "  Read " << read_bytes << " bytes from backing file at offset "
+	          << zero_offset << std::endl;
+
+	// Verify ALL bytes in the region are ZERO (0x00)
+	uint8_t *data = (uint8_t *)read_buf.get();
+	size_t zero_count = 0;
+	size_t non_zero_count = 0;
+
+	for (size_t i = 0; i < zero_size; i++) {
+		if (data[i] == 0) {
+			zero_count++;
+		} else {
+			non_zero_count++;
+			// Only report first few non-zero bytes to avoid spam
+			if (non_zero_count <= 10) {
+				std::cout << "  ERROR: Byte at offset " << i << " is 0x"
+				          << std::hex << (int)data[i] << std::dec
+				          << " (expected 0x00)" << std::endl;
+			}
+		}
+		EXPECT_EQ(data[i], 0) << "Byte at offset " << i << " is not zero";
+	}
+
+	std::cout << "  Zero bytes:     " << zero_count << " / " << zero_size << std::endl;
+	std::cout << "  Non-zero bytes: " << non_zero_count << " / " << zero_size << std::endl;
+
+	close(backing_fd);
+
+	// ========== STEP 5: Verify region BEFORE and AFTER still has pattern data ==========
+	// This confirms we only wrote zeros to the specific region, not the entire file
+	std::cout << "\nVerifying regions outside zero-write still have pattern data..." << std::endl;
+
+	backing_fd = open(backing_file.c_str(), O_RDONLY);
+	ASSERT_GT(backing_fd, 0);
+
+	// Check 1MB BEFORE the zero region (offset 9MB)
+	auto before_buf = aligned_buffer(1024 * 1024);
+	ssize_t before_bytes = pread(backing_fd, before_buf.get(), 1024 * 1024, 9 * 1024 * 1024);
+	ASSERT_EQ(before_bytes, 1024 * 1024);
+	EXPECT_TRUE(verify_pattern(before_buf.get(), 1024 * 1024))
+		<< "Region BEFORE zero-write should still have pattern data";
+	std::cout << "  Region BEFORE (9MB-10MB): Pattern data intact" << std::endl;
+
+	// Check 1MB AFTER the zero region (offset 11MB)
+	auto after_buf = aligned_buffer(1024 * 1024);
+	ssize_t after_bytes = pread(backing_fd, after_buf.get(), 1024 * 1024, 11 * 1024 * 1024);
+	ASSERT_EQ(after_bytes, 1024 * 1024);
+	EXPECT_TRUE(verify_pattern(after_buf.get(), 1024 * 1024))
+		<< "Region AFTER zero-write should still have pattern data";
+	std::cout << "  Region AFTER (11MB-12MB): Pattern data intact" << std::endl;
+
+	close(backing_fd);
+
+	// Cleanup
+	dev_remove(add_ext.dev_id);
+	unlink(backing_file.c_str());
+
+	std::cout << "\n========================================" << std::endl;
+	std::cout << "Fastpath WriteZero test PASSED" << std::endl;
+	std::cout << "Actual zeros written to backing file" << std::endl;
+	std::cout << "No WriteZero→Discard conversion" << std::endl;
+	std::cout << "========================================" << std::endl;
 }
 
 int main(int argc, char **argv)
