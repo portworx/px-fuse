@@ -423,10 +423,25 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         clone_bio->bi_end_io = end_clone_bio;
 
 #ifdef CONFIG_BLK_CGROUP
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0) ||                          \
-    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) && defined(__EL8__))
-        if (clone_bio->bi_blkg == NULL)
-                bio_associate_blkg_from_css(clone_bio, &blkcg_root.css);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0) && defined(__EL8__)
+if (clone_bio->bi_blkg == NULL) {
+        #ifdef blkcg_root_css
+        bio_associate_blkg_from_css(clone_bio, blkcg_root_css);
+        #endif
+}
+if (clone_bio->bi_blkg == NULL)
+        printk(KERN_WARNING "blkmq fastpath: clone_bio has no cgroup association");
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)
+if (clone_bio->bi_blkg == NULL) {
+        // For kernel 5.x: try blkcg_root if available, otherwise fallback
+        #ifdef blkcg_root
+        bio_associate_blkg_from_css(clone_bio, &blkcg_root.css);
+        #else
+        bio_associate_blkg(clone_bio);
+        #endif
+}
+if (clone_bio->bi_blkg == NULL)
+        printk(KERN_WARNING "blkmq fastpath: clone_bio has no cgroup association");
 #endif
 #endif
 
