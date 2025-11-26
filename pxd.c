@@ -1030,13 +1030,21 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 {
 	struct fp_root_context *fproot = &req->fproot;
 	fp_root_context_init(fproot);
-	if (pxd_dev->fp.fastpath) {
+
+	// rcu read side critical section can't sleep
+	// fastpath_queue_work -> kthread_queue_work
+	// and kthread_queue_work won't sleep since it
+	// acquires a spinlock (see : https://elixir.bootlin.com/linux/v6.13.7/source/kernel/kthread.c#L1030)
+	rcu_read_lock();
+	if (READ_ONCE(pxd_dev->fp.fastpath)) {
 		// route through fastpath
 		// while in blkmq mode: cannot directly process IO from this thread... involves
 		// recursive BIO submission to the backing devices, causing deadlock.
 		fastpath_queue_work(&fproot->work, false);
+		rcu_read_unlock();
 		return BLK_STS_OK;
 	}
+	rcu_read_unlock();
 }
 #endif
 	atomic_inc(&pxd_dev->fp.nslowPath);
