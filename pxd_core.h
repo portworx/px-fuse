@@ -48,6 +48,7 @@ struct pxd_device {
 	bool fastpath; // this is persistent, how the block device registered with kernel
 	unsigned int queue_depth; // sysfs attribute bdev io queue depth
 	unsigned int discard_size;
+	bool enable_write_zeroes_support; // cluster-level WriteZero→Discard optimization flag
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// [global] total active requests
