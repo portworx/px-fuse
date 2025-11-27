@@ -155,7 +155,7 @@ static inline unsigned int get_op_flags(struct bio *bio)
 static inline char *bdevname(struct block_device *bdev, char *buf) {
         struct gendisk *hd = bdev->bd_disk;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,10,0)
-#ifdef __EL9_STREAM__
+#ifdef __EL9_STREAM__ || (defined(RHEL_RELEASE_CODE) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 7))
 	int partno = bdev_partno(bdev);
 #else
 	int partno = bdev->bd_partno;
