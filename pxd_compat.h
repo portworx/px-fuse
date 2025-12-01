@@ -160,6 +160,8 @@ static inline char *bdevname(struct block_device *bdev, char *buf) {
 #elif defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
 #if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 7)
 	int partno = bdev_partno(bdev);
+#else
+	int partno = bdev->bd_partno;
 #endif
 #else
 	int partno = bdev->bd_partno;
