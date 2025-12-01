@@ -1461,6 +1461,12 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__EL9_STREAM__)
 	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#elif defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 7) && RHEL_RELEASE_CODE != RHEL_RELEASE_VERSION(10, 0)
+	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#else
+	blk_mq_freeze_queue(q);
+#endif
 #else
 	blk_mq_freeze_queue(q);
 #endif
@@ -1697,6 +1703,12 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__EL9_STREAM__)
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
+#elif defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION)
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 7) && RHEL_RELEASE_CODE != RHEL_RELEASE_VERSION(10, 0)
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
+#else
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
 #else
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
 #endif
