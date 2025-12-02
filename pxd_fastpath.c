@@ -559,6 +559,18 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	}
 
 	pxd_dev->fp.fastpath = true;
+
+	// Disable WriteZero→Discard optimization for fastpath
+	// Fastpath uses LVM which doesn't support discard, so WriteZero must be disabled
+	// even if the device was previously in native path with WriteZero enabled
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+	if (pxd_has_cap(pxd_dev, PXD_CAP_WRITE_ZEROES) && pxd_dev->disk && pxd_dev->disk->queue) {
+		blk_queue_max_write_zeroes_sectors(pxd_dev->disk->queue, 0);
+		printk(KERN_INFO"device %llu: disabled WriteZero for fastpath (LVM doesn't support discard)\n",
+		       pxd_dev->dev_id);
+	}
+#endif
+
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
@@ -634,6 +646,17 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		}
 	}
 	fp->nfd = 0;
+
+	// Re-enable WriteZero→Discard optimization when returning to native path
+	// This restores the block queue configuration that was set during device add
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+	if (pxd_has_cap(pxd_dev, PXD_CAP_WRITE_ZEROES) && pxd_dev->disk && pxd_dev->disk->queue) {
+		unsigned int wz_sectors = PXD_MAX_DISCARD_GRANULARITY / SECTOR_SIZE;
+		blk_queue_max_write_zeroes_sectors(pxd_dev->disk->queue, wz_sectors);
+		printk(KERN_INFO"device %llu: re-enabled WriteZero for native path (max_sectors=%u)\n",
+		       pxd_dev->dev_id, wz_sectors);
+	}
+#endif
 
 	pxd_resume_io(pxd_dev);
 }
@@ -782,7 +805,8 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 		}
 	}
 
-	// ensure few block properties are still as expected.
+	// Fastpath: Always disable write_zeroes because LVM doesn't support discard
+	// Only native path uses WriteZero→Discard optimization
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
 	topque->limits.max_write_zeroes_sectors = 0;
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
