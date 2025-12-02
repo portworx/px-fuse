@@ -1087,7 +1087,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0) && !defined(__EL9_STREAM__)
+#ifdef BLK_MQ_F_SHOULD_MERGE
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+#endif
 #endif
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);

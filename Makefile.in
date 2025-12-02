@@ -103,6 +103,11 @@ ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(9|10)\.x86_64'; echo $$?),0)
 PXDEFINES += -D__EL9_STREAM__
 endif
 
+# ELRepo 9-10 Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(9|10)\.elrepo\.x86_64'; echo $$?),0)
+PXDEFINES += -D__ELREPO9__
+endif
+
 # Oracle UEK Specific kernel checks
 ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9]uek\.x86_64'; echo $$?),0)
 PXDEFINES += -D__ORACLE_UEK__
