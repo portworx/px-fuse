@@ -11,7 +11,7 @@ source "$SCRIPT_DIR/discard_stats.sh"
 source "$SCRIPT_DIR/file_ops.sh"
 
 #######################################
-# Configuration for comprehensive testing
+# Configuration for 3-phase comprehensive testing
 #######################################
 
 # Granularity combinations
@@ -20,21 +20,277 @@ DMTHIN_DISCARD_GRANULARITIES=(64 1024 2048)   # KB - 3 options
 FILE_SIZES=(3 20 66 1201)                     # KB - 4 options
 ITERATIONS_PER_VOLUME=5                        # 5 runs per volume
 
-# Test patterns split into phases
-PHASE1_PATTERNS=("discard_create_delete" "discard_create_shrink" "fstrim_create_delete" "fstrim_create_shrink")  # 4 patterns
-PHASE2_PATTERNS=("autofstrim_create_delete" "autofstrim_create_shrink")  # 2 patterns
+# Test patterns split into 3 phases
+PHASE1_PATTERNS=("discard_create_delete" "discard_create_shrink")  # 2 patterns - discard only
+PHASE2_PATTERNS=("fstrim_create_delete" "fstrim_create_shrink")    # 2 patterns - manual trim
+PHASE3_PATTERNS=("autofstrim_create_delete" "autofstrim_create_shrink")  # 2 patterns - auto trim
 
 # Volume configuration
 VOL_SIZE=5  # 5GB volumes
-
-# Fill filesystem to 100% instead of 80%
 FILESYSTEM_FILL_PERCENT=100
 
-# Phase 1: 4 FS × 3 DMThin × 4 patterns × 4 file sizes = 192 tests
-# Phase 2: 4 FS × 3 DMThin × 2 patterns × 4 file sizes = 96 tests
-# Total: 288 unique test combinations
+# Each phase: 4 FS × 3 DMThin × 2 patterns × 4 file sizes = 96 tests per phase
+# Total: 288 unique test combinations across 3 phases
+MAX_PARALLEL_VOLUMES=96  # 96 volumes per phase
 
-MAX_PARALLEL_VOLUMES=192  # For Phase 1
+#######################################
+# Phase-specific configurations
+#######################################
+
+configure_phase1_cluster() {
+    log_info "Configuring cluster for Phase 1: Discard Only"
+    # Cluster autofstrim: OFF
+    # Mount option: "discard"
+    pxctl cluster options update --auto-fstrim=false
+    sleep 10
+}
+
+configure_phase2_cluster() {
+    log_info "Configuring cluster for Phase 2: Manual Trim"
+    # Cluster autofstrim: OFF  
+    # Mount option: "nodiscard"
+    pxctl cluster options update --auto-fstrim=false
+    sleep 10
+}
+
+configure_phase3_cluster() {
+    log_info "Configuring cluster for Phase 3: Auto Trim"
+    # Cluster autofstrim: ON
+    # Mount option: "nodiscard"
+    pxctl cluster options update --auto-fstrim=true
+    
+    log_info "Restarting PX for autofstrim to take effect..."
+    systemctl restart portworx
+    wait_for_px_ready 300
+}
+
+#######################################
+# Phase execution functions
+#######################################
+
+run_phase1_tests() {
+    log_info "=========================================="
+    log_info "PHASE 1: DISCARD ONLY TESTS (96 volumes)"
+    log_info "=========================================="
+    
+    configure_phase1_cluster
+    
+    local phase_num=1
+    local vol_counter=1
+    
+    # Create all 96 volumes in parallel for Phase 1
+    for fs_gran in "${FS_DISCARD_GRANULARITIES[@]}"; do
+        for dm_gran in "${DMTHIN_DISCARD_GRANULARITIES[@]}"; do
+            for pattern in "${PHASE1_PATTERNS[@]}"; do
+                for file_size in "${FILE_SIZES[@]}"; do
+                    local vol_name="phase1_vol_${vol_counter}_${fs_gran}fs_${dm_gran}dm_${pattern}_${file_size}kb"
+                    
+                    # Create volume with specific configuration
+                    create_test_volume "$vol_name" "$VOL_SIZE" "$fs_gran" "$dm_gran" &
+                    
+                    vol_counter=$((vol_counter + 1))
+                done
+            done
+        done
+    done
+    
+    wait  # Wait for all volume creation to complete
+    log_info "Phase 1: All 96 volumes created"
+    
+    # Run tests on all volumes in parallel
+    vol_counter=1
+    for fs_gran in "${FS_DISCARD_GRANULARITIES[@]}"; do
+        for dm_gran in "${DMTHIN_DISCARD_GRANULARITIES[@]}"; do
+            for pattern in "${PHASE1_PATTERNS[@]}"; do
+                for file_size in "${FILE_SIZES[@]}"; do
+                    local vol_name="phase1_vol_${vol_counter}_${fs_gran}fs_${dm_gran}dm_${pattern}_${file_size}kb"
+                    
+                    # Run 5 iterations on this volume
+                    run_single_volume_test "$phase_num" "$vol_counter" "$pattern" "$file_size" "$vol_name" &
+                    
+                    vol_counter=$((vol_counter + 1))
+                done
+            done
+        done
+    done
+    
+    wait  # Wait for all tests to complete
+    log_info "Phase 1: All tests completed, data cleared, volumes preserved"
+}
+
+run_phase2_tests() {
+    log_info "=========================================="
+    log_info "PHASE 2: MANUAL TRIM TESTS (96 volumes)"
+    log_info "=========================================="
+    
+    configure_phase2_cluster
+    
+    local phase_num=2
+    local vol_counter=1
+    
+    # Create all 96 volumes in parallel for Phase 2
+    for fs_gran in "${FS_DISCARD_GRANULARITIES[@]}"; do
+        for dm_gran in "${DMTHIN_DISCARD_GRANULARITIES[@]}"; do
+            for pattern in "${PHASE2_PATTERNS[@]}"; do
+                for file_size in "${FILE_SIZES[@]}"; do
+                    local vol_name="phase2_vol_${vol_counter}_${fs_gran}fs_${dm_gran}dm_${pattern}_${file_size}kb"
+                    
+                    # Create volume with specific configuration
+                    create_test_volume "$vol_name" "$VOL_SIZE" "$fs_gran" "$dm_gran" &
+                    
+                    vol_counter=$((vol_counter + 1))
+                done
+            done
+        done
+    done
+    
+    wait  # Wait for all volume creation to complete
+    log_info "Phase 2: All 96 volumes created"
+    
+    # Run tests on all volumes in parallel
+    vol_counter=1
+    for fs_gran in "${FS_DISCARD_GRANULARITIES[@]}"; do
+        for dm_gran in "${DMTHIN_DISCARD_GRANULARITIES[@]}"; do
+            for pattern in "${PHASE2_PATTERNS[@]}"; do
+                for file_size in "${FILE_SIZES[@]}"; do
+                    local vol_name="phase2_vol_${vol_counter}_${fs_gran}fs_${dm_gran}dm_${pattern}_${file_size}kb"
+                    
+                    # Run 5 iterations on this volume
+                    run_single_volume_test "$phase_num" "$vol_counter" "$pattern" "$file_size" "$vol_name" &
+                    
+                    vol_counter=$((vol_counter + 1))
+                done
+            done
+        done
+    done
+    
+    wait  # Wait for all tests to complete
+    log_info "Phase 2: All tests completed, data cleared, volumes preserved"
+}
+
+run_phase3_tests() {
+    log_info "=========================================="
+    log_info "PHASE 3: AUTO TRIM TESTS (96 volumes)"
+    log_info "=========================================="
+    
+    configure_phase3_cluster
+    
+    local phase_num=3
+    local vol_counter=1
+    
+    # Create all 96 volumes in parallel for Phase 3
+    for fs_gran in "${FS_DISCARD_GRANULARITIES[@]}"; do
+        for dm_gran in "${DMTHIN_DISCARD_GRANULARITIES[@]}"; do
+            for pattern in "${PHASE3_PATTERNS[@]}"; do
+                for file_size in "${FILE_SIZES[@]}"; do
+                    local vol_name="phase3_vol_${vol_counter}_${fs_gran}fs_${dm_gran}dm_${pattern}_${file_size}kb"
+                    
+                    # Create volume with specific configuration
+                    create_test_volume "$vol_name" "$VOL_SIZE" "$fs_gran" "$dm_gran" &
+                    
+                    vol_counter=$((vol_counter + 1))
+                done
+            done
+        done
+    done
+    
+    wait  # Wait for all volume creation to complete
+    log_info "Phase 3: All 96 volumes created"
+    
+    # Run tests on all volumes in parallel
+    vol_counter=1
+    for fs_gran in "${FS_DISCARD_GRANULARITIES[@]}"; do
+        for dm_gran in "${DMTHIN_DISCARD_GRANULARITIES[@]}"; do
+            for pattern in "${PHASE3_PATTERNS[@]}"; do
+                for file_size in "${FILE_SIZES[@]}"; do
+                    local vol_name="phase3_vol_${vol_counter}_${fs_gran}fs_${dm_gran}dm_${pattern}_${file_size}kb"
+                    
+                    # Run 5 iterations on this volume
+                    run_single_volume_test "$phase_num" "$vol_counter" "$pattern" "$file_size" "$vol_name" &
+                    
+                    vol_counter=$((vol_counter + 1))
+                done
+            done
+        done
+    done
+    
+    wait  # Wait for all tests to complete
+    log_info "Phase 3: All tests completed, data cleared, volumes preserved"
+}
+
+#######################################
+# Single volume test runner (5 iterations)
+#######################################
+
+run_single_volume_test() {
+    local phase_num=$1
+    local vol_counter=$2
+    local pattern=$3
+    local file_size=$4
+    local vol_name=$5
+    
+    log_info "Starting 5 iterations on volume: $vol_name"
+    
+    # Mount volume
+    local mount_path="/mnt/${vol_name}"
+    mkdir -p "$mount_path"
+    
+    # Set mount options based on phase
+    local mount_opts=""
+    case $phase_num in
+        1) mount_opts="discard" ;;      # Phase 1: discard only
+        2) mount_opts="nodiscard" ;;    # Phase 2: manual trim
+        3) mount_opts="nodiscard" ;;    # Phase 3: auto trim
+    esac
+    
+    mount -o "$mount_opts" "/dev/pxd/${vol_name}" "$mount_path"
+    
+    # Run 5 iterations
+    for iteration in {1..5}; do
+        log_info "  Volume $vol_name - Iteration $iteration/5"
+        
+        # Run single test case
+        run_single_case "$phase_num" "$vol_counter" "$iteration" "$file_size" "$vol_name" "$mount_path" "$pattern"
+        
+        # Clear data but keep volume
+        cleanup_volume_filesystem "$mount_path" "$vol_name"
+    done
+    
+    # Unmount but keep volume
+    umount "$mount_path"
+    rmdir "$mount_path"
+    
+    log_info "Completed all 5 iterations on volume: $vol_name (volume preserved)"
+}
+
+#######################################
+# Main execution
+#######################################
+
+main() {
+    log_info "=========================================="
+    log_info "3-PHASE COMPREHENSIVE DISCARD TESTS"
+    log_info "Phase 1: 96 volumes (discard only)"
+    log_info "Phase 2: 96 volumes (manual trim)"  
+    log_info "Phase 3: 96 volumes (auto trim)"
+    log_info "Total: 288 volumes × 5 iterations = 1,440 tests"
+    log_info "=========================================="
+    
+    # Initialize CSV output
+    initialize_csv_output
+    
+    # Run all 3 phases
+    run_phase1_tests
+    run_phase2_tests  
+    run_phase3_tests
+    
+    # Generate summary
+    generate_test_summary
+    
+    log_success "All 3-phase comprehensive tests completed!"
+    log_info "Results: $CSV_OUTPUT_FILE"
+    log_info "Total volumes preserved: 288 (96 per phase)"
+}
 
 #######################################
 # Volume cleanup between iterations
