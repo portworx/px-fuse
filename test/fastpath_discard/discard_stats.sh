@@ -142,6 +142,82 @@ device_supports_discard() {
 }
 
 #######################################
+# Unallocated blocks/chunks tracking
+#######################################
+
+# Get FS-level freed blocks (blocks marked free by filesystem but not yet discarded)
+# This is: (FS free space) - (actual du usage difference from initial)
+# Returns value in KB
+get_fs_freed_blocks_kb() {
+    local mount_path=$1
+    local fs_total_kb=$(df -k "$mount_path" | tail -1 | awk '{print $2}')
+    local fs_used_kb=$(df -k "$mount_path" | tail -1 | awk '{print $3}')
+    local du_actual_kb=$(du -sk "$mount_path" 2>/dev/null | awk '{print $1}')
+
+    # Freed blocks = FS reports more free than actual files occupy
+    # This indicates blocks that FS knows are free but may not be discarded yet
+    local fs_allocated_kb=$((fs_total_kb - ($(df -k "$mount_path" | tail -1 | awk '{print $4}'))))
+    local gap=$((fs_allocated_kb - du_actual_kb))
+    [ $gap -lt 0 ] && gap=0
+    echo "$gap"
+}
+
+# Get DMthin allocated but unused chunks
+# This is: (DMthin used space) - (PX reported usage)
+# Returns value in KB
+get_dmthin_unused_chunks_kb() {
+    local pool_id=$1
+    local vol_id=$2
+
+    local dmthin_percent=$(get_dmthin_data_percent "$pool_id")
+    local pool_size=$(get_dmthin_pool_size "$pool_id")
+    local dmthin_used_kb=0
+    if [ -n "$pool_size" ] && [ -n "$dmthin_percent" ]; then
+        dmthin_used_kb=$(echo "scale=0; $pool_size * $dmthin_percent / 100 / 1024" | bc)
+    fi
+
+    local px_usage_bytes=$(get_px_usage "$vol_id" 2>/dev/null || echo "0")
+    local px_usage_kb=$((px_usage_bytes / 1024))
+
+    # Unused chunks = DMthin reports more used than PX volume needs
+    local unused=$((dmthin_used_kb - px_usage_kb))
+    [ $unused -lt 0 ] && unused=0
+    echo "$unused"
+}
+
+# Get wasted space (discarded but not reclaimed at dmthin level)
+# This is: (Trimmable space reported by PX) which represents FS holes not yet processed
+# Returns value in KB
+get_wasted_space_kb() {
+    local vol_id=$1
+    local trimmable_bytes=$(get_trimmable_space "$vol_id" 2>/dev/null || echo "0")
+    echo $((trimmable_bytes / 1024))
+}
+
+# Get discard efficiency metrics
+# Returns: fs_freed_kb|dmthin_unused_kb|wasted_kb|efficiency_percent
+get_discard_efficiency() {
+    local mount_path=$1
+    local pool_id=$2
+    local vol_id=$3
+
+    local fs_freed=$(get_fs_freed_blocks_kb "$mount_path")
+    local dmthin_unused=$(get_dmthin_unused_chunks_kb "$pool_id" "$vol_id")
+    local wasted=$(get_wasted_space_kb "$vol_id")
+
+    # Efficiency = (reclaimed at dmthin / total freed at fs) * 100
+    local reclaimed=$((fs_freed - wasted))
+    [ $reclaimed -lt 0 ] && reclaimed=0
+
+    local efficiency=0
+    if [ $fs_freed -gt 0 ]; then
+        efficiency=$((reclaimed * 100 / fs_freed))
+    fi
+
+    echo "${fs_freed}|${dmthin_unused}|${wasted}|${efficiency}"
+}
+
+#######################################
 # Combined statistics snapshot
 #######################################
 
@@ -151,28 +227,35 @@ capture_stats_snapshot() {
     local pool_id=$2
     local vol_id=$3
     local label=$4
-    
+
     log_info "=== Statistics Snapshot: $label ==="
-    
+
     # Filesystem stats
     local fs_free=$(get_fs_free_space_kb "$mount_path")
     local fs_used=$(get_fs_used_space_kb "$mount_path")
     local actual_usage=$(get_actual_usage_kb "$mount_path")
-    
+
     log_result "FS Free: ${fs_free}KB, FS Used: ${fs_used}KB, Actual(du): ${actual_usage}KB"
-    
+
     # DMthin stats
     local dmthin_used=$(get_dmthin_used_bytes "$pool_id")
     local dmthin_percent=$(get_dmthin_data_percent "$pool_id")
-    
+
     log_result "DMthin Used: ${dmthin_used}B (${dmthin_percent}%)"
-    
+
     # PX autofstrim stats
     local trimmable=$(get_trimmable_space "$vol_id")
     local fstrim_status=$(get_fstrim_status "$vol_id")
-    
+
     log_result "Trimmable: ${trimmable}B, Fstrim Status: $fstrim_status"
-    
+
+    # Unallocated/wasted space metrics
+    local fs_freed=$(get_fs_freed_blocks_kb "$mount_path")
+    local dmthin_unused=$(get_dmthin_unused_chunks_kb "$pool_id" "$vol_id")
+    local wasted=$(get_wasted_space_kb "$vol_id")
+
+    log_result "FS Freed Blocks: ${fs_freed}KB, DMthin Unused: ${dmthin_unused}KB, Wasted: ${wasted}KB"
+
     echo ""
 }
 

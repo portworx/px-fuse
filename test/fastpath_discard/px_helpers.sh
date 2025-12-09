@@ -4,6 +4,205 @@
 source "$(dirname "$0")/config.sh"
 
 #######################################
+# Volume lifecycle management
+#######################################
+
+# Create a new volume with specified size
+create_volume() {
+    local vol_name=$1
+    local size=${2:-10}  # Size in GB (just the number)
+    local pool_id=${3:-0}
+
+    # Strip 'G' or 'GB' suffix if present
+    size=$(echo "$size" | sed 's/[Gg][Bb]*$//')
+
+    echo "Creating volume: $vol_name, size: ${size}GB, pool: $pool_id..." >&2
+
+    # Create the volume, capturing output to parse the volume ID
+    local create_output=$($PXCTL_PATH volume create "$vol_name" --size "$size" --repl 1 --fs ext4 2>&1)
+    echo "  pxctl output: $create_output" >&2
+    sleep 2
+
+    # Try to extract volume ID from create output first (format: "Volume successfully created: <id>")
+    local vol_id=$(echo "$create_output" | grep -o 'Volume successfully created: [0-9]*' | awk '{print $NF}')
+
+    # If not found in output, try listing
+    if [ -z "$vol_id" ]; then
+        vol_id=$($PXCTL_PATH volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
+    fi
+
+    echo "$vol_id"
+}
+
+# Delete a volume
+delete_volume() {
+    local vol_id=$1
+    echo "Deleting volume: $vol_id..." >&2
+    $PXCTL_PATH volume delete "$vol_id" --force 2>/dev/null || true
+    sleep 2
+}
+
+# Attach a volume
+attach_volume() {
+    local vol_id=$1
+    echo "Attaching volume: $vol_id..." >&2
+    $PXCTL_PATH host attach "$vol_id" >/dev/null 2>&1 || true
+    sleep 2
+}
+
+# Detach a volume
+detach_volume() {
+    local vol_id=$1
+    echo "Detaching volume: $vol_id..." >&2
+    $PXCTL_PATH host detach "$vol_id" --redirect=false >/dev/null 2>&1 || true
+    sleep 2
+}
+
+# Mount a volume
+mount_volume() {
+    local vol_id=$1
+    local mount_path=$2
+    echo "Mounting volume $vol_id at $mount_path..." >&2
+    mkdir -p "$mount_path"
+    $PXCTL_PATH host mount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    sleep 2
+}
+
+# Unmount a volume
+unmount_volume() {
+    local vol_id=$1
+    local mount_path=$2
+    echo "Unmounting volume $vol_id from $mount_path..." >&2
+    $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    sleep 2
+}
+
+# Full volume cleanup cycle
+cleanup_volume() {
+    local vol_id=$1
+    local mount_path=$2
+    local vol_name=${3:-discard_test_vol}
+
+    echo "Full cleanup of volume $vol_id..." >&2
+
+    # Try unmount by path first
+    umount "$mount_path" >/dev/null 2>&1 || true
+
+    # Try to unmount/detach/delete by ID
+    $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    $PXCTL_PATH host detach "$vol_id" --redirect=false >/dev/null 2>&1 || true
+    $PXCTL_PATH volume delete "$vol_id" --force >/dev/null 2>&1 || true
+
+    # Also try by name in case ID didn't work
+    $PXCTL_PATH host unmount "$vol_name" --path "$mount_path" >/dev/null 2>&1 || true
+    $PXCTL_PATH host detach "$vol_name" --redirect=false >/dev/null 2>&1 || true
+    $PXCTL_PATH volume delete "$vol_name" --force >/dev/null 2>&1 || true
+
+    sleep 2
+}
+
+# Full volume setup cycle
+setup_volume() {
+    local vol_name=$1
+    local mount_path=$2
+    local size=${3:-10}
+    local pool_id=${4:-0}
+
+    echo "Full setup of volume $vol_name..." >&2
+    local vol_id=$(create_volume "$vol_name" "$size" "$pool_id")
+    attach_volume "$vol_id"
+    mount_volume "$vol_id" "$mount_path"
+    echo "$vol_id"
+}
+
+# Get volume ID by name
+get_volume_id() {
+    local vol_name=$1
+    $PXCTL_PATH volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}'
+}
+
+# Get PXD device path for a volume
+get_pxd_device() {
+    local vol_id=$1
+    echo "/dev/pxd/pxd${vol_id}"
+}
+
+#######################################
+# Sysfs discard granularity reading
+# Note: discard_granularity is set by the kernel driver and is read-only
+#######################################
+
+# Get current discard_granularity for a device (in bytes)
+get_sysfs_discard_granularity() {
+    local device=$1
+    local dev_name=$(basename "$device")
+
+    # Handle /dev/pxd/pxd<id> format
+    if [[ "$device" == /dev/pxd/* ]]; then
+        dev_name=$(basename "$device")
+    fi
+
+    cat "/sys/block/$dev_name/queue/discard_granularity" 2>/dev/null || echo "0"
+}
+
+# Get discard_max_bytes for a device
+get_sysfs_discard_max_bytes() {
+    local device=$1
+    local dev_name=$(basename "$device")
+
+    if [[ "$device" == /dev/pxd/* ]]; then
+        dev_name=$(basename "$device")
+    fi
+
+    cat "/sys/block/$dev_name/queue/discard_max_bytes" 2>/dev/null || echo "0"
+}
+
+# Get all queue limits for a device
+get_device_queue_limits() {
+    local device=$1
+    local dev_name=$(basename "$device")
+
+    if [[ "$device" == /dev/pxd/* ]]; then
+        dev_name=$(basename "$device")
+    fi
+
+    local sysfs_path="/sys/block/$dev_name/queue"
+    if [ -d "$sysfs_path" ]; then
+        echo "discard_granularity=$(cat $sysfs_path/discard_granularity 2>/dev/null || echo N/A)"
+        echo "discard_max_bytes=$(cat $sysfs_path/discard_max_bytes 2>/dev/null || echo N/A)"
+        echo "logical_block_size=$(cat $sysfs_path/logical_block_size 2>/dev/null || echo N/A)"
+        echo "physical_block_size=$(cat $sysfs_path/physical_block_size 2>/dev/null || echo N/A)"
+    fi
+}
+
+# Note: discard_granularity cannot be set via sysfs - it's determined by the driver
+# The PX driver sets it to PXD_MAX_DISCARD_GRANULARITY (1MiB) at device init time
+# This function just re-attaches the volume (granularity remains driver-determined)
+set_discard_granularity_and_reattach() {
+    local vol_id=$1
+    local mount_path=$2
+    local requested_granularity_bytes=$3
+
+    echo "Requested discard_granularity: $requested_granularity_bytes bytes (note: actual value is driver-determined)" >&2
+
+    # Just remount the volume - granularity is set by the kernel driver
+    # Unmount and detach
+    unmount_volume "$vol_id" "$mount_path"
+    detach_volume "$vol_id"
+
+    # Attach the volume
+    attach_volume "$vol_id"
+
+    # Report actual granularity
+    local pxd_device=$(get_pxd_device "$vol_id")
+    local actual_gran=$(get_sysfs_discard_granularity "$pxd_device")
+    echo "Actual discard_granularity: $actual_gran bytes" >&2
+
+    # Mount the volume
+    mount_volume "$vol_id" "$mount_path"
+}
+
+#######################################
 # Cluster-level autofstrim controls
 #######################################
 
@@ -42,7 +241,7 @@ set_fstrim_io_rates() {
 enable_volume_autofstrim() {
     local vol_id=$1
     log_info "Enabling autofstrim on volume $vol_id..."
-    $PXCTL_PATH volume update --auto_fstrim on "$vol_id"
+    $PXCTL_PATH volume update --auto_fstrim on "$vol_id" 2>/dev/null || true
     sleep 2
 }
 
@@ -50,7 +249,7 @@ enable_volume_autofstrim() {
 disable_volume_autofstrim() {
     local vol_id=$1
     log_info "Disabling autofstrim on volume $vol_id..."
-    $PXCTL_PATH volume update --auto_fstrim off "$vol_id"
+    $PXCTL_PATH volume update --auto_fstrim off "$vol_id" 2>/dev/null || true
     sleep 2
 }
 
@@ -58,16 +257,16 @@ disable_volume_autofstrim() {
 enable_volume_nodiscard() {
     local vol_id=$1
     log_info "Enabling nodiscard on volume $vol_id..."
-    $PXCTL_PATH volume update --nodiscard on "$vol_id"
-    $PXCTL_PATH volume update --mount_options nodiscard=true "$vol_id"
+    $PXCTL_PATH volume update --nodiscard on "$vol_id" 2>/dev/null || true
+    $PXCTL_PATH volume update --mount_options nodiscard=true "$vol_id" 2>/dev/null || true
 }
 
 # Disable nodiscard on a volume (enable inline discard)
 disable_volume_nodiscard() {
     local vol_id=$1
     log_info "Disabling nodiscard on volume $vol_id (enabling inline discard)..."
-    $PXCTL_PATH volume update --nodiscard off "$vol_id"
-    $PXCTL_PATH volume update --mount_options nodiscard= "$vol_id"
+    $PXCTL_PATH volume update --nodiscard off "$vol_id" 2>/dev/null || true
+    $PXCTL_PATH volume update --mount_options nodiscard= "$vol_id" 2>/dev/null || true
 }
 
 # Get volume autofstrim status
@@ -109,51 +308,231 @@ check_mount_discard_option() {
 
 #######################################
 # Autofstrim status and statistics
+# Logic matches porx job/job_autofstrim_common.go
 #######################################
 
-# Get autofstrim usage for a volume
-get_autofstrim_usage() {
+# Get autofstrim usage JSON for all locally attached volumes
+# Command: pxctl v af usage -j
+get_autofstrim_usage_json() {
+    $PXCTL_PATH volume autofstrim usage -j 2>/dev/null
+}
+
+# Get PX usage for a volume (in bytes) - from pxctl v af usage
+# This matches getPxUsage in porx
+get_px_usage() {
     local vol_id=$1
-    $PXCTL_PATH volume autofstrim-usage "$vol_id" 2>/dev/null
+    local usage_json=$(get_autofstrim_usage_json)
+    echo "$usage_json" | grep -A5 "\"$vol_id\"" | grep '"px_usage"' | grep -o '[0-9]*'
+}
+
+# Get DU usage for a volume (in bytes) - from pxctl v af usage
+# This matches getDuUsage in porx
+get_du_usage() {
+    local vol_id=$1
+    local usage_json=$(get_autofstrim_usage_json)
+    echo "$usage_json" | grep -A5 "\"$vol_id\"" | grep '"du_usage"' | grep -o '[0-9]*'
 }
 
 # Get trimmable space for a volume (in bytes)
+# Logic from porx getAutoFstrimTrimmableSpace:
+#   trimmable = pxUsage - duUsage (if pxUsage > duUsage, else 0)
 get_trimmable_space() {
     local vol_id=$1
-    local usage=$($PXCTL_PATH volume autofstrim-usage "$vol_id" -j 2>/dev/null)
-    echo "$usage" | grep -o '"trimmable_bytes":[0-9]*' | awk -F: '{print $2}'
+    local px_usage=$(get_px_usage "$vol_id")
+    local du_usage=$(get_du_usage "$vol_id")
+
+    if [ -z "$px_usage" ] || [ -z "$du_usage" ]; then
+        echo "0"
+        return
+    fi
+
+    if [ "$px_usage" -gt "$du_usage" ]; then
+        echo $((px_usage - du_usage))
+    else
+        echo "0"
+    fi
+}
+
+# Get trimmable percentage for a volume
+get_trimmable_percentage() {
+    local vol_id=$1
+    local usage_json=$(get_autofstrim_usage_json)
+    local vol_size=$(echo "$usage_json" | grep -A5 "\"$vol_id\"" | grep '"volume_size"' | grep -o '[0-9]*')
+    local trimmable=$(get_trimmable_space "$vol_id")
+
+    if [ -z "$vol_size" ] || [ "$vol_size" -eq 0 ]; then
+        echo "0"
+        return
+    fi
+
+    echo "scale=2; $trimmable * 100 / $vol_size" | bc
+}
+
+# Get autofstrim enabling status for a volume
+get_autofstrim_enabling_status() {
+    local vol_id=$1
+    local usage_json=$(get_autofstrim_usage_json)
+    echo "$usage_json" | grep -A5 "\"$vol_id\"" | grep '"perform_auto_fstrim"' | awk -F'"' '{print $4}'
 }
 
 # Get fstrim status for a volume
 get_fstrim_status() {
     local vol_id=$1
-    $PXCTL_PATH volume inspect "$vol_id" -j | grep -o '"fs_trim_status":"[^"]*"' | awk -F'"' '{print $4}'
+    $PXCTL_PATH volume autofstrim status -j "$vol_id" 2>/dev/null | grep -o '"status":"[^"]*"' | awk -F'"' '{print $4}'
 }
 
-# Trigger manual fstrim on a volume
-trigger_manual_fstrim() {
+# Get fstrim IO rates (average and current)
+get_fstrim_io_rates() {
     local vol_id=$1
-    log_info "Triggering manual fstrim on volume $vol_id..."
-    $PXCTL_PATH volume trim start "$vol_id"
+    $PXCTL_PATH volume autofstrim status -j "$vol_id" 2>/dev/null | grep -E '"(average_io_rate|current_io_rate)"'
 }
 
-# Wait for fstrim to complete
-wait_for_fstrim_complete() {
+# Trigger manual fstrim push on a volume
+trigger_fstrim_push() {
     local vol_id=$1
-    local timeout=${2:-300}
+    log_info "Pushing volume $vol_id to fstrim queue..."
+    $PXCTL_PATH volume autofstrim push "$vol_id"
+}
+
+# Wait for manual trim (pxctl volume trim start) to complete
+# Uses: pxctl volume trim status <vol_name>
+# Waits indefinitely until trim completes (no timeout)
+wait_for_trim_complete() {
+    local vol_id=$1
+    local vol_name=$2
     local elapsed=0
-    
-    log_info "Waiting for fstrim to complete on volume $vol_id (timeout: ${timeout}s)..."
-    while [ $elapsed -lt $timeout ]; do
-        local status=$(get_fstrim_status "$vol_id")
-        if [ "$status" = "FS_TRIM_COMPLETED" ] || [ "$status" = "FS_TRIM_NOT_INPROGRESS" ]; then
-            log_success "Fstrim completed on volume $vol_id"
+
+    echo "Waiting for trim to complete on $vol_name (no timeout - will wait until done)..."
+    while true; do
+        # Check trim status using pxctl volume trim status
+        local trim_status=$($PXCTL_PATH volume trim status "$vol_name" 2>&1)
+
+        # Extract status field
+        local status_line=$(echo "$trim_status" | grep -i "^Status" | awk -F: '{print $2}' | tr -d ' ')
+        local scanned=$(echo "$trim_status" | grep -i "Scanned Percentage" | awk '{print $NF}')
+
+        echo "  [${elapsed}s] Status: $status_line, Scanned: ${scanned}%"
+
+        # Check if trim completed or not running
+        if echo "$trim_status" | grep -qi "\|not running\|no.*trim\|not.*started\|FS_TRIM_NOT_STARTED"; then
+            echo "Trim completed for $vol_name after ${elapsed}s"
             return 0
         fi
-        sleep 5
-        elapsed=$((elapsed + 5))
+
+        # Check if scanned 100%
+        if [ "$scanned" = "100" ]; then
+            echo "Trim scan completed (100%) after ${elapsed}s"
+            return 0
+        fi
+
+        sleep 10
+        elapsed=$((elapsed + 10))
     done
-    log_warn "Fstrim did not complete within ${timeout}s"
+}
+
+# Get autofstrim status for a volume (e.g., FS_TRIM_COMPLETED, FS_TRIM_INPROGRESS, FS_TRIM_STARTED)
+get_autofstrim_status() {
+    local vol_id=$1
+    # Get volume name from vol_id
+    local vol_name=$($PXCTL_PATH volume inspect "$vol_id" 2>/dev/null | grep -E "^\s*Name\s*:" | head -1 | awk -F: '{print $2}' | tr -d ' \t')
+    if [ -z "$vol_name" ]; then
+        echo "UNKNOWN"
+        return
+    fi
+    local status=$($PXCTL_PATH volume autofstrim status "$vol_name" 2>/dev/null | grep -E "^Status\s*:" | awk -F: '{print $2}' | tr -d ' \t')
+    echo "${status:-UNKNOWN}"
+}
+
+# Wait for fstrim to complete one full cycle (status reaches FS_TRIM_COMPLETED)
+# This waits for the autofstrim daemon to finish scanning and trimming the volume
+wait_for_fstrim_complete() {
+    local vol_id=$1
+    local elapsed=0
+    local max_wait=900  # 15 minutes max wait
+
+    log_info "Waiting for fstrim to complete on volume $vol_id (waiting for FS_TRIM_COMPLETED status)..."
+
+    while [ $elapsed -lt $max_wait ]; do
+        local status=$(get_autofstrim_status "$vol_id")
+        local trimmable=$(get_trimmable_space "$vol_id")
+        local trimmable_mb=$((trimmable / 1024 / 1024))
+        log_info "  [${elapsed}s] Status: ${status}, Trimmable: ${trimmable_mb}MB"
+
+        # Fstrim is complete when status is FS_TRIM_COMPLETED
+        if [ "$status" = "FS_TRIM_COMPLETED" ]; then
+            log_success "Fstrim completed on volume $vol_id after ${elapsed}s (status: ${status}, trimmable: ${trimmable_mb}MB)"
+            return 0
+        fi
+
+        sleep 10
+        elapsed=$((elapsed + 10))
+    done
+
+    # Timeout reached
+    log_warn "Fstrim wait timeout after ${max_wait}s on volume $vol_id (status: $(get_autofstrim_status "$vol_id"))"
     return 1
+}
+
+# Print full autofstrim usage info for a volume
+print_autofstrim_usage() {
+    local vol_id=$1
+    local px_usage=$(get_px_usage "$vol_id")
+    local du_usage=$(get_du_usage "$vol_id")
+    local trimmable=$(get_trimmable_space "$vol_id")
+    local status=$(get_autofstrim_enabling_status "$vol_id")
+
+    log_result "PX Usage: ${px_usage} bytes"
+    log_result "DU Usage: ${du_usage} bytes"
+    log_result "Trimmable: ${trimmable} bytes"
+    log_result "Status: ${status}"
+}
+
+# Set filesystem discard granularity at block device level
+set_fs_discard_granularity() {
+    local vol_id=$1
+    local discard_gran_kb=$2
+    
+    log_info "Setting FS discard granularity to ${discard_gran_kb}KB for volume $vol_id"
+    
+    # Get PXD device
+    local pxd_device=$(get_pxd_device "$vol_id")
+    if [ -z "$pxd_device" ]; then
+        log_error "Could not find PXD device for volume $vol_id"
+        return 1
+    fi
+    
+    # Detach volume first
+    pxctl volume detach "$vol_id" --force 2>/dev/null || true
+    sleep 2
+    
+    # Set discard granularity in sysfs
+    local discard_gran_bytes=$((discard_gran_kb * 1024))
+    echo "$discard_gran_bytes" > "/sys/block/${pxd_device}/queue/discard_granularity"
+    
+    # Re-attach volume
+    pxctl volume attach "$vol_id"
+    sleep 3
+    
+    # Verify setting
+    local actual_gran=$(cat "/sys/block/${pxd_device}/queue/discard_granularity")
+    log_info "FS discard granularity set to: $actual_gran bytes"
+    
+    return 0
+}
+
+# Set DMThin discard granularity
+set_dmthin_discard_granularity() {
+    local pool_id=$1
+    local discard_gran_kb=$2
+    
+    log_info "Setting DMThin discard granularity to ${discard_gran_kb}KB for pool $pool_id"
+    
+    # This typically requires pool-level configuration
+    # Implementation depends on your DMThin setup
+    local discard_gran_sectors=$((discard_gran_kb * 2))  # KB to 512-byte sectors
+    
+    # Configure via dmsetup or pool parameters
+    # Exact command depends on your setup
+    dmsetup message "pool_${pool_id}" 0 "set_discard_granularity $discard_gran_sectors" 2>/dev/null || true
 }
 

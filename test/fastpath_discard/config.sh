@@ -17,20 +17,40 @@ FS_BLOCK_SIZE_1M=$((1 * MB))
 DMTHIN_CHUNK_SIZE_64K=65536
 DMTHIN_CHUNK_SIZE_1M=$((1 * MB))
 
-# File size categories (in KB)
+# File size categories (in KB) - for file creation patterns
+# These are for the "small", "mixed", "large" fragmentation patterns
 SMALL_FILE_MIN_KB=3
 SMALL_FILE_MAX_KB=7
 MEDIUM_FILE_MIN_KB=20
 MEDIUM_FILE_MAX_KB=100
-LARGE_FILE_MIN_KB=256
-LARGE_FILE_MAX_KB=2048
+LARGE_FILE_MIN_KB=259
+LARGE_FILE_MAX_KB=2090
 
-# Test file counts
-SMALL_FILE_COUNT=500000
-MEDIUM_FILE_COUNT=2000
-LARGE_FILE_COUNT=100
+# Exact file size cases for per-file discard testing (in KB)
+# Case 1: 4KB (1 FS block, 1/16th of 64KB dmthin chunk)
+# Case 2: 20KB (5 FS blocks, ~1/3 of 64KB dmthin chunk)
+# Case 3: 64KB (16 FS blocks, 1 full 64KB dmthin chunk)
+# Case 4: 1MB (256 FS blocks, 16 x 64KB dmthin chunks)
+FILE_SIZE_CASE_1_KB=4
+FILE_SIZE_CASE_2_KB=20
+FILE_SIZE_CASE_3_KB=64
+FILE_SIZE_CASE_4_KB=1024
 
-# Test iterations
+# Target size per volume (creates files until target reached)
+TARGET_SIZE_MB=500  # Target ~500MB of files per volume for complex fragmentation
+
+# File counts per batch (used in iterative create-delete cycles)
+SMALL_BATCH_SIZE=200     # Create 200 small files per batch
+MEDIUM_BATCH_SIZE=50     # Create 50 medium files per batch
+LARGE_BATCH_SIZE=10      # Create 10 large files per batch
+
+# Fragmentation pattern: percentage of files to shrink each cycle
+# Pattern: Create large files -> Overwrite with smaller data -> Repeat
+SHRINK_PERCENTAGE=40     # Shrink 40% of files by overwriting with smaller data
+CREATE_DELETE_CYCLES=5   # Number of create->shrink cycles before final deletion
+DELETE_PERCENTAGE=40     # Legacy - kept for compatibility
+
+# Test iterations per scenario
 REPEAT_COUNT=5
 
 # Timing
@@ -38,21 +58,32 @@ FSTRIM_WAIT_SECONDS=5
 DISCARD_SETTLE_SECONDS=3
 
 # Scenario configurations (fs_block_kb:fs_discard_kb:dmthin_chunk_kb:dmthin_discard_kb:nvme_sector_kb)
+# Scenario 1: Small discards - FS 4KB, DMthin 64KB, NVMe sector 0
 SCENARIO_1="4:4:64:64:0"
+# Scenario 2: FS 64KB discard, NVMe 1MB sector - tests coalescing
 SCENARIO_2="4:64:64:64:1024"
+# Scenario 3: FS 4KB, DMthin 1MB discard granularity
 SCENARIO_3="4:4:64:1024:0"
+# Scenario 4: FS 64KB, DMthin 1MB discard granularity
 SCENARIO_4="4:64:64:1024:0"
+# Scenario 5: FS 1MB discard gran, DMthin 64KB - large FS discards
 SCENARIO_5="4:1024:64:64:0"
 
-# Discard modes
-MODE_AUTOFSTRIM_NODISCARD="autofstrim_nodiscard"
-MODE_AUTOFSTRIM_DISCARD="autofstrim_discard"
-MODE_DISCARD_ONLY="discard_only"
+# Discard modes (order: fast modes first, autofstrim last since they need daemon)
+MODE_DISCARD_ONLY="discard_only"              # inline discard on file delete (mount -o discard)
+MODE_MANUAL_TRIM="manual_trim"                # manual pxctl volume trim start (autofstrim off)
+MODE_AUTOFSTRIM_NODISCARD="autofstrim_nodiscard"  # autofstrim enabled, inline discard disabled
+MODE_AUTOFSTRIM_DISCARD="autofstrim_discard"      # autofstrim enabled, inline discard enabled
 
 # File patterns
 PATTERN_SMALL="small_files"
 PATTERN_MIXED="mixed_files"
 PATTERN_LARGE="large_files"
+
+# Legacy file counts (kept for reference, not used in new fragmentation pattern)
+SMALL_FILE_COUNT=100    # Replaced by TARGET_SIZE_MB + batches
+MEDIUM_FILE_COUNT=50    # Replaced by TARGET_SIZE_MB + batches
+LARGE_FILE_COUNT=20     # Replaced by TARGET_SIZE_MB + batches
 
 # Colors for output
 RED='\033[0;31m'

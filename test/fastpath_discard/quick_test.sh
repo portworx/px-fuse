@@ -39,29 +39,35 @@ take_snapshot() {
     local label=$1
     local fs_free=$(get_fs_free_space_kb "$MOUNT_PATH")
     local dmthin_percent=$(get_dmthin_data_percent "$POOL_ID")
+    local px_usage=$(get_px_usage "$VOL_ID")
+    local du_usage=$(get_du_usage "$VOL_ID")
     local trimmable=$(get_trimmable_space "$VOL_ID")
-    echo "$label|$fs_free|$dmthin_percent|$trimmable"
+    echo "$label|$fs_free|$dmthin_percent|$px_usage|$du_usage|$trimmable"
 }
 
 print_snapshot() {
     local data=$1
-    IFS='|' read -r label fs_free dmthin_percent trimmable <<< "$data"
-    log_result "$label: FS_Free=${fs_free}KB, DMthin=${dmthin_percent}%, Trimmable=${trimmable}B"
+    IFS='|' read -r label fs_free dmthin_percent px_usage du_usage trimmable <<< "$data"
+    log_result "$label: FS_Free=${fs_free}KB, DMthin=${dmthin_percent}%"
+    log_result "  PX_Usage=${px_usage}B, DU_Usage=${du_usage}B, Trimmable=${trimmable}B"
 }
 
 compare_snapshots() {
     local before=$1
     local after=$2
-    
-    IFS='|' read -r _ fs_before dm_before trim_before <<< "$before"
-    IFS='|' read -r _ fs_after dm_after trim_after <<< "$after"
-    
+
+    IFS='|' read -r _ fs_before dm_before px_before du_before trim_before <<< "$before"
+    IFS='|' read -r _ fs_after dm_after px_after du_after trim_after <<< "$after"
+
     local fs_diff=$((fs_after - fs_before))
-    
+    local px_diff=$((px_after - px_before))
+    local trim_diff=$((trim_after - trim_before))
+
     log_info "--- Comparison ---"
     log_result "FS Free change: ${fs_diff}KB"
     log_result "DMthin: ${dm_before}% -> ${dm_after}%"
-    log_result "Trimmable: ${trim_before}B -> ${trim_after}B"
+    log_result "PX Usage: ${px_before}B -> ${px_after}B (diff: ${px_diff}B)"
+    log_result "Trimmable: ${trim_before}B -> ${trim_after}B (diff: ${trim_diff}B)"
 }
 
 #######################################

@@ -98,6 +98,31 @@ create_mixed_files() {
     log_info "Created mixed files: $small_created small + $medium_created medium"
 }
 
+# Create files with truly random, non-compressible data - Fill to 100%
+create_files_to_fill() {
+    local base_path=$1
+    local file_size_kb=$2
+    local target_fill_percent=${3:-100}  # Fill to 100% by default
+    
+    local available_kb=$(get_fs_free_space_kb "$(dirname "$base_path")")
+    local target_usage_kb=$((available_kb * target_fill_percent / 100))
+    local file_count=$((target_usage_kb / file_size_kb))
+    
+    log_info "Creating $file_count files of ${file_size_kb}KB each (filling to ${target_fill_percent}%)"
+    
+    for i in $(seq 1 "$file_count"); do
+        # Use /dev/urandom for truly random, non-compressible data
+        dd if=/dev/urandom of="${base_path}/fill_${i}.dat" bs=1024 count="$file_size_kb" 2>/dev/null
+        
+        if [ $((i % 100)) -eq 0 ]; then
+            log_info "  Created $i/$file_count files..."
+        fi
+    done
+    
+    sync
+    echo "$file_count"
+}
+
 #######################################
 # File deletion functions
 #######################################
