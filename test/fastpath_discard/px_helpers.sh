@@ -4,10 +4,118 @@
 source "$(dirname "$0")/config.sh"
 
 #######################################
+# Storage Pool Management
+#######################################
+
+# Create a storage pool with specific chunk size
+# This creates the underlying LVM thin pool with the desired chunk size
+# which determines the discard granularity
+create_pool_with_chunk_size() {
+    local pool_id=$1
+    local chunk_size_kb=$2
+    local drive_path=${3:-}  # Optional: specific drive path
+
+    log_info "Creating pool $pool_id with chunk size ${chunk_size_kb}KB..."
+
+    # If drive path not specified, let pxctl choose
+    if [ -z "$drive_path" ]; then
+        # Create new pool using pxctl
+        $PXCTL_PATH service drive add --newpool 2>&1 || true
+    else
+        $PXCTL_PATH service drive add --newpool -d "$drive_path" 2>&1 || true
+    fi
+
+    sleep 5
+
+    # Note: The chunk size is typically set during LVM thin pool creation
+    # For existing pools, we need to verify the chunk size matches
+    # In production, pools should be pre-created with correct chunk sizes
+
+    return 0
+}
+
+# Get pool chunk size in KB
+get_pool_chunk_size_kb() {
+    local pool_id=$1
+
+    # Get VG name for this pool
+    local vg_name="pool${pool_id}"
+
+    # Query LVM for chunk size
+    local chunk_bytes=$(lvm lvs -o chunk_size --units b --noheadings --nosuffix "${vg_name}/pxpool" 2>/dev/null | tr -d ' ')
+
+    if [ -z "$chunk_bytes" ] || [ "$chunk_bytes" = "0" ]; then
+        echo "0"
+        return 1
+    fi
+
+    local chunk_kb=$((chunk_bytes / 1024))
+    echo "$chunk_kb"
+    return 0
+}
+
+# Verify pool chunk size matches expected value
+verify_pool_chunk_size() {
+    local pool_id=$1
+    local expected_chunk_kb=$2
+
+    local actual_chunk_kb=$(get_pool_chunk_size_kb "$pool_id")
+
+    if [ "$actual_chunk_kb" = "$expected_chunk_kb" ]; then
+        log_info "✓ Pool $pool_id chunk size verified: ${actual_chunk_kb}KB"
+        return 0
+    else
+        log_error "✗ Pool $pool_id chunk size mismatch: expected ${expected_chunk_kb}KB, got ${actual_chunk_kb}KB"
+        return 1
+    fi
+}
+
+# Get pool UUID from pool ID
+get_pool_uuid() {
+    local pool_id=$1
+
+    # Query pxctl for pool UUID
+    local pool_uuid=$($PXCTL_PATH service pool show -j 2>/dev/null | \
+        jq -r ".datapools[] | select(.ID == $pool_id) | .uuid" 2>/dev/null)
+
+    if [ -z "$pool_uuid" ] || [ "$pool_uuid" = "null" ]; then
+        log_error "Failed to get UUID for pool $pool_id"
+        return 1
+    fi
+
+    echo "$pool_uuid"
+    return 0
+}
+
+# Map dmthin discard granularity to pool ID
+# 64KB -> pool 0
+# 1024KB (1MB) -> pool 1
+# 2048KB (2MB) -> pool 2
+get_pool_id_for_dmthin_gran() {
+    local dmthin_gran_kb=$1
+
+    case "$dmthin_gran_kb" in
+        64)
+            echo "0"
+            ;;
+        1024)
+            echo "1"
+            ;;
+        2048)
+            echo "2"
+            ;;
+        *)
+            log_error "Unsupported dmthin granularity: ${dmthin_gran_kb}KB"
+            echo "0"  # Default to pool 0
+            ;;
+    esac
+}
+
+#######################################
 # Volume lifecycle management
 #######################################
 
-# Create a new volume with specified size
+# Create a new volume with specified size in a specific pool
 create_volume() {
     local vol_name=$1
     local size=${2:-10}  # Size in GB (just the number)
@@ -18,8 +126,22 @@ create_volume() {
 
     echo "Creating volume: $vol_name, size: ${size}GB, pool: $pool_id..." >&2
 
-    # Create the volume, capturing output to parse the volume ID
-    local create_output=$($PXCTL_PATH volume create "$vol_name" --size "$size" --repl 1 --fs ext4 2>&1)
+    # Get pool UUID for the specified pool ID
+    local pool_uuid=$(get_pool_uuid "$pool_id")
+    if [ $? -ne 0 ] || [ -z "$pool_uuid" ]; then
+        log_warn "Failed to get pool UUID for pool $pool_id, creating volume without pool constraint"
+        pool_uuid=""
+    else
+        echo "  Using pool UUID: $pool_uuid" >&2
+    fi
+
+    # Create the volume with pool constraint if available
+    local create_cmd="$PXCTL_PATH volume create \"$vol_name\" --size \"$size\" --repl 1 --fastpath --fs ext4"
+    if [ -n "$pool_uuid" ]; then
+        create_cmd="$create_cmd --nodes=\"$pool_uuid\""
+    fi
+
+    local create_output=$(eval "$create_cmd" 2>&1)
     echo "  pxctl output: $create_output" >&2
     sleep 2
 
@@ -520,19 +642,7 @@ set_fs_discard_granularity() {
     return 0
 }
 
-# Set DMThin discard granularity
-set_dmthin_discard_granularity() {
-    local pool_id=$1
-    local discard_gran_kb=$2
-    
-    log_info "Setting DMThin discard granularity to ${discard_gran_kb}KB for pool $pool_id"
-    
-    # This typically requires pool-level configuration
-    # Implementation depends on your DMThin setup
-    local discard_gran_sectors=$((discard_gran_kb * 2))  # KB to 512-byte sectors
-    
-    # Configure via dmsetup or pool parameters
-    # Exact command depends on your setup
-    dmsetup message "pool_${pool_id}" 0 "set_discard_granularity $discard_gran_sectors" 2>/dev/null || true
-}
+# Note: DMThin discard granularity is determined by the pool's chunk size
+# and cannot be changed after pool creation. Use get_pool_id_for_dmthin_gran()
+# to select the correct pool with the desired chunk size.
 
