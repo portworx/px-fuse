@@ -559,6 +559,7 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 	}
 
 	pxd_dev->fp.fastpath = true;
+
 	pxd_resume_io(pxd_dev);
 
 	printk(KERN_INFO"pxd_dev %llu fastpath %d mode %#x setting up with %d backing volumes, [%px,%px,%px]\n",
@@ -782,15 +783,16 @@ void pxd_fastpath_adjust_limits(struct pxd_device *pxd_dev, struct request_queue
 		}
 	}
 
-	// ensure few block properties are still as expected.
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+	// Fastpath: Always disable write_zeroes because LVM doesn't support discard
+	// Only native path uses WriteZero→Discard optimization
+#ifdef PXD_USE_QUEUE_LIMITS_API
 	topque->limits.max_write_zeroes_sectors = 0;
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
 	blk_queue_max_write_zeroes_sectors(topque, 0);
 #endif
 
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__))
+#ifdef PXD_USE_QUEUE_LIMITS_API
 	topque->limits.logical_block_size = PXD_LBS;
 	topque->limits.physical_block_size = PXD_LBS;
 #else

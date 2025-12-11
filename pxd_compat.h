@@ -43,6 +43,26 @@
 	blk_queue_flush(q, REQ_FLUSH | REQ_FUA)
 #endif
 
+/* Helper macro to detect if kernel uses new queue_limits API */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
+#define PXD_USE_QUEUE_LIMITS_API
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)
+/* EL8 5.14+ uses queue_limits API, but RHEL 9.x (which also defines __EL8__)
+   uses the old blk_queue_* functions until RHEL 9.6 */
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+#define PXD_USE_QUEUE_LIMITS_API
+#elif RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 0)
+/* This is actual EL8 (RHEL 8.x) */
+#define PXD_USE_QUEUE_LIMITS_API
+#endif
+/* RHEL 9.0 - 9.5: Don't use queue_limits API */
+#else
+/* No RHEL_RELEASE_CODE means it's likely actual EL8 */
+#define PXD_USE_QUEUE_LIMITS_API
+#endif
+#endif
+
 #ifdef HAVE_BVEC_ITER
 #define BIO_SECTOR(bio) bio->bi_iter.bi_sector
 #define BIO_SIZE(bio) bio->bi_iter.bi_size
