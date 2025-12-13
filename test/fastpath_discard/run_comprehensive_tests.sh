@@ -40,54 +40,66 @@ wait_for_px_ready() {
 #   $2 - file size in KB
 #   $3 - number of files to create
 # Returns: actual number of files created
-fill_volume_with_fio() {
+fill_volume_with_dd() {
     local target_dir=$1
     local file_size_kb=$2
     local file_count=$3
     local num_jobs=${4:-10}      # Default 10 parallel threads
-    local iodepth=${5:-16}        # Default queue depth 16
 
     mkdir -p "$target_dir"
 
-    # Generate unique random seed based on current time
-    local randseed=$(date +%s%N)
+    # Log to stderr to avoid polluting stdout (which is used for return value)
+    echo -e "${BLUE}[INFO]${NC} Using dd to create $file_count files of ${file_size_kb}KB (parallel jobs=$num_jobs)" >&2
 
-    log_info "Using fio to create $file_count files of ${file_size_kb}KB (jobs=$num_jobs, iodepth=$iodepth)"
+    # Create files in parallel batches
+    # Each job creates file_count/num_jobs files
+    local files_per_job=$((file_count / num_jobs))
+    local remaining_files=$((file_count % num_jobs))
 
-    # FIO parameters for low compressibility and high performance:
-    # --randrepeat=0: Don't repeat random I/O pattern (more randomness)
-    # --norandommap: Don't use random map (allows true random access)
-    # --randseed: Unique seed for random number generator
-    # --refill_buffers: Refill I/O buffers on every submit (prevents pattern reuse)
-    # --scramble_buffers=1: Scramble buffer contents (ensures low compressibility)
-    # NOTE: We do NOT set buffer_compress_percentage as it defaults to unset,
-    #       which generates random incompressible data. Setting it to 0 would
-    #       create 100% compressible data (all zeros/patterns), which is wrong!
-    # --direct=1: Use O_DIRECT (bypass page cache)
-    # --ioengine=libaio: Linux native asynchronous I/O
-    # --iodepth: Number of I/O units to keep in flight per job
-    # --numjobs: Number of parallel threads
-    fio --name=fill_volume \
-        --directory="$target_dir" \
-        --ioengine=libaio \
-        --direct=1 \
-        --bs=${file_size_kb}k \
-        --size=${file_size_kb}k \
-        --nrfiles=$file_count \
-        --numjobs=$num_jobs \
-        --iodepth=$iodepth \
-        --rw=write \
-        --randrepeat=0 \
-        --norandommap \
-        --randseed=$randseed \
-        --refill_buffers \
-        --scramble_buffers=1 \
-        --group_reporting \
-        --create_on_open=1 \
-        --fallocate=none \
-        --end_fsync=1 \
-        --output-format=normal \
-        2>&1 | grep -E "(write:|WRITE:|err|error)" || true
+    # Function to create files for one job
+    create_files_batch() {
+        local job_id=$1
+        local start_idx=$2
+        local end_idx=$3
+        local dir=$4
+        local size_kb=$5
+
+        for ((i=start_idx; i<end_idx; i++)); do
+            # Create file with dd from /dev/urandom (truly incompressible)
+            dd if=/dev/urandom of="$dir/file_${i}.dat" bs=1024 count=$size_kb 2>/dev/null || {
+                # If disk is full, stop creating files
+                return 1
+            }
+        done
+        return 0
+    }
+
+    export -f create_files_batch
+
+    # Launch parallel jobs
+    local pids=()
+    local start_idx=0
+
+    for ((job=0; job<num_jobs; job++)); do
+        local batch_size=$files_per_job
+        # Add remaining files to the last job
+        if [ $job -eq $((num_jobs - 1)) ]; then
+            batch_size=$((files_per_job + remaining_files))
+        fi
+
+        local end_idx=$((start_idx + batch_size))
+
+        # Launch background job
+        create_files_batch $job $start_idx $end_idx "$target_dir" $file_size_kb &
+        pids+=($!)
+
+        start_idx=$end_idx
+    done
+
+    # Wait for all jobs to complete
+    for pid in "${pids[@]}"; do
+        wait $pid 2>/dev/null || true
+    done
 
     sync
 
@@ -96,20 +108,23 @@ fill_volume_with_fio() {
 }
 
 # Create a test volume with specific block device discard granularity and DMThin granularities
+# NOTE: We no longer specify pool_id - PX will choose the pool automatically
 create_test_volume() {
     local vol_name=$1
     local size=${2:-5}  # Size in GB
     local blkdev_discard_gran_kb=${3:-4}  # Block device discard granularity in KB
-    local dm_gran_kb=${4:-64}  # DMThin discard granularity in KB
+    local dm_gran_kb=${4:-64}  # DMThin discard granularity in KB (logged but not used for pool selection)
 
-    # Determine the correct pool based on dmthin granularity
-    # Pool chunk size = dmthin discard granularity
-    local pool_id=$(get_pool_id_for_dmthin_gran "$dm_gran_kb")
+    # NOTE: Pool selection logic is COMMENTED OUT - we let PX choose the pool
+    # # Determine the correct pool based on dmthin granularity
+    # # Pool chunk size = dmthin discard granularity
+    # local pool_id=$(get_pool_id_for_dmthin_gran "$dm_gran_kb")
 
-    log_info "Creating volume: $vol_name (size=${size}G, blkdev_discard_gran=${blkdev_discard_gran_kb}KB, dm_gran=${dm_gran_kb}KB, pool=$pool_id)"
+    log_info "Creating volume: $vol_name (size=${size}G, blkdev_discard_gran=${blkdev_discard_gran_kb}KB, dm_gran=${dm_gran_kb}KB)"
 
-    # Create volume using px_helpers.sh function (creates with default ext4 filesystem)
-    local vol_id=$(create_volume "$vol_name" "$size" "$pool_id")
+    # Create volume using px_helpers.sh function WITHOUT specifying pool_id
+    # PX will automatically choose an available pool
+    local vol_id=$(create_volume "$vol_name" "$size")
 
     if [ -z "$vol_id" ]; then
         log_error "Failed to create volume $vol_name"
@@ -137,9 +152,37 @@ create_test_volume() {
         return 1
     fi
 
-    # NOTE: We do NOT format the volume here - it's already formatted with default ext4 by pxctl
-    # The filesystem block size remains at the default (4KB)
-    # We only vary the block device discard granularity, not the FS block size
+    # Format the volume with custom inode ratio to support many small files
+    # Default ext4 creates 1 inode per 16KB, but we need 1 inode per 5KB for small files
+    # Use -i 4096 (bytes per inode) to ensure we have enough inodes for small files
+    # Also set stride parameter based on dmthin chunk size for optimal alignment
+    log_info "Formatting volume $vol_name with custom inode ratio..."
+
+    # Get pool ID from volume inspect
+    local pool_id=$(pxctl volume inspect "$vol_id" -j 2>/dev/null | grep -o '"runtime_state":\[{"runtime_state":{"ReplNodePools":"[^"]*"' | grep -o 'ReplNodePools":"[^"]*"' | cut -d'"' -f3 | cut -d',' -f1)
+    if [ -z "$pool_id" ]; then
+        log_warn "Could not determine pool ID for volume $vol_name, using default pool 0"
+        pool_id=0
+    fi
+
+    # Get chunk size from pool
+    local chunk_size_kb=$(get_pool_chunk_size_kb "$pool_id" 2>/dev/null || echo "64")
+    if [ -z "$chunk_size_kb" ] || [ "$chunk_size_kb" = "0" ]; then
+        log_warn "Could not determine chunk size for pool $pool_id, using default 64KB"
+        chunk_size_kb=64
+    fi
+
+    # Calculate stride (chunk_size / block_size)
+    # Block size is 4KB (4096 bytes), so stride = chunk_size_kb / 4
+    local block_size_kb=4
+    local stride=$((chunk_size_kb / block_size_kb))
+
+    log_info "Formatting with block size ${block_size_kb}KB, stride ${stride} (chunk size ${chunk_size_kb}KB from pool ${pool_id})"
+    mkfs.ext4 -F -b 4096 -i 4096 -E "stride=${stride}" "$dev_path" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        log_error "Failed to format volume $vol_name"
+        return 1
+    fi
 
     # Mount the volume
     local mount_path="/var/lib/osd/mounts/$vol_name"
@@ -210,7 +253,9 @@ generate_test_summary() {
 
 # Granularity combinations
 BLKDEV_DISCARD_GRANULARITIES=(4 64 1024 2048)  # KB - 4 options (block device discard granularity)
-DMTHIN_DISCARD_GRANULARITIES=(64 1024 2048)    # KB - 3 options
+# NOTE: DMThin variation is COMMENTED OUT - only using pool 0 (64KB chunk size)
+# DMTHIN_DISCARD_GRANULARITIES=(64 1024 2048)    # KB - 3 options (COMMENTED OUT)
+DMTHIN_DISCARD_GRANULARITIES=(64)              # KB - 1 option (only pool 0 with 64KB chunks)
 FILE_SIZES=(3 20 66 1201)                      # KB - 4 options
 ITERATIONS_PER_VOLUME=5                         # 5 runs per volume
 
@@ -227,10 +272,11 @@ PHASE3_PATTERNS=("autofstrim_create_shrink")  # 1 pattern - auto trim (create-de
 VOL_SIZE=5  # 5GB volumes
 FILESYSTEM_FILL_PERCENT=100
 
-# Each phase: 4 BlkDev Discard Gran × 3 DMThin × 1 pattern × 4 file sizes = 48 tests per phase
-# Total: 144 unique test combinations across 3 phases (only create-shrink pattern)
-# NOTE: Was 96 per phase (288 total) when running both create-delete and create-shrink
-MAX_PARALLEL_VOLUMES=48  # 48 volumes per phase (only create-shrink pattern)
+# Each phase: 4 BlkDev Discard Gran × 1 DMThin (64KB only) × 1 pattern × 4 file sizes = 16 tests per phase
+# Total: 48 unique test combinations across 3 phases (only create-shrink pattern, only 64KB DMThin)
+# NOTE: Was 48 per phase (144 total) when running all 3 DMThin granularities
+# NOTE: Was 96 per phase (288 total) when running both create-delete and create-shrink with all DMThin
+MAX_PARALLEL_VOLUMES=16  # 16 volumes per phase (only create-shrink pattern, only 64KB DMThin)
 
 #######################################
 # Phase-specific configurations
@@ -293,54 +339,53 @@ run_phase1_tests() {
         done
     done
 
-    # Process volumes in batches of 24
+    # STEP 1: Create all volumes SEQUENTIALLY (one by one)
+    log_info "Phase 1: Step 1/3 - Creating all volumes sequentially..."
+    local -a vol_names=()
+    local -a vol_configs=()
     local total_configs=${#all_vol_configs[@]}
-    for ((batch_start=0; batch_start<total_configs; batch_start+=batch_size)); do
-        local batch_end=$((batch_start + batch_size - 1))
-        if [ $batch_end -ge $total_configs ]; then
-            batch_end=$((total_configs - 1))
-        fi
 
-        log_info "Phase 1: Processing batch $batch_num (configs $((batch_start+1)) to $((batch_end+1)))"
+    for ((i=0; i<total_configs; i++)); do
+        IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${all_vol_configs[$i]}"
+        local vol_name="phase1_vol_${vol_num}_${blkdev_gran}bd_${dm_gran}dm_${pattern}_${file_size}kb"
+        vol_names+=("$vol_name")
+        vol_configs+=("$vol_num:$blkdev_gran:$dm_gran:$pattern:$file_size")
 
-        # Arrays to track volumes in this batch
-        local -a batch_vol_names=()
-        local -a batch_vol_configs=()
-
-        # Create volumes in this batch
-        for ((i=batch_start; i<=batch_end; i++)); do
-            IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${all_vol_configs[$i]}"
-            local vol_name="phase1_vol_${vol_num}_${blkdev_gran}bd_${dm_gran}dm_${pattern}_${file_size}kb"
-            batch_vol_names+=("$vol_name")
-            batch_vol_configs+=("$vol_num:$blkdev_gran:$dm_gran:$pattern:$file_size")
-
-            # Create volume with specific configuration
-            create_test_volume "$vol_name" "$VOL_SIZE" "$blkdev_gran" "$dm_gran" &
-        done
-
-        wait  # Wait for batch volume creation to complete
-        log_info "Phase 1: Batch $batch_num volumes created (${#batch_vol_names[@]} volumes)"
-
-        # Run tests on this batch
-        for ((i=0; i<${#batch_vol_names[@]}; i++)); do
-            IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${batch_vol_configs[$i]}"
-            run_single_volume_test "$phase_num" "$vol_num" "$pattern" "$file_size" "${batch_vol_names[$i]}" &
-        done
-
-        wait  # Wait for batch tests to complete
-        log_info "Phase 1: Batch $batch_num tests completed"
-
-        # Delete volumes in this batch
-        for vol_name in "${batch_vol_names[@]}"; do
-            local vol_id=$(pxctl volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
-            if [ -n "$vol_id" ]; then
-                pxctl volume delete "$vol_id" --force 2>/dev/null || true
-            fi
-        done
-
-        log_info "Phase 1: Batch $batch_num volumes deleted"
-        batch_num=$((batch_num + 1))
+        log_info "  Creating volume $((i+1))/$total_configs: $vol_name"
+        create_test_volume "$vol_name" "$VOL_SIZE" "$blkdev_gran" "$dm_gran"
     done
+    log_info "✓ Phase 1: All $total_configs volumes created"
+    log_info ""
+
+    # STEP 2: Run tests on all volumes IN PARALLEL (all at once)
+    log_info "Phase 1: Step 2/3 - Running tests on all $total_configs volumes in parallel..."
+    local -a test_pids=()
+    for ((i=0; i<total_configs; i++)); do
+        IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${vol_configs[$i]}"
+        run_single_volume_test "$phase_num" "$vol_num" "$pattern" "$file_size" "${vol_names[$i]}" &
+        test_pids+=($!)
+    done
+
+    # Wait for all tests to complete
+    log_info "  Waiting for all $total_configs tests to complete..."
+    for pid in "${test_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    log_info "✓ Phase 1: All tests completed"
+    log_info ""
+
+    # STEP 3: Delete all volumes SEQUENTIALLY (one by one)
+    log_info "Phase 1: Step 3/3 - Deleting all volumes sequentially..."
+    for ((i=0; i<total_configs; i++)); do
+        local vol_name="${vol_names[$i]}"
+        log_info "  Deleting volume $((i+1))/$total_configs: $vol_name"
+        local vol_id=$(pxctl volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
+        if [ -n "$vol_id" ]; then
+            pxctl volume delete "$vol_id" --force 2>/dev/null || true
+        fi
+    done
+    log_info "✓ Phase 1: All volumes deleted"
+    log_info ""
 
     log_info "Phase 1: All tests completed, all volumes deleted"
 }
@@ -371,54 +416,53 @@ run_phase2_tests() {
         done
     done
 
-    # Process volumes in batches of 24
+    # STEP 1: Create all volumes SEQUENTIALLY (one by one)
+    log_info "Phase 2: Step 1/3 - Creating all volumes sequentially..."
+    local -a vol_names=()
+    local -a vol_configs=()
     local total_configs=${#all_vol_configs[@]}
-    for ((batch_start=0; batch_start<total_configs; batch_start+=batch_size)); do
-        local batch_end=$((batch_start + batch_size - 1))
-        if [ $batch_end -ge $total_configs ]; then
-            batch_end=$((total_configs - 1))
-        fi
 
-        log_info "Phase 2: Processing batch $batch_num (configs $((batch_start+1)) to $((batch_end+1)))"
+    for ((i=0; i<total_configs; i++)); do
+        IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${all_vol_configs[$i]}"
+        local vol_name="phase2_vol_${vol_num}_${blkdev_gran}bd_${dm_gran}dm_${pattern}_${file_size}kb"
+        vol_names+=("$vol_name")
+        vol_configs+=("$vol_num:$blkdev_gran:$dm_gran:$pattern:$file_size")
 
-        # Arrays to track volumes in this batch
-        local -a batch_vol_names=()
-        local -a batch_vol_configs=()
-
-        # Create volumes in this batch
-        for ((i=batch_start; i<=batch_end; i++)); do
-            IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${all_vol_configs[$i]}"
-            local vol_name="phase2_vol_${vol_num}_${blkdev_gran}bd_${dm_gran}dm_${pattern}_${file_size}kb"
-            batch_vol_names+=("$vol_name")
-            batch_vol_configs+=("$vol_num:$blkdev_gran:$dm_gran:$pattern:$file_size")
-
-            # Create volume with specific configuration
-            create_test_volume "$vol_name" "$VOL_SIZE" "$blkdev_gran" "$dm_gran" &
-        done
-
-        wait  # Wait for batch volume creation to complete
-        log_info "Phase 2: Batch $batch_num volumes created (${#batch_vol_names[@]} volumes)"
-
-        # Run tests on this batch
-        for ((i=0; i<${#batch_vol_names[@]}; i++)); do
-            IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${batch_vol_configs[$i]}"
-            run_single_volume_test "$phase_num" "$vol_num" "$pattern" "$file_size" "${batch_vol_names[$i]}" &
-        done
-
-        wait  # Wait for batch tests to complete
-        log_info "Phase 2: Batch $batch_num tests completed"
-
-        # Delete volumes in this batch
-        for vol_name in "${batch_vol_names[@]}"; do
-            local vol_id=$(pxctl volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
-            if [ -n "$vol_id" ]; then
-                pxctl volume delete "$vol_id" --force 2>/dev/null || true
-            fi
-        done
-
-        log_info "Phase 2: Batch $batch_num volumes deleted"
-        batch_num=$((batch_num + 1))
+        log_info "  Creating volume $((i+1))/$total_configs: $vol_name"
+        create_test_volume "$vol_name" "$VOL_SIZE" "$blkdev_gran" "$dm_gran"
     done
+    log_info "✓ Phase 2: All $total_configs volumes created"
+    log_info ""
+
+    # STEP 2: Run tests on all volumes IN PARALLEL (all at once)
+    log_info "Phase 2: Step 2/3 - Running tests on all $total_configs volumes in parallel..."
+    local -a test_pids=()
+    for ((i=0; i<total_configs; i++)); do
+        IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${vol_configs[$i]}"
+        run_single_volume_test "$phase_num" "$vol_num" "$pattern" "$file_size" "${vol_names[$i]}" &
+        test_pids+=($!)
+    done
+
+    # Wait for all tests to complete
+    log_info "  Waiting for all $total_configs tests to complete..."
+    for pid in "${test_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    log_info "✓ Phase 2: All tests completed"
+    log_info ""
+
+    # STEP 3: Delete all volumes SEQUENTIALLY (one by one)
+    log_info "Phase 2: Step 3/3 - Deleting all volumes sequentially..."
+    for ((i=0; i<total_configs; i++)); do
+        local vol_name="${vol_names[$i]}"
+        log_info "  Deleting volume $((i+1))/$total_configs: $vol_name"
+        local vol_id=$(pxctl volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
+        if [ -n "$vol_id" ]; then
+            pxctl volume delete "$vol_id" --force 2>/dev/null || true
+        fi
+    done
+    log_info "✓ Phase 2: All volumes deleted"
+    log_info ""
 
     log_info "Phase 2: All tests completed, all volumes deleted"
 }
@@ -449,54 +493,53 @@ run_phase3_tests() {
         done
     done
 
-    # Process volumes in batches of 24
+    # STEP 1: Create all volumes SEQUENTIALLY (one by one)
+    log_info "Phase 3: Step 1/3 - Creating all volumes sequentially..."
+    local -a vol_names=()
+    local -a vol_configs=()
     local total_configs=${#all_vol_configs[@]}
-    for ((batch_start=0; batch_start<total_configs; batch_start+=batch_size)); do
-        local batch_end=$((batch_start + batch_size - 1))
-        if [ $batch_end -ge $total_configs ]; then
-            batch_end=$((total_configs - 1))
-        fi
 
-        log_info "Phase 3: Processing batch $batch_num (configs $((batch_start+1)) to $((batch_end+1)))"
+    for ((i=0; i<total_configs; i++)); do
+        IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${all_vol_configs[$i]}"
+        local vol_name="phase3_vol_${vol_num}_${blkdev_gran}bd_${dm_gran}dm_${pattern}_${file_size}kb"
+        vol_names+=("$vol_name")
+        vol_configs+=("$vol_num:$blkdev_gran:$dm_gran:$pattern:$file_size")
 
-        # Arrays to track volumes in this batch
-        local -a batch_vol_names=()
-        local -a batch_vol_configs=()
-
-        # Create volumes in this batch
-        for ((i=batch_start; i<=batch_end; i++)); do
-            IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${all_vol_configs[$i]}"
-            local vol_name="phase3_vol_${vol_num}_${blkdev_gran}bd_${dm_gran}dm_${pattern}_${file_size}kb"
-            batch_vol_names+=("$vol_name")
-            batch_vol_configs+=("$vol_num:$blkdev_gran:$dm_gran:$pattern:$file_size")
-
-            # Create volume with specific configuration
-            create_test_volume "$vol_name" "$VOL_SIZE" "$blkdev_gran" "$dm_gran" &
-        done
-
-        wait  # Wait for batch volume creation to complete
-        log_info "Phase 3: Batch $batch_num volumes created (${#batch_vol_names[@]} volumes)"
-
-        # Run tests on this batch
-        for ((i=0; i<${#batch_vol_names[@]}; i++)); do
-            IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${batch_vol_configs[$i]}"
-            run_single_volume_test "$phase_num" "$vol_num" "$pattern" "$file_size" "${batch_vol_names[$i]}" &
-        done
-
-        wait  # Wait for batch tests to complete
-        log_info "Phase 3: Batch $batch_num tests completed"
-
-        # Delete volumes in this batch
-        for vol_name in "${batch_vol_names[@]}"; do
-            local vol_id=$(pxctl volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
-            if [ -n "$vol_id" ]; then
-                pxctl volume delete "$vol_id" --force 2>/dev/null || true
-            fi
-        done
-
-        log_info "Phase 3: Batch $batch_num volumes deleted"
-        batch_num=$((batch_num + 1))
+        log_info "  Creating volume $((i+1))/$total_configs: $vol_name"
+        create_test_volume "$vol_name" "$VOL_SIZE" "$blkdev_gran" "$dm_gran"
     done
+    log_info "✓ Phase 3: All $total_configs volumes created"
+    log_info ""
+
+    # STEP 2: Run tests on all volumes IN PARALLEL (all at once)
+    log_info "Phase 3: Step 2/3 - Running tests on all $total_configs volumes in parallel..."
+    local -a test_pids=()
+    for ((i=0; i<total_configs; i++)); do
+        IFS=':' read -r vol_num blkdev_gran dm_gran pattern file_size <<< "${vol_configs[$i]}"
+        run_single_volume_test "$phase_num" "$vol_num" "$pattern" "$file_size" "${vol_names[$i]}" &
+        test_pids+=($!)
+    done
+
+    # Wait for all tests to complete
+    log_info "  Waiting for all $total_configs tests to complete..."
+    for pid in "${test_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    log_info "✓ Phase 3: All tests completed"
+    log_info ""
+
+    # STEP 3: Delete all volumes SEQUENTIALLY (one by one)
+    log_info "Phase 3: Step 3/3 - Deleting all volumes sequentially..."
+    for ((i=0; i<total_configs; i++)); do
+        local vol_name="${vol_names[$i]}"
+        log_info "  Deleting volume $((i+1))/$total_configs: $vol_name"
+        local vol_id=$(pxctl volume list --name "$vol_name" -j 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | awk -F'"' '{print $4}')
+        if [ -n "$vol_id" ]; then
+            pxctl volume delete "$vol_id" --force 2>/dev/null || true
+        fi
+    done
+    log_info "✓ Phase 3: All volumes deleted"
+    log_info ""
 
     log_info "Phase 3: All tests completed, all volumes deleted"
 }
@@ -570,64 +613,132 @@ run_single_volume_test() {
 #######################################
 
 # Initialize storage pools with specific chunk sizes
+# NOTE: Pool creation logic is COMMENTED OUT - we use existing pools as-is
 initialize_pools() {
     log_info "=========================================="
-    log_info "INITIALIZING STORAGE POOLS"
+    log_info "CHECKING STORAGE POOLS"
     log_info "=========================================="
-
-    # Define pool configurations
-    # Pool 0: 64KB chunk size (for 64KB dmthin granularity)
-    # Pool 1: 1MB (1024KB) chunk size (for 1MB dmthin granularity)
-    # Pool 2: 2MB (2048KB) chunk size (for 2MB dmthin granularity)
-
-    declare -A POOL_CHUNK_SIZES
-    POOL_CHUNK_SIZES[0]=64
-    POOL_CHUNK_SIZES[1]=1024
-    POOL_CHUNK_SIZES[2]=2048
-
-    log_info "Required pools:"
-    log_info "  Pool 0: 64KB chunk size"
-    log_info "  Pool 1: 1024KB (1MB) chunk size"
-    log_info "  Pool 2: 2048KB (2MB) chunk size"
-    log_info ""
 
     # Check existing pools
     log_info "Checking existing storage pools..."
     $PXCTL_PATH service pool show 2>&1 | head -20 || true
     log_info ""
 
-    # Verify pool chunk sizes
-    log_info "Verifying pool chunk sizes..."
-    local all_pools_ok=true
-
-    for pool_id in 0 1 2; do
-        local expected_chunk=${POOL_CHUNK_SIZES[$pool_id]}
-        local actual_chunk=$(get_pool_chunk_size_kb "$pool_id" 2>/dev/null || echo "0")
-
-        if [ "$actual_chunk" = "$expected_chunk" ]; then
-            log_success "✓ Pool $pool_id: chunk size ${actual_chunk}KB (matches expected ${expected_chunk}KB)"
-        elif [ "$actual_chunk" = "0" ]; then
-            log_warn "⚠ Pool $pool_id: not found or not accessible"
-            log_info "  Please ensure pool $pool_id exists with ${expected_chunk}KB chunk size"
-            all_pools_ok=false
-        else
-            log_error "✗ Pool $pool_id: chunk size ${actual_chunk}KB (expected ${expected_chunk}KB)"
-            log_error "  DMThin discard granularity will be ${actual_chunk}KB instead of ${expected_chunk}KB"
-            all_pools_ok=false
-        fi
-    done
-
+    # Count existing pools
+    local existing_pools=$($PXCTL_PATH service pool show -j 2>/dev/null | jq -r '.datapools | length' 2>/dev/null || echo "0")
+    log_info "Found $existing_pools existing pool(s)"
     log_info ""
-    if [ "$all_pools_ok" = true ]; then
-        log_success "All pools verified successfully!"
-    else
-        log_warn "Some pools have mismatched chunk sizes or are not accessible"
-        log_warn "Tests will continue but results may not match expected dmthin granularities"
-        log_warn "To create pools with correct chunk sizes, use LVM commands:"
-        log_warn "  lvcreate --type thin-pool --chunksize 64K ..."
-        log_warn "  lvcreate --type thin-pool --chunksize 1024K ..."
-        log_warn "  lvcreate --type thin-pool --chunksize 2048K ..."
-    fi
+
+    # NOTE: All pool creation and verification logic is COMMENTED OUT
+    # We now create volumes without specifying pool_id, letting PX choose the pool
+
+    # # Define pool configurations
+    # # Pool 0: 64KB chunk size (for 64KB dmthin granularity)
+    # # Pool 1: 1MB (1024KB) chunk size (for 1MB dmthin granularity)
+    # # Pool 2: 2MB (2048KB) chunk size (for 2MB dmthin granularity)
+    #
+    # declare -A POOL_CHUNK_SIZES
+    # POOL_CHUNK_SIZES[0]=64
+    # POOL_CHUNK_SIZES[1]=1024
+    # POOL_CHUNK_SIZES[2]=2048
+    #
+    # log_info "Required pools:"
+    # log_info "  Pool 0: 64KB chunk size"
+    # log_info "  Pool 1: 1024KB (1MB) chunk size"
+    # log_info "  Pool 2: 2048KB (2MB) chunk size"
+    # log_info ""
+    #
+    # # Try to create missing pools if needed
+    # local pools_needed=$((3 - existing_pools))
+    # if [ $pools_needed -gt 0 ]; then
+    #     log_warn "Need to create $pools_needed additional pool(s)"
+    #     log_warn "NOTE: For PX-StoreV2, we cannot directly control chunk size via pxctl"
+    #     log_warn "PX automatically calculates chunk size based on pool capacity"
+    #     log_warn "To get specific chunk sizes, you must manually create LVM thin pools"
+    #     log_info ""
+    #
+    #     # Try to create new pools using pxctl (chunk size will be auto-calculated)
+    #     for ((i=existing_pools; i<3; i++)); do
+    #         log_info "Attempting to create pool $i using pxctl..."
+    #
+    #         local output=$($PXCTL_PATH service drive add --newpool -o start 2>&1 || true)
+    #         echo "$output"
+    #
+    #         if echo "$output" | grep -qi "success\|done\|added"; then
+    #             log_success "Pool creation command completed"
+    #             sleep 10
+    #         elif echo "$output" | grep -qi "cannot add drives\|no.*drive"; then
+    #             log_error "Cannot create pool - no available drives or PX-StoreV2 limitation"
+    #             log_error "You must manually create pools with specific chunk sizes"
+    #             break
+    #         else
+    #             log_warn "Pool creation may have failed - check output above"
+    #         fi
+    #     done
+    #     log_info ""
+    # fi
+    #
+    # # Verify pool chunk sizes
+    # log_info "Verifying pool chunk sizes..."
+    # local all_pools_ok=true
+    #
+    # for pool_id in 0 1 2; do
+    #     local expected_chunk=${POOL_CHUNK_SIZES[$pool_id]}
+    #     local actual_chunk=$(get_pool_chunk_size_kb "$pool_id" 2>/dev/null || echo "0")
+    #
+    #     if [ "$actual_chunk" = "$expected_chunk" ]; then
+    #         log_success "✓ Pool $pool_id: chunk size ${actual_chunk}KB (matches expected ${expected_chunk}KB)"
+    #     elif [ "$actual_chunk" = "0" ]; then
+    #         log_error "✗ Pool $pool_id: NOT FOUND"
+    #         log_error "  Tests cannot proceed without pool $pool_id"
+    #         all_pools_ok=false
+    #     else
+    #         log_warn "⚠ Pool $pool_id: chunk size ${actual_chunk}KB (expected ${expected_chunk}KB)"
+    #         log_warn "  DMThin discard granularity will be ${actual_chunk}KB instead of ${expected_chunk}KB"
+    #         log_warn "  Test results will reflect actual chunk size, not expected"
+    #         # Don't fail - just warn that results will be different
+    #     fi
+    # done
+    #
+    # log_info ""
+    # if [ "$all_pools_ok" = true ]; then
+    #     log_success "All pools verified successfully!"
+    # else
+    #     log_error "=========================================="
+    #     log_error "POOL SETUP INCOMPLETE"
+    #     log_error "=========================================="
+    #     log_error ""
+    #     log_error "Some required pools are missing or inaccessible."
+    #     log_error ""
+    #     log_error "For PX-StoreV2 (DMThin), you MUST manually create LVM thin pools"
+    #     log_error "with specific chunk sizes BEFORE starting PX."
+    #     log_error ""
+    #     log_error "Steps to create pools with specific chunk sizes:"
+    #     log_error ""
+    #     log_error "1. Stop PX on this node"
+    #     log_error "2. Create LVM thin pools with desired chunk sizes:"
+    #     log_error "   # For pool with 64KB chunks:"
+    #     log_error "   pvcreate /dev/sdX"
+    #     log_error "   vgcreate vg_pool1 /dev/sdX"
+    #     log_error "   lvcreate --type thin-pool --chunksize 64K --size 50G -n pxpool vg_pool1"
+    #     log_error ""
+    #     log_error "   # For pool with 1024KB chunks:"
+    #     log_error "   pvcreate /dev/sdY"
+    #     log_error "   vgcreate vg_pool2 /dev/sdY"
+    #     log_error "   lvcreate --type thin-pool --chunksize 1024K --size 50G -n pxpool vg_pool2"
+    #     log_error ""
+    #     log_error "   # For pool with 2048KB chunks:"
+    #     log_error "   pvcreate /dev/sdZ"
+    #     log_error "   vgcreate vg_pool3 /dev/sdZ"
+    #     log_error "   lvcreate --type thin-pool --chunksize 2048K --size 50G -n pxpool vg_pool3"
+    #     log_error ""
+    #     log_error "3. Restart PX to recognize the new pools"
+    #     log_error ""
+    #     log_error "=========================================="
+    #     return 1
+    # fi
+
+    log_success "Pool check complete - using existing pools"
     log_info "=========================================="
     log_info ""
 }
@@ -653,11 +764,35 @@ main() {
     # Initialize CSV output
     initialize_csv_output
 
-    # Run all 3 phases
+    # Run all 3 phases SEQUENTIALLY
+    # Each phase MUST complete before the next one starts
+
+    log_info "=========================================="
+    log_info "STARTING PHASE 1"
+    log_info "=========================================="
     run_phase1_tests
+    wait  # Ensure all background jobs from Phase 1 are complete
+    log_success "PHASE 1 COMPLETED - All volumes tested and deleted"
+    log_info ""
+    sleep 5  # Brief pause between phases
+
+    log_info "=========================================="
+    log_info "STARTING PHASE 2"
+    log_info "=========================================="
     run_phase2_tests
+    wait  # Ensure all background jobs from Phase 2 are complete
+    log_success "PHASE 2 COMPLETED - All volumes tested and deleted"
+    log_info ""
+    sleep 5  # Brief pause between phases
+
+    log_info "=========================================="
+    log_info "STARTING PHASE 3"
+    log_info "=========================================="
     pxctl cluster option update --auto-fstrim on || echo "clusterwide autofstrim is can not be turned on"
     run_phase3_tests
+    wait  # Ensure all background jobs from Phase 3 are complete
+    log_success "PHASE 3 COMPLETED - All volumes tested and deleted"
+    log_info ""
 
     # Generate summary
     generate_test_summary
@@ -785,7 +920,7 @@ run_single_case() {
     # Create files to fill entire volume using fio with low compressibility
     local test_dir="${mount_path}/test_${run_num}_${file_case}"
 
-    log_info "    Creating ${file_size_kb}KB files until volume is full using fio..."
+    log_info "    Creating ${file_size_kb}KB files until volume is full using dd..."
 
     # Get available space to calculate target size
     local available_kb=$(df "$mount_path" | tail -1 | awk '{print $4}')
@@ -797,8 +932,8 @@ run_single_case() {
         target_file_count=10000
     fi
 
-    # Use helper function with 10 parallel jobs and iodepth of 16
-    file_count=$(fill_volume_with_fio "$test_dir" "$file_size_kb" "$target_file_count" 10 16)
+    # Use helper function with 10 parallel jobs
+    file_count=$(fill_volume_with_dd "$test_dir" "$file_size_kb" "$target_file_count" 10)
 
     sleep 2
     log_info "    Created $file_count files of ${file_size_kb}KB each using fio"

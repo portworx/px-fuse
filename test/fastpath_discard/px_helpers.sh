@@ -8,8 +8,10 @@ source "$(dirname "$0")/config.sh"
 #######################################
 
 # Create a storage pool with specific chunk size
-# This creates the underlying LVM thin pool with the desired chunk size
-# which determines the discard granularity
+# For PX-StoreV2 (DMThin), we need to create new pools with --newpool flag
+# The chunk size is determined by the LVM thin pool chunk size
+# NOTE: PX automatically calculates chunk size based on pool size
+# To get specific chunk sizes, we need to use drives of specific sizes
 create_pool_with_chunk_size() {
     local pool_id=$1
     local chunk_size_kb=$2
@@ -17,19 +19,48 @@ create_pool_with_chunk_size() {
 
     log_info "Creating pool $pool_id with chunk size ${chunk_size_kb}KB..."
 
-    # If drive path not specified, let pxctl choose
-    if [ -z "$drive_path" ]; then
-        # Create new pool using pxctl
-        $PXCTL_PATH service drive add --newpool 2>&1 || true
-    else
-        $PXCTL_PATH service drive add --newpool -d "$drive_path" 2>&1 || true
+    # Check if drive is available
+    if [ -n "$drive_path" ] && [ ! -b "$drive_path" ]; then
+        log_error "Drive $drive_path not found or not a block device"
+        return 1
     fi
 
-    sleep 5
+    # For PX-StoreV2, we must use --newpool to create a new pool
+    # Cannot add drives to existing pools
+    local add_cmd="$PXCTL_PATH service drive add --newpool -o start"
 
-    # Note: The chunk size is typically set during LVM thin pool creation
-    # For existing pools, we need to verify the chunk size matches
-    # In production, pools should be pre-created with correct chunk sizes
+    if [ -n "$drive_path" ]; then
+        add_cmd="$add_cmd -d $drive_path"
+        log_info "Creating new pool with drive: $drive_path"
+    else
+        log_warn "No drive path specified - pxctl will choose available drive"
+    fi
+
+    log_info "Running: $add_cmd"
+    local output=$($add_cmd 2>&1)
+    local exit_code=$?
+
+    echo "$output"
+
+    if [ $exit_code -ne 0 ]; then
+        log_error "Failed to create pool: $output"
+        return 1
+    fi
+
+    # Wait for pool to be created
+    sleep 10
+
+    # Verify the pool was created and get its actual chunk size
+    local actual_chunk_kb=$(get_pool_chunk_size "$pool_id")
+    if [ -n "$actual_chunk_kb" ]; then
+        log_info "Pool $pool_id created with chunk size: ${actual_chunk_kb}KB"
+        if [ "$actual_chunk_kb" != "$chunk_size_kb" ]; then
+            log_warn "Pool $pool_id chunk size ($actual_chunk_kb KB) differs from requested ($chunk_size_kb KB)"
+            log_warn "PX automatically calculates chunk size based on pool capacity"
+        fi
+    else
+        log_warn "Could not verify chunk size for pool $pool_id"
+    fi
 
     return 0
 }
@@ -38,20 +69,24 @@ create_pool_with_chunk_size() {
 get_pool_chunk_size_kb() {
     local pool_id=$1
 
-    # Get VG name for this pool
-    local vg_name="pool${pool_id}"
+    # For PX-StoreV2, the VG naming convention is pwx<pool_id>
+    # Try multiple VG name patterns to find the correct one
+    local vg_patterns=("pwx${pool_id}" "pool${pool_id}" "vg_pool${pool_id}")
 
-    # Query LVM for chunk size
-    local chunk_bytes=$(lvm lvs -o chunk_size --units b --noheadings --nosuffix "${vg_name}/pxpool" 2>/dev/null | tr -d ' ')
+    for vg_name in "${vg_patterns[@]}"; do
+        # Query LVM for chunk size - try pxpool thin pool
+        local chunk_bytes=$(lvm lvs -o chunk_size --units b --noheadings --nosuffix "${vg_name}/pxpool" 2>/dev/null | tr -d ' ')
 
-    if [ -z "$chunk_bytes" ] || [ "$chunk_bytes" = "0" ]; then
-        echo "0"
-        return 1
-    fi
+        if [ -n "$chunk_bytes" ] && [ "$chunk_bytes" != "0" ]; then
+            local chunk_kb=$((chunk_bytes / 1024))
+            echo "$chunk_kb"
+            return 0
+        fi
+    done
 
-    local chunk_kb=$((chunk_bytes / 1024))
-    echo "$chunk_kb"
-    return 0
+    # If not found, return 0 to indicate pool not found
+    echo "0"
+    return 1
 }
 
 # Verify pool chunk size matches expected value
@@ -115,28 +150,36 @@ get_pool_id_for_dmthin_gran() {
 # Volume lifecycle management
 #######################################
 
-# Create a new volume with specified size in a specific pool
+# Create a new volume with specified size
+# NOTE: pool_id parameter is now OPTIONAL - if not specified, PX chooses the pool
 create_volume() {
     local vol_name=$1
     local size=${2:-10}  # Size in GB (just the number)
-    local pool_id=${3:-0}
+    local pool_id=${3:-}  # Optional pool_id (empty = let PX choose)
 
     # Strip 'G' or 'GB' suffix if present
     size=$(echo "$size" | sed 's/[Gg][Bb]*$//')
 
-    echo "Creating volume: $vol_name, size: ${size}GB, pool: $pool_id..." >&2
-
-    # Get pool UUID for the specified pool ID
-    local pool_uuid=$(get_pool_uuid "$pool_id")
-    if [ $? -ne 0 ] || [ -z "$pool_uuid" ]; then
-        log_warn "Failed to get pool UUID for pool $pool_id, creating volume without pool constraint"
-        pool_uuid=""
+    if [ -n "$pool_id" ]; then
+        echo "Creating volume: $vol_name, size: ${size}GB, pool: $pool_id..." >&2
     else
-        echo "  Using pool UUID: $pool_uuid" >&2
+        echo "Creating volume: $vol_name, size: ${size}GB (PX will choose pool)..." >&2
+    fi
+
+    # Get pool UUID for the specified pool ID (only if pool_id is provided)
+    local pool_uuid=""
+    if [ -n "$pool_id" ]; then
+        pool_uuid=$(get_pool_uuid "$pool_id" 2>/dev/null || echo "")
+        if [ -z "$pool_uuid" ]; then
+            log_warn "Failed to get pool UUID for pool $pool_id, creating volume without pool constraint"
+        else
+            echo "  Using pool UUID: $pool_uuid" >&2
+        fi
     fi
 
     # Create the volume with pool constraint if available
-    local create_cmd="$PXCTL_PATH volume create \"$vol_name\" --size \"$size\" --repl 1 --fastpath --fs ext4"
+    # NOTE: We do NOT use --fs ext4 here because we format manually with custom inode ratio
+    local create_cmd="$PXCTL_PATH volume create \"$vol_name\" --size \"$size\" --repl 1 --fastpath"
     if [ -n "$pool_uuid" ]; then
         create_cmd="$create_cmd --nodes=\"$pool_uuid\""
     fi
