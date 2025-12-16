@@ -529,31 +529,84 @@ static ssize_t fuse_dev_splice_read(struct file *in, loff_t *ppos,
 static int fuse_notify_add(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
-	struct pxd_add_out add;
-	struct pxd_add_ext_out add_ext;
-	size_t len = sizeof(add);
+	struct pxd_add_out add_old;
+	struct pxd_add_v2_out add;
+	size_t len = sizeof(add_old);
 
-	if (copy_from_iter(&add, len, iter) != len) {
+	if (copy_from_iter(&add_old, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
 
-	memset(&add_ext, 0, sizeof(add_ext));
-	memcpy(&add_ext, &add, sizeof(add));
-	add_ext.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME; // default flags
-	return pxd_add(conn, &add_ext);
+	// Convert legacy pxd_add_out to v2 structure
+	memset(&add, 0, sizeof(add));
+	add.dev_id = add_old.dev_id;
+	add.size = add_old.size;
+	add.queue_depth = add_old.queue_depth;
+	add.discard_size = add_old.discard_size;
+	add.open_mode = O_LARGEFILE | O_RDWR | O_NOATIME;
+	add.enable_fp = 0;
+	add.capabilities = 0;  // Legacy structure doesn't have capabilities
+	// reserved[4] already zeroed by memset
+
+	return pxd_add(conn, &add);
 }
 
 static int fuse_notify_add_ext(struct fuse_conn *conn, unsigned int size,
 		struct iov_iter *iter)
 {
-	struct pxd_add_ext_out add;
-	size_t len = sizeof(add);
+	struct pxd_add_ext_out add_v1;
+	struct pxd_add_v2_out add;
+	size_t len = sizeof(add_v1);
 
-	if (copy_from_iter(&add, len, iter) != len) {
+	if (copy_from_iter(&add_v1, len, iter) != len) {
 		printk(KERN_ERR "%s: can't copy arg\n", __func__);
 		return -EFAULT;
 	}
+
+	// Convert v1 to v2 internally
+	memset(&add, 0, sizeof(add));
+	add.dev_id = add_v1.dev_id;
+	add.size = add_v1.size;
+	add.queue_depth = add_v1.queue_depth;
+	add.discard_size = add_v1.discard_size;
+	add.open_mode = add_v1.open_mode;
+	add.enable_fp = add_v1.enable_fp;
+	memcpy(&add.paths, &add_v1.paths, sizeof(add.paths));
+	add.capabilities = 0;  // v1 doesn't have capabilities
+	add.discard_granularity = 0;  // v1 doesn't have discard_granularity, use default
+	// reserved[4] already zeroed by memset
+
+	trace_fuse_notify_add_ext(add.dev_id, add.size, add.queue_depth, add.discard_size, add.open_mode, add.enable_fp, add.paths.count);
+	return pxd_add(conn, &add);
+}
+
+static int fuse_notify_add_ext_v2(struct fuse_conn *conn, unsigned int size,
+		struct iov_iter *iter)
+{
+	struct pxd_add_v2_out add;
+	size_t len = sizeof(add);
+	int i;
+
+	if (size < len) {
+		printk(KERN_ERR "%s: invalid size %u (expected %zu)\n", __func__, size, len);
+		return -EINVAL;
+	}
+
+	if (copy_from_iter(&add, len, iter) != len) {
+		printk(KERN_ERR "%s: can't copy arg (expected %zu bytes)\n", __func__, len);
+		return -EFAULT;
+	}
+
+	// Validate all reserved fields are zero (for future compatibility)
+	for (i = 0; i < 4; i++) {
+		if (add.reserved[i] != 0) {
+			printk(KERN_ERR "%s: reserved[%d] is non-zero (%llu), rejecting\n",
+			       __func__, i, add.reserved[i]);
+			return -EINVAL;
+		}
+	}
+
 	trace_fuse_notify_add_ext(add.dev_id, add.size, add.queue_depth, add.discard_size, add.open_mode, add.enable_fp, add.paths.count);
 	return pxd_add(conn, &add);
 }
@@ -848,6 +901,8 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 		return fuse_notify_update_size(fc, size, iter);
 	case PXD_ADD_EXT:
 		return fuse_notify_add_ext(fc, size, iter);
+	case PXD_ADD_EXT_V2:
+		return fuse_notify_add_ext_v2(fc, size, iter);
 	case PXD_GET_FEATURES:
 		return fuse_notify_get_features(fc, size, iter);
 	case PXD_SUSPEND:
@@ -861,6 +916,7 @@ static int fuse_notify(struct fuse_conn *fc, enum fuse_notify_code code,
 	case PXD_EXPORT_DEV:
 		return fuse_notify_export(fc, size, iter);
 	default:
+		printk(KERN_WARNING "fuse_notify: unknown opcode=%d\n", (int)code);
 		return -EINVAL;
 	}
 }
