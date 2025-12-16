@@ -217,6 +217,7 @@ protected:
     // Helper functions for device lifecycle (consistent with pxd_test.cc)
     void dev_add_fastpath(pxd_add_out &add, int &minor, std::string &name);
     void dev_add_fastpath(pxd_add_ext_out &add_ext, int &minor, std::string &name);
+    void dev_add_fastpath_v2(pxd_add_v2_out &add_v2, int &minor, std::string &name);
     void dev_export_fastpath(uint64_t dev_id, const std::string &expected_name);
     void dev_remove_fastpath(uint64_t dev_id);
     int wait_msg(int timeout); // timeout in seconds
@@ -225,6 +226,7 @@ protected:
                                     uint64_t expected_discard_granularity = 1048576,
                                     uint64_t expected_max_discard_bytes = 1048576);
     void validate_fastpath_active(const std::string &device_name, int minor_with_status);
+    void validate_write_zeroes(const std::string &device_name, bool expected_enabled);
 
 
 
@@ -444,6 +446,41 @@ void PxdFastpathTest::dev_add_fastpath(pxd_add_ext_out &add_ext, int &minor, std
 	validate_fastpath_active(name, minor);
 }
 
+void PxdFastpathTest::dev_add_fastpath_v2(pxd_add_v2_out &add_v2, int &minor, std::string &name)
+{
+	fuse_out_header oh;
+	struct iovec iov[2];
+
+	ASSERT_TRUE(added_ids.find(add_v2.dev_id) == added_ids.end());
+
+	oh.unique = 0;
+	oh.error = PXD_ADD_EXT_V2;
+	oh.len = sizeof(oh) + sizeof(add_v2);
+
+	iov[0].iov_base = &oh;
+	iov[0].iov_len = sizeof(oh);
+	iov[1].iov_base = &add_v2;
+	iov[1].iov_len = sizeof(add_v2);
+
+	ssize_t write_bytes = writev(ctl_fd, iov, 2);
+	ASSERT_GT(write_bytes, 0);
+
+	std::cout << "dev_add_fastpath_v2: PXD_ADD_EXT_V2 completed, wrote " << write_bytes << " bytes"
+	          << std::endl;
+	std::cout << "dev_add_fastpath_v2: device ID = " << add_v2.dev_id
+	          << ", capabilities = 0x" << std::hex << add_v2.capabilities << std::dec
+	          << ", enable_fp = " << add_v2.enable_fp
+	          << ", paths.count = " << add_v2.paths.count
+	          << std::endl;
+
+	added_ids.insert(add_v2.dev_id);
+	minor = write_bytes;
+	name = std::string(PXD_DEV_PATH) + std::to_string(add_v2.dev_id);
+
+	dev_export_fastpath(add_v2.dev_id, name);
+	std::cout << "dev_add_fastpath_v2: expected device path = " << name << std::endl;
+}
+
 void PxdFastpathTest::dev_export_fastpath(uint64_t dev_id, const std::string &expected_name)
 {
     fuse_out_header oh;
@@ -524,6 +561,9 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 	sleep(1);
 	cleaner.join();
 	killed = false;
+
+	// Remove from added_ids to prevent double removal in TearDown
+	added_ids.erase(dev_id);
 }
 
 int PxdFastpathTest::wait_msg(int timeout)
@@ -695,6 +735,52 @@ void PxdFastpathTest::validate_fastpath_active(const std::string &device_name, i
     } else {
         std::cout << "WARNING: Fastpath sysfs attribute not found at: " << fastpath_path << std::endl;
     }
+}
+
+void PxdFastpathTest::validate_write_zeroes(const std::string &device_name, bool expected_enabled)
+{
+    std::cout << "Validating write_zeroes for device: " << device_name
+              << ", expected_enabled: " << (expected_enabled ? "true" : "false") << std::endl;
+
+    // Convert device name to sysfs path format
+    std::string sysfs_name = device_name;
+    // /dev/pxd/pxd123 -> pxd!pxd123
+    if (sysfs_name.find("/dev/pxd/") == 0) {
+        sysfs_name = sysfs_name.substr(9); // Remove "/dev/pxd/"
+        sysfs_name = "pxd!" + sysfs_name;
+    }
+
+    std::string sysfs_path = "/sys/block/" + sysfs_name + "/queue/";
+    std::string wz_path = sysfs_path + "write_zeroes_max_bytes";
+
+    // Check if write_zeroes_max_bytes file exists
+    if (access(wz_path.c_str(), F_OK) != 0) {
+        std::cout << "WARNING: write_zeroes_max_bytes sysfs attribute does not exist at: "
+                  << wz_path << std::endl;
+        // On older kernels, this file may not exist - skip the check
+        return;
+    }
+
+    // Read write_zeroes_max_bytes value
+    std::ifstream file(wz_path);
+    ASSERT_TRUE(file.is_open()) << "Failed to open: " << wz_path;
+    uint64_t wz_max_bytes;
+    file >> wz_max_bytes;
+    ASSERT_TRUE(file.good()) << "Failed to read from: " << wz_path;
+
+    std::cout << "write_zeroes_max_bytes = " << wz_max_bytes << std::endl;
+
+    if (expected_enabled) {
+        // WriteZero should be enabled: write_zeroes_max_bytes > 0
+        EXPECT_GT(wz_max_bytes, 0u)
+            << "WriteZero should be ENABLED but write_zeroes_max_bytes is 0";
+    } else {
+        // WriteZero should be disabled: write_zeroes_max_bytes == 0
+        EXPECT_EQ(wz_max_bytes, 0u)
+            << "WriteZero should be DISABLED but write_zeroes_max_bytes is " << wz_max_bytes;
+    }
+
+    std::cout << "WriteZero validation passed" << std::endl;
 }
 
 void PxdFastpathTest::write_thread_fastpath(const char *name)
@@ -1192,3 +1278,65 @@ INSTANTIATE_TEST_SUITE_P(
         }
     }
 );
+
+/**
+ * Test: WriteZero flag is DISABLED for fastpath device even when capability is set
+ *
+ * This test verifies that when a device is attached via PXD_ADD_EXT_V2 with:
+ * - enable_fp = 1 (fastpath enabled)
+ * - paths.count > 0 (backing devices configured)
+ * - capabilities = PXD_DEV_CAP_WRITE_ZEROES (capability IS set)
+ *
+ * The resulting block device should have write_zeroes_max_bytes == 0 in sysfs.
+ * This is because fastpath uses LVM which doesn't support discard, so WriteZero
+ * must be disabled regardless of the capability setting.
+ */
+TEST_P(PxdFastpathTest, write_zeroes_disabled_fastpath_with_capability)
+{
+    std::cout << "=== Test: WriteZero disabled for fastpath even with capability ===" << std::endl;
+
+    BackingDeviceType device_type = GetParam();
+    std::string device_type_str = (device_type == BackingDeviceType::BACKING_FILE) ? "backing file" : "loop device";
+    std::cout << "Testing with " << device_type_str << std::endl;
+
+    pxd_add_v2_out add_v2;
+    std::string name;
+    int minor;
+
+    // Zero-initialize the structure
+    memset(&add_v2, 0, sizeof(add_v2));
+
+    // Setup device with fastpath and WriteZero capability
+    add_v2.dev_id = 200;
+    add_v2.size = 100 * 1024 * 1024;  // 100 MB
+    add_v2.queue_depth = 128;
+    add_v2.discard_size = PXD_LBS;
+    add_v2.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_v2.enable_fp = 1;  // FASTPATH enabled
+    add_v2.capabilities = PXD_DEV_CAP_WRITE_ZEROES;  // Capability IS set
+    add_v2.discard_granularity = 0;  // Use default
+
+    // Create backing devices and setup paths
+    create_backing_devices(2, 100);  // 2 replicas, 100MB each
+    setup_fastpath_paths(add_v2.paths);
+
+    // Verify paths are configured
+    ASSERT_GT(add_v2.paths.count, 0u) << "Fastpath paths not configured";
+    std::cout << "Configured " << add_v2.paths.count << " fastpath paths" << std::endl;
+
+    // Add device via PXD_ADD_EXT_V2
+    dev_add_fastpath_v2(add_v2, minor, name);
+
+    std::cout << "Fastpath device created: " << name << std::endl;
+
+    // Validate that WriteZero is DISABLED for fastpath (even with capability set)
+    validate_write_zeroes(name, false /* expected_enabled */);
+
+    // Validate fastpath is active
+    validate_fastpath_active(name, minor);
+
+    // Cleanup
+    dev_remove_fastpath(add_v2.dev_id);
+
+    std::cout << "=== Test PASSED: WriteZero disabled for fastpath ===" << std::endl;
+}

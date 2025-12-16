@@ -48,6 +48,8 @@ struct pxd_device {
 	bool fastpath; // this is persistent, how the block device registered with kernel
 	unsigned int queue_depth; // sysfs attribute bdev io queue depth
 	unsigned int discard_size;
+	unsigned int discard_granularity; // discard granularity in bytes
+	unsigned int capabilities;  // Capability flags (PXD_CAP_*)
 
 #define PXD_ACTIVE(pxd_dev)  (atomic_read(&pxd_dev->ncount))
 	// [global] total active requests
@@ -83,6 +85,12 @@ bool fastpath_enabled(struct pxd_device *pxd_dev) {
 static inline
 bool fastpath_active(struct pxd_device *pxd_dev) {
 	return pxd_dev->fp.fastpath;
+}
+
+// Check if device has a specific capability
+static inline
+bool pxd_has_cap(struct pxd_device *pxd_dev, unsigned int cap) {
+	return (pxd_dev->capabilities & cap) != 0;
 }
 
 void pxd_check_q_congested(struct pxd_device *pxd_dev);
