@@ -177,10 +177,18 @@ create_test_volume() {
     local block_size_kb=4
     local stride=$((chunk_size_kb / block_size_kb))
 
+    # Calculate stripe unit in bytes for XFS (su parameter expects bytes)
+    local chunk_size_bytes=$((chunk_size_kb * 1024))
+
     log_info "Formatting with block size ${block_size_kb}KB, stride ${stride} (chunk size ${chunk_size_kb}KB from pool ${pool_id})"
-    mkfs.ext4 -F -b 4096 -i 4096 -E "stride=${stride}" "$dev_path" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        log_error "Failed to format volume $vol_name"
+    # mkfs.ext4 -F -b 4096 -i 4096 -E "stride=${stride}" "$dev_path" >/dev/null 2>&1
+
+    # XFS: su (stripe unit) expects bytes (must be multiple of block size)
+    log_info "Running: mkfs.xfs -f -b size=4096 -d su=${chunk_size_bytes} $dev_path"
+    mkfs.xfs -f -b size=4096 -d su=${chunk_size_bytes},sw=1 "$dev_path" 2>&1 | tee -a "$LOG_FILE"
+    local mkfs_result=$?
+    if [ $mkfs_result -ne 0 ]; then
+        log_error "Failed to format volume $vol_name (exit code: $mkfs_result)"
         return 1
     fi
 
@@ -188,7 +196,10 @@ create_test_volume() {
     local mount_path="/var/lib/osd/mounts/$vol_name"
     mkdir -p "$mount_path"
     log_info "Mounting volume $vol_name to $mount_path"
-    pxctl host mount "$vol_name" --path "$mount_path" >/dev/null 2>&1
+    # Old approach using pxctl (commented out - pxctl host mount fails with XFS)
+    # pxctl host mount "$vol_name" --path "$mount_path" >/dev/null 2>&1
+    # New approach using mount command directly
+    mount -t xfs "$dev_path" "$mount_path" >/dev/null 2>&1
     if [ $? -ne 0 ]; then
         log_error "Failed to mount volume $vol_name"
         return 1
@@ -581,14 +592,20 @@ run_single_volume_test() {
     if [ "$phase_num" -eq 3 ]; then
         pxctl volume update --auto_fstrim on "$vol_name" 2>/dev/null || echo "Failed to enable autofstrim on $vol_name"
         pxctl volume update --nodiscard on "$vol_id" 2>/dev/null || echo "Failed to enable nodiscard on $vol_name"
-    else 
+    else
         pxctl volume update --auto_fstrim off "$vol_name" 2>/dev/null || true
     fi
-    pxctl host unmount --path /var/lib/osd/mounts/$vol_name "$vol_name" 2>/dev/null || echo "Failed to unmount $vol_name"
+    # Old approach using pxctl (commented out - pxctl host mount fails with XFS)
+    # pxctl host unmount --path /var/lib/osd/mounts/$vol_name "$vol_name" 2>/dev/null || echo "Failed to unmount $vol_name"
+    # New approach using umount command directly
+    umount /var/lib/osd/mounts/$vol_name 2>/dev/null || echo "Failed to unmount $vol_name"
     pxctl host detach "$vol_name" 2>/dev/null || echo "Failed to detach $vol_name"
     pxctl host attach "$vol_name" 2>/dev/null || echo "Failed to attach $vol_name"
     mkdir -p "$mount_path"
-    pxctl host mount "$vol_name" --path "$mount_path" 2>/dev/null || echo "Failed to mount $vol_name"
+    # Old approach using pxctl (commented out - pxctl host mount fails with XFS)
+    # pxctl host mount "$vol_name" --path "$mount_path" 2>/dev/null || echo "Failed to mount $vol_name"
+    # New approach using mount command directly
+    mount -t xfs "/dev/pxd/pxd${vol_id}" "$mount_path" 2>/dev/null || echo "Failed to mount $vol_name"
     
     # Run 5 iterations
     for iteration in {1..5}; do
@@ -858,7 +875,8 @@ run_single_case() {
         return 1
     fi
 
-    local test_mode=${TEST_RUNS[$run_num]:-$pattern}
+    # Use pattern parameter if provided, otherwise fall back to TEST_RUNS
+    local test_mode=${pattern:-${TEST_RUNS[$run_num]}}
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
     log_info "  Case: ${file_size_kb}KB file - Mode: $test_mode"

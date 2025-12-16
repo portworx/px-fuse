@@ -229,7 +229,10 @@ mount_volume() {
     local mount_path=$2
     echo "Mounting volume $vol_id at $mount_path..." >&2
     mkdir -p "$mount_path"
-    $PXCTL_PATH host mount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    # Old approach using pxctl (commented out - pxctl host mount fails with XFS)
+    # $PXCTL_PATH host mount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    # New approach using mount command directly
+    mount -t xfs "/dev/pxd/pxd${vol_id}" "$mount_path" >/dev/null 2>&1 || true
     sleep 2
 }
 
@@ -238,7 +241,10 @@ unmount_volume() {
     local vol_id=$1
     local mount_path=$2
     echo "Unmounting volume $vol_id from $mount_path..." >&2
-    $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    # Old approach using pxctl (commented out - using umount directly instead)
+    # $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    # New approach using umount command directly
+    umount "$mount_path" >/dev/null 2>&1 || true
     sleep 2
 }
 
@@ -254,12 +260,14 @@ cleanup_volume() {
     umount "$mount_path" >/dev/null 2>&1 || true
 
     # Try to unmount/detach/delete by ID
-    $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
+    # Old approach using pxctl host unmount (commented out - using umount directly instead)
+    # $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" >/dev/null 2>&1 || true
     $PXCTL_PATH host detach "$vol_id" --redirect=false >/dev/null 2>&1 || true
     $PXCTL_PATH volume delete "$vol_id" --force >/dev/null 2>&1 || true
 
     # Also try by name in case ID didn't work
-    $PXCTL_PATH host unmount "$vol_name" --path "$mount_path" >/dev/null 2>&1 || true
+    # Old approach using pxctl host unmount (commented out - using umount directly instead)
+    # $PXCTL_PATH host unmount "$vol_name" --path "$mount_path" >/dev/null 2>&1 || true
     $PXCTL_PATH host detach "$vol_name" --redirect=false >/dev/null 2>&1 || true
     $PXCTL_PATH volume delete "$vol_name" --force >/dev/null 2>&1 || true
 
@@ -455,9 +463,15 @@ remount_volume() {
     local vol_id=$1
     local mount_path=$2
     log_info "Remounting volume $vol_id at $mount_path..."
-    $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" 2>/dev/null
+    # Old approach using pxctl (commented out - pxctl host mount fails with XFS)
+    # $PXCTL_PATH host unmount "$vol_id" --path "$mount_path" 2>/dev/null
+    # New approach using umount command directly
+    umount "$mount_path" 2>/dev/null
     sleep 1
-    $PXCTL_PATH host mount "$vol_id" --path "$mount_path"
+    # Old approach using pxctl (commented out - pxctl host mount fails with XFS)
+    # $PXCTL_PATH host mount "$vol_id" --path "$mount_path"
+    # New approach using mount command directly
+    mount -t xfs "/dev/pxd/pxd${vol_id}" "$mount_path"
     sleep 2
 }
 
