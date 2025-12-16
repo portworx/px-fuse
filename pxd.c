@@ -566,31 +566,9 @@ static void pxd_req_misc(struct fuse_req *req, uint32_t size, uint64_t off,
 #endif
 }
 
-/*
- * when block device is registered in non blk mq mode, device limits are not
- * honoured. Handle it appropriately.
- */
-static inline
-int pxd_handle_device_limits(struct fuse_req *req, uint32_t *size, uint64_t *off,
-		unsigned int op)
-{
-	return 0;
-}
-
 static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
-	int rc;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-    rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_READ);
-#else
-    rc = pxd_handle_device_limits(req, &size, &off, 0);
-#endif
-	if (rc) {
-		return rc;
-	}
-
 	req->in.h.opcode = PXD_READ;
 	req->end = pxd_process_read_reply_q;
 	pxd_req_misc(req, size, off, minor, flags);
@@ -600,17 +578,6 @@ static int pxd_read_request(struct fuse_req *req, uint32_t size, uint64_t off,
 static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
-	int rc;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-    rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE);
-#else
-    rc = pxd_handle_device_limits(req, &size, &off, REQ_WRITE);
-#endif
-	if (rc) {
-		return rc;
-	}
-
 	req->in.h.opcode = PXD_WRITE;
 	req->end = pxd_process_write_reply_q;
 
@@ -625,17 +592,6 @@ static int pxd_write_request(struct fuse_req *req, uint32_t size, uint64_t off,
 static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t flags)
 {
-	int rc;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_DISCARD);
-#else
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_DISCARD);
-#endif
-	if (rc) {
-		return rc;
-	}
-
 	req->in.h.opcode = PXD_DISCARD;
 	req->end = pxd_process_write_reply_q;
 
@@ -643,27 +599,17 @@ static int pxd_discard_request(struct fuse_req *req, uint32_t size, uint64_t off
 	return 0;
 }
 
-static int pxd_write_same_request(struct fuse_req *req, uint32_t size, uint64_t off,
-			uint32_t minor, uint32_t flags)
+static int pxd_write_zeroes_request(struct fuse_req *req, uint32_t size, uint64_t off,
+                                   uint32_t minor, uint32_t flags)
 {
-	int rc;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_ZEROES);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_OP_WRITE_SAME);
+    req->in.h.opcode = PXD_WRITE_ZEROES;
+#ifdef __PXD_BIO_MAKEREQ__
+    req->end = pxd_process_write_reply;
 #else
-	rc = pxd_handle_device_limits(req, &size, &off, REQ_WRITE_SAME);
+    req->end = pxd_process_write_reply_q;
 #endif
-	if (rc) {
-		return rc;
-	}
-
-	req->in.h.opcode = PXD_WRITE_SAME;
-	req->end = pxd_process_write_reply_q;
-
-	pxd_req_misc(req, size, off, minor, flags);
-	return 0;
+    pxd_req_misc(req, size, off, minor, flags);
+    return 0;
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,8,0) || defined(REQ_PREFLUSH)
@@ -671,14 +617,9 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 			uint32_t minor, uint32_t op, uint32_t flags)
 {
 	int rc;
-
 	switch (op) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
 	case REQ_OP_WRITE_ZEROES:
-#else
-	case REQ_OP_WRITE_SAME:
-#endif
-		rc = pxd_write_same_request(req, size, off, minor, flags);
+		rc = pxd_write_zeroes_request(req, size, off, minor, flags);
 		break;
 	case REQ_OP_WRITE:
 		rc = pxd_write_request(req, size, off, minor, flags);
@@ -709,14 +650,9 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 {
 	int rc;
 
-	switch (flags & (REQ_WRITE | REQ_DISCARD | REQ_WRITE_SAME)) {
+	switch (flags & (REQ_WRITE | REQ_DISCARD)) {
 	case REQ_WRITE:
-		/* FALLTHROUGH */
-	case (REQ_WRITE | REQ_WRITE_SAME):
-		if (flags & REQ_WRITE_SAME)
-			rc = pxd_write_same_request(req, size, off, minor, flags);
-		else
-			rc = pxd_write_request(req, size, off, minor, flags);
+		rc = pxd_write_request(req, size, off, minor, flags);
 		break;
 	case 0:
 		rc = pxd_read_request(req, size, off, minor, flags);
@@ -1103,36 +1039,48 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 
 #ifdef RHEL_RELEASE_CODE
 #if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
+	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
+	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
+	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
+	                            (pxd_dev->discard_granularity / SECTOR_SIZE) : 0;
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
 		  .max_segment_size = SEGMENT_SIZE,
 		  .max_segments = PXD_MAX_IO / PXD_LBS,
 		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
-		  .discard_alignment = PXD_MAX_DISCARD_GRANULARITY,
-		  .discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
+		  .discard_alignment = pxd_dev->discard_granularity,
+		  .discard_granularity = pxd_dev->discard_granularity,
 		  .io_min = PXD_LBS,
 		  .io_opt = PXD_LBS,
 		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
-		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE
+		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  // Control write_zeroes: enable if PXD_DEV_CAP_WRITE_ZEROES capability is set
+		  .max_write_zeroes_sectors = wz_sectors
 	  };
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
 #else
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 #endif
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || ((LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)) && !defined(__ORACLE_UEK__))
+	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
+	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
+	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
+	                            (pxd_dev->discard_granularity / SECTOR_SIZE) : 0;
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
 		  .max_segment_size = SEGMENT_SIZE,
 		  .max_segments = PXD_MAX_IO / PXD_LBS,
 		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
-		  .discard_alignment = PXD_MAX_DISCARD_GRANULARITY,
-		  .discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
+		  .discard_alignment = pxd_dev->discard_granularity,
+		  .discard_granularity = pxd_dev->discard_granularity,
 		  .io_min = PXD_LBS,
 		  .io_opt = PXD_LBS,
 		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
-		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE
+		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  // Control write_zeroes: enable if PXD_DEV_CAP_WRITE_ZEROES capability is set
+		  .max_write_zeroes_sectors = wz_sectors
 	  };
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
 #else
@@ -1207,6 +1155,31 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_logical_block_size(q, PXD_LBS);
 	blk_queue_physical_block_size(q, PXD_LBS);
 #endif
+// Control write_zeroes for kernels that don't use queue_limits API
+// (queue_limits API sets max_write_zeroes_sectors during disk allocation above)
+// Note: __EL8__ is defined for both EL8 and EL9 (see Makefile), so we need
+// explicit RHEL_RELEASE_CODE checks for RHEL 9.x which uses OLD API for < 9.6
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,10,0)
+#ifdef RHEL_RELEASE_CODE
+#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(9, 6)
+	// RHEL < 9.6: set write_zeroes via blk_queue API (not queue_limits)
+	// WriteZero: enable only if capability is set AND fastpath is NOT enabled
+	if (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) {
+		blk_queue_max_write_zeroes_sectors(q, pxd_dev->discard_granularity / SECTOR_SIZE);
+	} else {
+		blk_queue_max_write_zeroes_sectors(q, 0);
+	}
+#endif
+#elif !(LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)))
+	// Non-RHEL kernels that don't use queue_limits API
+	// WriteZero: enable only if capability is set AND fastpath is NOT enabled
+	if (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) {
+		blk_queue_max_write_zeroes_sectors(q, pxd_dev->discard_granularity / SECTOR_SIZE);
+	} else {
+		blk_queue_max_write_zeroes_sectors(q, 0);
+	}
+#endif
+#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 #if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
@@ -1222,15 +1195,15 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 #endif                                                        // #endif for defined(__EL8__) || defined(__SUSE_EQ_SP5__)
 #endif                                                        // #endif for LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 
-    q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
-    q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
+    q->limits.discard_granularity = pxd_dev->discard_granularity;
+    q->limits.discard_alignment = pxd_dev->discard_granularity;
     q->limits.max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE;
 
-    // given unaligned discards are ignored at replica targets, it cannot be guaranteed zeroes after discard
+    // given unaligned discards are ignored at targets, it cannot be guaranteed zeroes after discard
     // so never commit to zeroes being returned after a discard.
     // this flag and behavior got deprecated
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4,12,0)
-    q->limits.discard_zeroes_data = 0;
+	q->limits.discard_zeroes_data = 0;
 #endif
 
 	/* Enable flush support. */
@@ -1294,7 +1267,7 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id)
 }
 
 static int __pxd_update_path(struct pxd_device *pxd_dev, struct pxd_update_path_out *update_path);
-ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
+ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_v2_out *add)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = NULL;
@@ -1316,6 +1289,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		} else {
 			disableFastPath(pxd_dev, false);
 		}
+
 		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
 	}
 
@@ -1366,15 +1340,26 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 		pxd_dev->queue_depth = add->queue_depth;
 	}
 
+	// Store discard_granularity: use specified value or default
+	if (add->discard_granularity > 0) {
+		pxd_dev->discard_granularity = add->discard_granularity;
+	} else {
+		pxd_dev->discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
+	}
+
 	if (add->discard_size == 0) {
 		pxd_dev->discard_size = 0; // disabled
-	} else if (add->discard_size <= PXD_MAX_DISCARD_GRANULARITY)
-		pxd_dev->discard_size = PXD_MAX_DISCARD_GRANULARITY; // unaligned make it minimum aligned
+	} else if (add->discard_size <= pxd_dev->discard_granularity)
+		pxd_dev->discard_size = pxd_dev->discard_granularity; // unaligned make it minimum aligned
 	else
-		pxd_dev->discard_size = ALIGN(add->discard_size, PXD_MAX_DISCARD_GRANULARITY); // aligned
+		pxd_dev->discard_size = ALIGN(add->discard_size, pxd_dev->discard_granularity); // aligned
 
-	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu (discard size: %u)\n",
-			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count, pxd_dev->discard_size);
+	// Store device capabilities
+	pxd_dev->capabilities = add->capabilities;
+
+	printk(KERN_INFO"Device %llu added %px with mode %#x fastpath %d npath %lu (discard size: %u, discard_granularity: %u, capabilities: 0x%x)\n",
+			add->dev_id, pxd_dev, add->open_mode, add->enable_fp, add->paths.count, pxd_dev->discard_size,
+			pxd_dev->discard_granularity, pxd_dev->capabilities);
 
 	// initializes fastpath context part of pxd_dev
 	err = pxd_fastpath_init(pxd_dev);

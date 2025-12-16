@@ -108,6 +108,7 @@ class PxdTest : public ::testing::Test
 
 	void dev_add(pxd_add_out &add, int &minor, std::string &name);
 	void dev_add_ext(pxd_add_ext_out &add_ext, int &minor, std::string &name);
+	void dev_add_v2(pxd_add_v2_out &add_v2, int &minor, std::string &name);
 	void dev_export(uint64_t dev_id, const std::string &expected_name);
 	void dev_remove(uint64_t dev_id);
 	int wait_msg(int timeout); // timeout in seconds
@@ -115,6 +116,7 @@ class PxdTest : public ::testing::Test
 	void validate_device_properties(const std::string &device_name,
 	                                uint64_t expected_discard_granularity = PXD_MAX_DISCARD_GRANULARITY,
 	                                uint64_t expected_max_discard_bytes = PXD_MAX_DISCARD_GRANULARITY);
+	void validate_write_zeroes(const std::string &device_name, bool expected_enabled);
 
 	int write_pxd_timeout(int minor, int timeout_value);
 
@@ -206,6 +208,40 @@ void PxdTest::dev_add_ext(pxd_add_ext_out &add_ext, int &minor, std::string &nam
 
 	dev_export(minor, name);
 	std::cout << "dev_add_ext: expected device path = " << name << std::endl;
+}
+
+void PxdTest::dev_add_v2(pxd_add_v2_out &add_v2, int &minor, std::string &name)
+{
+	fuse_out_header oh;
+	struct iovec iov[2];
+
+	ASSERT_TRUE(added_ids.find(add_v2.dev_id) == added_ids.end());
+
+	oh.unique = 0;
+	oh.error = PXD_ADD_EXT_V2;
+	oh.len = sizeof(oh) + sizeof(add_v2);
+
+	iov[0].iov_base = &oh;
+	iov[0].iov_len = sizeof(oh);
+	iov[1].iov_base = &add_v2;
+	iov[1].iov_len = sizeof(add_v2);
+
+	ssize_t write_bytes = writev(ctl_fd, iov, 2);
+	ASSERT_GT(write_bytes, 0);
+
+	std::cout << "dev_add_v2: PXD_ADD_EXT_V2 completed, wrote " << write_bytes << " bytes"
+	          << std::endl;
+	std::cout << "dev_add_v2: device ID = " << add_v2.dev_id
+	          << ", capabilities = 0x" << std::hex << add_v2.capabilities << std::dec
+	          << std::endl;
+
+	added_ids.insert(add_v2.dev_id);
+	minor = write_bytes;
+	name = std::string(PXD_DEV_PATH) + std::to_string(add_v2.dev_id);
+
+	// Export device - pass dev_id (not minor) to pxd_export
+	dev_export(add_v2.dev_id, name);
+	std::cout << "dev_add_v2: expected device path = " << name << std::endl;
 }
 
 void PxdTest::dev_export(uint64_t dev_id, const std::string &expected_name)
@@ -481,6 +517,55 @@ void PxdTest::validate_device_properties(const std::string &device_name,
 			system(("cat " + features_path).c_str());
 		}
 	}
+}
+
+void PxdTest::validate_write_zeroes(const std::string &device_name, bool expected_enabled)
+{
+	std::cout << "Validating write_zeroes for device: " << device_name
+	          << ", expected_enabled: " << (expected_enabled ? "true" : "false") << std::endl;
+
+	// Convert device name to sysfs path format
+	std::string sysfs_name = device_name;
+	// /dev/pxd/pxd123 -> pxd!pxd123
+	if (sysfs_name.find("/dev/pxd/") == 0) {
+		sysfs_name = sysfs_name.substr(9); // Remove "/dev/pxd/"
+		sysfs_name = "pxd!" + sysfs_name;
+	}
+
+	std::string sysfs_path = "/sys/block/" + sysfs_name + "/queue/";
+	std::string wz_path = sysfs_path + "write_zeroes_max_bytes";
+
+	// Check if write_zeroes_max_bytes file exists
+	if (access(wz_path.c_str(), F_OK) != 0) {
+		std::cout << "WARNING: write_zeroes_max_bytes sysfs attribute does not exist at: "
+		          << wz_path << std::endl;
+		// On older kernels, this file may not exist - skip the check
+		return;
+	}
+
+	// Read write_zeroes_max_bytes value
+	std::ifstream file(wz_path);
+	ASSERT_TRUE(file.is_open()) << "Failed to open: " << wz_path;
+	uint64_t wz_max_bytes;
+	file >> wz_max_bytes;
+	ASSERT_TRUE(file.good()) << "Failed to read from: " << wz_path;
+
+	std::cout << "write_zeroes_max_bytes = " << wz_max_bytes << std::endl;
+
+	if (expected_enabled) {
+		// WriteZero should be enabled: write_zeroes_max_bytes > 0
+		EXPECT_GT(wz_max_bytes, 0u)
+		    << "WriteZero should be ENABLED but write_zeroes_max_bytes is 0";
+		// Value should be discard_granularity (default PXD_MAX_DISCARD_GRANULARITY = 1MB)
+		EXPECT_EQ(wz_max_bytes, PXD_MAX_DISCARD_GRANULARITY)
+		    << "write_zeroes_max_bytes should equal discard_granularity";
+	} else {
+		// WriteZero should be disabled: write_zeroes_max_bytes == 0
+		EXPECT_EQ(wz_max_bytes, 0u)
+		    << "WriteZero should be DISABLED but write_zeroes_max_bytes is " << wz_max_bytes;
+	}
+
+	std::cout << "WriteZero validation passed" << std::endl;
 }
 
 void PxdTest::SetUp()
@@ -846,7 +931,7 @@ TEST_F(PxdTest, blkdiscard_ioctl)
 			}
 
 			std::cout << "============>	BLKDISCARD ioctl test completed" << std::endl;
-			
+
 		}
 		// Detach block device
 		dev_remove(add.dev_id);
@@ -939,6 +1024,170 @@ TEST_F(PxdTest, AbortContextWithInFlightIO)
 	// detach the device
 	dev_remove(add.dev_id);
 }
+
+/**
+ * Test: WriteZero flag is SET for native path device when capability is enabled
+ *
+ * This test verifies that when a device is attached via PXD_ADD_EXT_V2 with:
+ * - enable_fp = 0 (native path, not fastpath)
+ * - capabilities = PXD_DEV_CAP_WRITE_ZEROES
+ *
+ * The resulting block device should have write_zeroes_max_bytes > 0 in sysfs.
+ */
+TEST_F(PxdTest, write_zeroes_enabled_native_path)
+{
+	std::cout << "=== Test: WriteZero enabled for native path with capability ===" << std::endl;
+
+	pxd_add_v2_out add_v2;
+	std::string name;
+	int minor;
+
+	// Zero-initialize the structure (sets reserved[4]=0)
+	memset(&add_v2, 0, sizeof(add_v2));
+
+	// Setup device with native path (enable_fp = 0) and WriteZero capability
+	add_v2.dev_id = 100;
+	add_v2.size = 100 * 1024 * 1024;  // 100 MB
+	add_v2.queue_depth = 128;
+	add_v2.discard_size = PXD_MAX_DISCARD_GRANULARITY;
+	add_v2.open_mode = O_LARGEFILE | O_RDWR;
+	add_v2.enable_fp = 0;  // Native path (NOT fastpath)
+	add_v2.paths.count = 0;  // No fastpath backing devices
+	add_v2.capabilities = PXD_DEV_CAP_WRITE_ZEROES;  // Enable WriteZero capability
+	add_v2.discard_granularity = 0;  // Use default
+
+	// Add device via PXD_ADD_EXT_V2
+	dev_add_v2(add_v2, minor, name);
+
+	std::cout << "Device created: " << name << std::endl;
+
+	// Validate that WriteZero is ENABLED for native path
+	validate_write_zeroes(name, true /* expected_enabled */);
+
+	// Cleanup
+	dev_remove(add_v2.dev_id);
+
+	std::cout << "=== Test PASSED: WriteZero enabled for native path ===" << std::endl;
+}
+
+/**
+ * Test: WriteZero flag is DISABLED for native path device when capability is NOT set
+ *
+ * This test verifies that when a device is attached via PXD_ADD_EXT_V2 with:
+ * - enable_fp = 0 (native path)
+ * - capabilities = 0 (no WriteZero capability)
+ *
+ * The resulting block device should have write_zeroes_max_bytes == 0 in sysfs.
+ */
+TEST_F(PxdTest, write_zeroes_disabled_native_path_no_capability)
+{
+	std::cout << "=== Test: WriteZero disabled for native path without capability ===" << std::endl;
+
+	pxd_add_v2_out add_v2;
+	std::string name;
+	int minor;
+
+	// Zero-initialize the structure
+	memset(&add_v2, 0, sizeof(add_v2));
+
+	// Setup device with native path but NO WriteZero capability
+	add_v2.dev_id = 101;
+	add_v2.size = 100 * 1024 * 1024;  // 100 MB
+	add_v2.queue_depth = 128;
+	add_v2.discard_size = PXD_MAX_DISCARD_GRANULARITY;
+	add_v2.open_mode = O_LARGEFILE | O_RDWR;
+	add_v2.enable_fp = 0;  // Native path
+	add_v2.paths.count = 0;
+	add_v2.capabilities = 0;  // NO WriteZero capability
+	add_v2.discard_granularity = 0;
+
+	// Add device via PXD_ADD_EXT_V2
+	dev_add_v2(add_v2, minor, name);
+
+	std::cout << "Device created: " << name << std::endl;
+
+	// Validate that WriteZero is DISABLED
+	validate_write_zeroes(name, false /* expected_enabled */);
+
+	// Cleanup
+	dev_remove(add_v2.dev_id);
+
+	std::cout << "=== Test PASSED: WriteZero disabled without capability ===" << std::endl;
+}
+
+/**
+ * Test: WriteZero flag uses custom discard_granularity when specified
+ *
+ * This test verifies that when a device is attached via PXD_ADD_EXT_V2 with:
+ * - capabilities = PXD_DEV_CAP_WRITE_ZEROES
+ * - discard_granularity = custom value (2MB instead of default 1MB)
+ *
+ * The resulting block device should have write_zeroes_max_bytes == custom value.
+ */
+TEST_F(PxdTest, write_zeroes_custom_discard_granularity)
+{
+	std::cout << "=== Test: WriteZero with custom discard_granularity ===" << std::endl;
+
+	pxd_add_v2_out add_v2;
+	std::string name;
+	int minor;
+	const uint32_t custom_granularity = 2 * 1024 * 1024;  // 2MB
+
+	// Zero-initialize the structure
+	memset(&add_v2, 0, sizeof(add_v2));
+
+	// Setup device with custom discard_granularity
+	add_v2.dev_id = 102;
+	add_v2.size = 100 * 1024 * 1024;  // 100 MB
+	add_v2.queue_depth = 128;
+	add_v2.discard_size = custom_granularity;
+	add_v2.open_mode = O_LARGEFILE | O_RDWR;
+	add_v2.enable_fp = 0;  // Native path
+	add_v2.paths.count = 0;
+	add_v2.capabilities = PXD_DEV_CAP_WRITE_ZEROES;
+	add_v2.discard_granularity = custom_granularity;  // Custom value
+
+	// Add device via PXD_ADD_EXT_V2
+	dev_add_v2(add_v2, minor, name);
+
+	std::cout << "Device created: " << name << std::endl;
+
+	// Validate WriteZero uses custom granularity
+	// Convert device name to sysfs path
+	std::string sysfs_name = name;
+	if (sysfs_name.find("/dev/pxd/") == 0) {
+		sysfs_name = sysfs_name.substr(9);
+		sysfs_name = "pxd!" + sysfs_name;
+	}
+	std::string wz_path = "/sys/block/" + sysfs_name + "/queue/write_zeroes_max_bytes";
+
+	if (access(wz_path.c_str(), F_OK) == 0) {
+		std::ifstream file(wz_path);
+		ASSERT_TRUE(file.is_open());
+		uint64_t wz_max_bytes;
+		file >> wz_max_bytes;
+		std::cout << "write_zeroes_max_bytes = " << wz_max_bytes << std::endl;
+		EXPECT_EQ(wz_max_bytes, custom_granularity)
+		    << "write_zeroes_max_bytes should equal custom discard_granularity";
+	} else {
+		std::cout << "WARNING: write_zeroes_max_bytes not available on this kernel" << std::endl;
+	}
+
+	// Cleanup
+	dev_remove(add_v2.dev_id);
+
+	std::cout << "=== Test PASSED: WriteZero with custom granularity ===" << std::endl;
+}
+
+/*
+ * NOTE: Fastpath WriteZero tests should be added to pxd_fastpath_test.cc
+ * since they require backing devices infrastructure.
+ *
+ * Test case for fastpath:
+ * - WriteZero should be DISABLED for fastpath devices regardless of capabilities
+ * - Even if PXD_DEV_CAP_WRITE_ZEROES is set, fastpath (LVM) doesn't support discard
+ * - See pxd_fastpath_test.cc for implementation
+ */
 
 int main(int argc, char **argv)
 {

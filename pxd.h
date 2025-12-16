@@ -87,6 +87,8 @@ enum pxd_opcode {
 	PXD_FALLBACK_TO_KERNEL,   /**< Fallback requests suspend IO and send in a marker req
 						  from kernel on a suspended device */
 	PXD_EXPORT_DEV,     /**< export the attached device to the kernel */
+	PXD_WRITE_ZEROES,   /**< write_zeroes operation */
+	PXD_ADD_EXT_V2,		/**< add device with extended info v2 (with WriteZero support) */
 	PXD_LAST,
 };
 
@@ -157,6 +159,26 @@ struct pxd_add_ext_out {
 	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
 	int     enable_fp; /**< enable fast path */
 	struct pxd_update_path_out paths; /**< backing device paths */
+};
+
+/* Device capability flags */
+#define PXD_DEV_CAP_WRITE_ZEROES    (1 << 0)  /* WriteZero→Discard optimization */
+/* Reserved for future use: bits 1-31 */
+
+/**
+ * PXD_ADD_EXT_V2 request from user space (with capability support)
+ */
+struct pxd_add_v2_out {
+	uint64_t dev_id;	/**< device global id */
+	size_t size;		/**< block device size in bytes */
+	int32_t queue_depth;	/**< use queue depth 0 to bypass queueing */
+	int32_t discard_size;	/**< block device discard size in bytes */
+	mode_t  open_mode; /**< backing file open mode O_RDONLY|O_SYNC|O_DIRECT etc */
+	int     enable_fp; /**< enable fast path */
+	struct pxd_update_path_out paths; /**< backing device paths */
+	uint32_t capabilities;	/**< capability bit flags (PXD_CAP_*) */
+	uint32_t discard_granularity; /**< discard granularity in bytes, 0 = use default */
+	uint64_t reserved[4];	/**< reserved for future use (MUST all be 0) */
 };
 
 
@@ -237,11 +259,13 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 #define PXD_FEATURE_ATTACH_OPTIMIZED (0x2)
 // supports disabling discards, discard granularity at 2M(large)
 #define PXD_FEATURE_DISCARD_CONTROL (0x4)
+// supports WriteZero->Discard optimization (PXD_ADD_EXT_V2 opcode)
+#define PXD_FEATURE_WRITE_ZEROES (0x8)
 
 static inline
 int pxd_supported_features(void)
 {
-    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL;
+    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL | PXD_FEATURE_WRITE_ZEROES;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif
@@ -320,8 +344,8 @@ static inline uint64_t pxd_aligned_len(uint64_t len, uint64_t offset)
 static inline uint64_t pxd_wr_blocks(const struct rdwr_in *rdwr)
 {
 	const struct pxd_rdwr_in *prw = &rdwr->rdwr;
-	if (prw->size && rdwr->in.opcode == PXD_WRITE_SAME)
-		return 1;
+	if (prw->size && (rdwr->in.opcode == PXD_WRITE_ZEROES))
+		return pxd_aligned_len(prw->size, prw->offset) / PXD_LBS;
 	else
 		return prw->size && rdwr->in.opcode == PXD_WRITE ?
 	       	pxd_aligned_len(prw->size, prw->offset) / PXD_LBS : 0;
