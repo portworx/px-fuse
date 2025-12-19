@@ -102,7 +102,11 @@ struct pxd_context* find_context(unsigned ctx)
 
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)  || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#if defined(CONFIG_SUSE_VERSION) && LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+static int pxd_open(struct block_device *bdev, fmode_t mode)
+#else
 static int pxd_open(struct gendisk *bdev, blk_mode_t mode)
+#endif
 #else
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 #endif
@@ -137,7 +141,11 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#if (defined(CONFIG_SUSE_VERSION) && LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0))
+static void pxd_release(struct gendisk *disk, fmode_t mode)
+#else
 static void pxd_release(struct gendisk *disk)
+#endif
 #else
 static void pxd_release(struct gendisk *disk, fmode_t mode)
 #endif
@@ -189,7 +197,7 @@ static long pxd_ioctl_get_version(void __user *argp)
 		if (sizeof(ver_data) < ver_len) {
 			ver_len = sizeof(ver_data);
 		}
-		strncpy(ver_data, gitversion, ver_len);
+		memcpy(ver_data, gitversion, ver_len - 1);
 		ver_data[ver_len-1]='\0';
 		if (copy_to_user(argp +
 				 offsetof(struct pxd_ioctl_version_args, piv_len),
@@ -1036,8 +1044,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
-
-#ifdef RHEL_RELEASE_CODE
+#ifdef __ELREPO9__
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
+#endif
+#elif defined(RHEL_RELEASE_CODE)
 #if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
 	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
 	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
@@ -2122,6 +2133,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	char *saveptr = NULL;
 	int i;
 	char trimtoken[256];
+	size_t len;
 
 	char *tmp = kzalloc(count, GFP_KERNEL);
 	if (!tmp) {
@@ -2133,10 +2145,17 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	i=0;
 	token = __strtok_r(tmp, delim, &saveptr);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS && token; i++) {
-		// strip the token of any newline/whitespace
 		__strip_nl(token, trimtoken, sizeof(trimtoken));
-		strncpy(update_out.devpath[i], trimtoken, MAX_PXD_DEVPATH_LEN);
-		update_out.devpath[i][MAX_PXD_DEVPATH_LEN] = '\0';
+		len = strlen(trimtoken);
+		if (len > MAX_PXD_DEVPATH_LEN) {
+			len = MAX_PXD_DEVPATH_LEN;
+		}
+		memcpy(update_out.devpath[i], trimtoken, len);
+		update_out.devpath[i][len] = '\0';
+		// Zero-fill the remaining buffer
+		if (len < MAX_PXD_DEVPATH_LEN) {
+			memset(&update_out.devpath[i][len + 1], 0, MAX_PXD_DEVPATH_LEN - len);
+		}
 
 		token = __strtok_r(0, delim, &saveptr);
 	}
