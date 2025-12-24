@@ -101,7 +101,11 @@ struct pxd_context* find_context(unsigned ctx)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)  || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#ifdef fmode_t
+static int pxd_open(struct block_device *bdev, fmode_t mode)
+#else
 static int pxd_open(struct gendisk *bdev, blk_mode_t mode)
+#endif
 #else
 static int pxd_open(struct block_device *bdev, fmode_t mode)
 #endif
@@ -136,7 +140,11 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#ifdef fmode_t
+static void pxd_release(struct gendisk *disk, fmode_t mode)
+#else
 static void pxd_release(struct gendisk *disk)
+#endif
 #else
 static void pxd_release(struct gendisk *disk, fmode_t mode)
 #endif
