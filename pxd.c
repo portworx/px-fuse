@@ -1042,7 +1042,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
 	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
 	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
-	                            (pxd_dev->discard_granularity / SECTOR_SIZE) : 0;
+	                            (pxd_dev->discard_size / SECTOR_SIZE) : 0;
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
@@ -1066,7 +1066,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
 	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
 	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
-	                            (pxd_dev->discard_granularity / SECTOR_SIZE) : 0;
+	                            (pxd_dev->discard_size / SECTOR_SIZE) : 0;
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
 		  .physical_block_size = PXD_LBS,
@@ -1165,7 +1165,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	// RHEL < 9.6: set write_zeroes via blk_queue API (not queue_limits)
 	// WriteZero: enable only if capability is set AND fastpath is NOT enabled
 	if (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) {
-		blk_queue_max_write_zeroes_sectors(q, pxd_dev->discard_granularity / SECTOR_SIZE);
+		blk_queue_max_write_zeroes_sectors(q, pxd_dev->discard_size / SECTOR_SIZE);
 	} else {
 		blk_queue_max_write_zeroes_sectors(q, 0);
 	}
@@ -1174,7 +1174,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	// Non-RHEL kernels that don't use queue_limits API
 	// WriteZero: enable only if capability is set AND fastpath is NOT enabled
 	if (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) {
-		blk_queue_max_write_zeroes_sectors(q, pxd_dev->discard_granularity / SECTOR_SIZE);
+		blk_queue_max_write_zeroes_sectors(q, pxd_dev->discard_size / SECTOR_SIZE);
 	} else {
 		blk_queue_max_write_zeroes_sectors(q, 0);
 	}
