@@ -1183,19 +1183,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 #endif
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
-#if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
-
-#if defined(QUEUE_FLAG_DISCARD)
-	/* Enable discard support. */
-	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif
-
-#else                                                         // #else for defined(__EL8__) || defined(__SUSE_EQ_SP5__)
-	/* Enable discard support. */
-	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif                                                        // #endif for defined(__EL8__) || defined(__SUSE_EQ_SP5__)
-#endif                                                        // #endif for LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
+	if (pxd_dev->discard_size > 0) {
+		DISCARD_ENABLE(q);
+	}
+	
 
     q->limits.discard_granularity = pxd_dev->discard_granularity;
     q->limits.discard_alignment = pxd_dev->discard_granularity;
