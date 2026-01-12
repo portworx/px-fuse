@@ -100,8 +100,7 @@ struct pxd_context* find_context(unsigned ctx)
 	return &pxd_contexts[ctx];
 }
 
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)  || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
 static int pxd_open(struct gendisk *bdev, blk_mode_t mode)
 #else
 static int pxd_open(struct block_device *bdev, fmode_t mode)
@@ -109,7 +108,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev;
 	int err = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__)  || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
 	pxd_dev = bdev->private_data;
 #else
 	pxd_dev = bdev->bd_disk->private_data;
@@ -136,7 +135,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
 static void pxd_release(struct gendisk *disk)
 #else
 static void pxd_release(struct gendisk *disk, fmode_t mode)
@@ -154,7 +153,7 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	pxd_dev->open_count--;
 	spin_unlock(&pxd_dev->lock);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_GTE_SP6__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor);
 #else
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
@@ -1100,8 +1099,11 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
-
-#ifdef RHEL_RELEASE_CODE
+#ifdef __ELREPO9__
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
+#endif
+#elif defined(RHEL_RELEASE_CODE)
 #if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
 	  struct queue_limits lim = {
 		  .logical_block_size = PXD_LBS,
@@ -2029,7 +2031,7 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	char *token;
 	char *saveptr = NULL;
 	int i;
-	char trimtoken[256];
+	char trimtoken[MAX_PXD_DEVPATH_LEN+1];
 
 	char *tmp = kzalloc(count, GFP_KERNEL);
 	if (!tmp) {
