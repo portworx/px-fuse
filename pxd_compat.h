@@ -233,4 +233,17 @@ static inline void bio_set_op_attrs(struct bio *bio, enum req_op op,
 } while (0)
 #endif
 
+// Function to enable QUEUE_FLAG_DISCARD for kernels < 5.19
+// For kernels >= 5.19, the flag is deprecated and discard is controlled via queue_limits only
+static inline void DISCARD_ENABLE(struct request_queue *q __attribute__((unused))) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
+#if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
+#if defined(QUEUE_FLAG_DISCARD)
+	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD, q)
+#endif
+#else
+	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD, q)
+#endif
+#endif
+}
 #endif //GDFS_PXD_COMPAT_H
