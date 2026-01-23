@@ -1087,7 +1087,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	  pxd_dev->tag_set.queue_depth = pxd_dev->queue_depth;
 	  pxd_dev->tag_set.numa_node = NUMA_NO_NODE;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0) && !defined(__EL9_STREAM__)
+#ifdef BLK_MQ_F_SHOULD_MERGE
 	  pxd_dev->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
+#endif
 #endif
 	  pxd_dev->tag_set.nr_hw_queues = num_online_nodes() * pxd_num_fpthreads;
 	  pxd_dev->tag_set.cmd_size = sizeof(struct fuse_req);
@@ -1206,19 +1208,10 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	blk_queue_physical_block_size(q, PXD_LBS);
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
-#if defined(__EL8__) || defined(__SUSE_EQ_SP5__)
-
-#if defined(QUEUE_FLAG_DISCARD)
-	/* Enable discard support. */
-	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif
-
-#else                                                         // #else for defined(__EL8__) || defined(__SUSE_EQ_SP5__)
-	/* Enable discard support. */
-	QUEUE_FLAG_SET(QUEUE_FLAG_DISCARD,q);
-#endif                                                        // #endif for defined(__EL8__) || defined(__SUSE_EQ_SP5__)
-#endif                                                        // #endif for LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
+	if (pxd_dev->discard_size > 0) {
+		DISCARD_ENABLE(q);
+	}
+	
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
