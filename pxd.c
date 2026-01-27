@@ -1128,7 +1128,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
 
-#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_EQ_SP5__))
+#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_HAS_NO_PART_SCAN__))
 	disk->flags |= GENHD_FL_NO_PART;
 #else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
@@ -1428,7 +1428,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	}
 
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_HAS_NO_PART_SCAN__)))
 	err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
 	device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
@@ -1475,7 +1475,7 @@ static void pxd_finish_remove(struct work_struct *work)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_EQ_SP5__)))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_HAS_NO_PART_SCAN__)))
 	// del_gendisk will try to fsync device
 	// so freeze queue and then *mark queue dead* to ensure no new reqs
 	// gets accepted.
@@ -2126,9 +2126,14 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 	i=0;
 	token = __strtok_r(tmp, delim, &saveptr);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS && token; i++) {
+		size_t len;
 		// strip the token of any newline/whitespace
 		__strip_nl(token, trimtoken, sizeof(trimtoken));
-		strncpy(update_out.devpath[i], trimtoken, MAX_PXD_DEVPATH_LEN);
+		len = strlen(trimtoken);
+		if (len > MAX_PXD_DEVPATH_LEN) {
+			len = MAX_PXD_DEVPATH_LEN;
+		}
+		memcpy(update_out.devpath[i], trimtoken, len);
 		update_out.devpath[i][MAX_PXD_DEVPATH_LEN] = '\0';
 
 		token = __strtok_r(0, delim, &saveptr);
