@@ -100,7 +100,7 @@ struct pxd_context* find_context(unsigned ctx)
 	return &pxd_contexts[ctx];
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_GTE_6_0__)
 static int pxd_open(struct gendisk *bdev, blk_mode_t mode)
 #else
 static int pxd_open(struct block_device *bdev, fmode_t mode)
@@ -108,7 +108,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 {
 	struct pxd_device *pxd_dev;
 	int err = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_GTE_6_0__)
 	pxd_dev = bdev->private_data;
 #else
 	pxd_dev = bdev->bd_disk->private_data;
@@ -135,7 +135,7 @@ static int pxd_open(struct block_device *bdev, fmode_t mode)
 	return err;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_GTE_6_0__)
 static void pxd_release(struct gendisk *disk)
 #else
 static void pxd_release(struct gendisk *disk, fmode_t mode)
@@ -153,7 +153,7 @@ static void pxd_release(struct gendisk *disk, fmode_t mode)
 	BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 	pxd_dev->open_count--;
 	spin_unlock(&pxd_dev->lock);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_MICRO_GTE_6_0__)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) || defined(__RHEL_GT_94__) || defined(__SUSE_HAS_BLK_MODE_T__) || defined(__SLE_GTE_6_0__)
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor);
 #else
 	trace_pxd_release(pxd_dev->dev_id, pxd_dev->major, pxd_dev->minor, mode);
@@ -1128,7 +1128,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	disk->minors = 1;
 	disk->first_minor = pxd_dev->minor;
 
-#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_EQ_SP5__))
+#if defined(GENHD_FL_NO_PART) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,17,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_HAS_NO_PART_SCAN__))
 	disk->flags |= GENHD_FL_NO_PART;
 #else
 	disk->flags |= GENHD_FL_EXT_DEVT | GENHD_FL_NO_PART_SCAN;
@@ -1428,7 +1428,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	}
 
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_HAS_NO_PART_SCAN__)))
 	err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,13,0)
 	device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
@@ -1475,7 +1475,7 @@ static void pxd_finish_remove(struct work_struct *work)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_EQ_SP5__)))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_HAS_NO_PART_SCAN__)))
 	// del_gendisk will try to fsync device
 	// so freeze queue and then *mark queue dead* to ensure no new reqs
 	// gets accepted.

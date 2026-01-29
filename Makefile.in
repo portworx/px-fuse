@@ -113,15 +113,10 @@ ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9]uek\.x86_64'; echo $$?),
 PXDEFINES += -D__ORACLE_UEK__
 endif
 
-# Detect SUSE Linux Micro 6.0 or 6.1 inside PX container
-ifeq ($(shell test -f "/host-os-release"; echo $$?),0)   # inside PX container
-ifeq ($(shell cat "/host-os-release" | grep -E -q "SUSE Linux Micro 6\.[01]"; echo $$?),0)
-PXDEFINES += -D__SLE_MICRO_GTE_6_0__
-endif
-
-# Detect SUSE Linux Micro 6.0 or 6.1 on host
-ifeq ($(shell cat "/etc/os-release" | grep -E -q "SUSE Linux Micro 6\.[01]"; echo $$?),0)
-PXDEFINES += -D__SLE_MICRO_GTE_6_0__
+# Detect SUSE Linux 6.0 via kernel config
+ifeq ($(shell grep -E -q "SUSE|SLES" /boot/config-$(shell uname -r) 2>/dev/null; echo $$?),0)
+ifeq ($(shell test $(firstword $(subst ., ,$(shell uname -r))) -ge 6 2>/dev/null && echo 0 || echo 1),0)
+PXDEFINES += -D__SLE_GTE_6_0__
 endif
 endif
 
@@ -153,6 +148,9 @@ ifdef CONFIG_SUSE_PATCHLEVEL
 
     # Detect SUSE kernels that use blk_mode_t (new API) vs fmode_t (old API)
     # Logic: 150600.5+.x -> blk_mode_t (new), 150600.1-4.x -> fmode_t (old)
+
+	# Detect SUSE kernels that use GENHD_FL_NO_PART_SCAN
+	# Logic: 150500.22+.x -> GENHD_FL_NO_PART_SCAN (new), 150500.1-21.x -> GENHD_FL_EXT_DEVT (old)
     ifneq ($(SUSE_BUILD),)
         SUSE_HAS_BLK_MODE_T := 0
 
@@ -168,6 +166,20 @@ ifdef CONFIG_SUSE_PATCHLEVEL
         ifeq ($(SUSE_HAS_BLK_MODE_T),1)
             PXDEFINES += -D__SUSE_HAS_BLK_MODE_T__
         endif
+
+		SUSE_HAS_NO_PART_SCAN := 0
+		ifeq ($(SUSE_BUILD),150500)
+			ifeq ($(shell test $(SUSE_MINOR) -ge 22; echo $$?),0)
+				SUSE_HAS_NO_PART_SCAN := 1
+			endif
+		else ifeq ($(shell test $(SUSE_BUILD) -gt 150500; echo $$?),0)
+			# Newer SUSE versions (e.g., 150600+) use GENHD_FL_NO_PART_SCAN
+			SUSE_HAS_NO_PART_SCAN := 1
+		endif
+
+		ifeq ($(SUSE_HAS_NO_PART_SCAN),1)
+			PXDEFINES += -D__SUSE_HAS_NO_PART_SCAN__
+		endif
     endif
 endif
 export KERNELPATH
