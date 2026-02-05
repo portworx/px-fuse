@@ -220,25 +220,6 @@ endif
 
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
-.PHONY: rpm debug-config
-
-debug-config:
-	@echo "=== Kernel Configuration Detection Debug ==="
-	@echo "KVERSION: $(KVERSION)"
-	@echo "CHK_KVER: $(CHK_KVER)"
-	@echo "KERNELPATH: $(KERNELPATH)"
-	@echo ""
-	@echo "=== SUSE Detection ==="
-	@echo "CONFIG_SUSE_PATCHLEVEL: $(CONFIG_SUSE_PATCHLEVEL)"
-	@echo "SUSE_BUILD: $(SUSE_BUILD)"
-	@echo "SUSE_MINOR: $(SUSE_MINOR)"
-	@echo "SUSE_HAS_BLK_MODE_T: $(SUSE_HAS_BLK_MODE_T)"
-	@echo "SUSE_HAS_NO_PART_SCAN: $(SUSE_HAS_NO_PART_SCAN)"
-	@echo ""
-	@echo "=== Compiler Defines ==="
-	@echo "PXDEFINES: $(PXDEFINES)"
-	@echo ""
-
 all: px_version.c
 	make $(FORCE_CC) -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
 
