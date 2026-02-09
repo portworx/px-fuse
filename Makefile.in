@@ -118,11 +118,24 @@ ifeq ($(shell test -f "/host-os-release"; echo $$?),0)   # inside PX container
 ifeq ($(shell cat "/host-os-release" | grep -E -q "SUSE Linux Micro 6\.[01]"; echo $$?),0)
 PXDEFINES += -D__SLE_MICRO_GTE_6_0__
 endif
+endif
 
 # Detect SUSE Linux Micro 6.0 or 6.1 on host
+ifeq ($(shell test -f "/etc/os-release"; echo $$?),0)   # on host
 ifeq ($(shell cat "/etc/os-release" | grep -E -q "SUSE Linux Micro 6\.[01]"; echo $$?),0)
 PXDEFINES += -D__SLE_MICRO_GTE_6_0__
 endif
+endif
+
+
+# Extract CONFIG_SUSE_PATCHLEVEL from kernel config if this is a SUSE kernel
+# Try multiple locations for the kernel config file
+ifeq ($(shell test -f "/boot/config-$(KVERSION)"; echo $$?),0)
+    CONFIG_SUSE_PATCHLEVEL := $(shell grep "^CONFIG_SUSE_PATCHLEVEL=" /boot/config-$(KVERSION) 2>/dev/null | cut -d= -f2)
+else ifeq ($(shell test -f "$(KERNELPATH)/.config"; echo $$?),0)
+    CONFIG_SUSE_PATCHLEVEL := $(shell grep "^CONFIG_SUSE_PATCHLEVEL=" $(KERNELPATH)/.config 2>/dev/null | cut -d= -f2)
+else ifeq ($(shell test -f "/proc/config.gz"; echo $$?),0)
+    CONFIG_SUSE_PATCHLEVEL := $(shell zcat /proc/config.gz 2>/dev/null | grep "^CONFIG_SUSE_PATCHLEVEL=" | cut -d= -f2)
 endif
 
 ifdef CONFIG_SUSE_PATCHLEVEL
@@ -153,6 +166,9 @@ ifdef CONFIG_SUSE_PATCHLEVEL
 
     # Detect SUSE kernels that use blk_mode_t (new API) vs fmode_t (old API)
     # Logic: 150600.5+.x -> blk_mode_t (new), 150600.1-4.x -> fmode_t (old)
+
+	# Detect SUSE kernels that use GENHD_FL_NO_PART_SCAN
+	# Logic: 150500.22+.x -> GENHD_FL_NO_PART_SCAN (new), 150500.1-21.x -> GENHD_FL_EXT_DEVT (old)
     ifneq ($(SUSE_BUILD),)
         SUSE_HAS_BLK_MODE_T := 0
 
@@ -168,6 +184,20 @@ ifdef CONFIG_SUSE_PATCHLEVEL
         ifeq ($(SUSE_HAS_BLK_MODE_T),1)
             PXDEFINES += -D__SUSE_HAS_BLK_MODE_T__
         endif
+
+		SUSE_HAS_NO_PART_SCAN := 0
+		ifeq ($(SUSE_BUILD),150500)
+			ifeq ($(shell test $(SUSE_MINOR) -ge 22; echo $$?),0)
+				SUSE_HAS_NO_PART_SCAN := 1
+			endif
+		else ifeq ($(shell test $(SUSE_BUILD) -gt 150500; echo $$?),0)
+			# Newer SUSE versions (e.g., 150600+) use GENHD_FL_NO_PART_SCAN
+			SUSE_HAS_NO_PART_SCAN := 1
+		endif
+
+		ifeq ($(SUSE_HAS_NO_PART_SCAN),1)
+			PXDEFINES += -D__SUSE_HAS_NO_PART_SCAN__
+		endif
     endif
 endif
 export KERNELPATH
@@ -189,8 +219,6 @@ FORCE_CC=CC=$(FORCE_CONTAINER_CC)
 endif
 
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
-
-.PHONY: rpm
 
 all: px_version.c
 	make $(FORCE_CC) -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules
