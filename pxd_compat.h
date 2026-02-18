@@ -246,4 +246,34 @@ static inline void DISCARD_ENABLE(struct request_queue *q __attribute__((unused)
 #endif
 #endif
 }
+
+/*
+ * IDA API compatibility layer
+ *
+ * ida_simple_get() and ida_simple_remove() were removed in kernel 6.18.
+ * The modern API uses ida_alloc_range() and ida_free().
+ *
+ * Key difference: ida_alloc_range() takes an INCLUSIVE max value,
+ * while ida_simple_get() took an EXCLUSIVE max value.
+ */
+
+/* Kernel 6.18+: Use the new IDA API */
+static inline int ida_get(struct ida *ida, unsigned int min, unsigned int max, gfp_t gfp)
+{
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,18,0)
+	return ida_alloc_range(ida, min, max - 1, gfp);
+	#else
+	return ida_simple_get(ida, min, max, gfp);
+	#endif
+}
+
+static inline void ida_remove(struct ida *ida, unsigned int id)
+{
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,18,0)
+	ida_free(ida, id);
+	#else
+	ida_simple_remove(ida, id);
+	#endif
+}
+
 #endif //GDFS_PXD_COMPAT_H
