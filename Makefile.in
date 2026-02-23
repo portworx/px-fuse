@@ -203,6 +203,12 @@ export KERNELPATH
 export OUTPATH
 ccflags-y := $(ADDCCFLAGS) -Wframe-larger-than=2048 -Werror -I$(src) $(KBUILD_CPPFLAGS) $(PXDEFINES)
 
+ifeq ($(shell test "$(MAJOR)" -ge "6"; echo $$?),0)
+ifeq ($(shell test "$(MINOR)" -ge "18"; echo $$?),0)
+ccflags-y += -Wno-error=attributes
+endif
+endif
+
 # EL8-9 Specific kernel checks - this check also exists above - JAR?
 ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9].*\.x86_64'; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__

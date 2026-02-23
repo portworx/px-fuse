@@ -1324,9 +1324,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 	spin_lock_init(&pxd_dev->lock);
 	spin_lock_init(&pxd_dev->qlock);
 
-	new_minor = ida_simple_get(&pxd_minor_ida,
-					1, 1 << MINORBITS,
-					GFP_KERNEL);
+	new_minor = ida_get(&pxd_minor_ida, 1, 1 << MINORBITS, GFP_KERNEL);
 	if (new_minor < 0) {
 		err = new_minor;
 		goto out_module;
@@ -1398,7 +1396,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 out_fp:
 	pxd_fastpath_cleanup(pxd_dev);
 out_id:
-	ida_simple_remove(&pxd_minor_ida, new_minor);
+	ida_remove(&pxd_minor_ida, new_minor);
 out_module:
 	if (pxd_dev)
 		kfree(pxd_dev);
@@ -1467,7 +1465,7 @@ cleanup:
     list_del(&pxd_dev->node);
     --ctx->num_devices;
 	pxd_dev->exported = false;
-    ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
+	ida_remove(&pxd_minor_ida, pxd_dev->minor);
     spin_unlock(&pxd_dev->lock);
     spin_unlock(&ctx->lock);
 	kfree(pxd_dev);
@@ -2326,7 +2324,7 @@ static void pxd_dev_device_release(struct device *dev)
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	pxd_free_disk(pxd_dev);
-	ida_simple_remove(&pxd_minor_ida, pxd_dev->minor);
+	ida_remove(&pxd_minor_ida, pxd_dev->minor);
 	pxd_mem_printk("freeing dev %llu pxd device %px\n", pxd_dev->dev_id, pxd_dev);
 	pxd_dev->magic = PXD_POISON;
 	kfree(pxd_dev);
