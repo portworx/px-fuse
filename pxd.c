@@ -6,6 +6,8 @@
 #include <linux/crc32.h>
 #include <linux/ctype.h>
 #include <linux/sched.h>
+#include <linux/delay.h>
+#include <linux/kthread.h>
 #include "fuse_i.h"
 #include "pxd.h"
 #include <linux/uio.h>
@@ -944,6 +946,21 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 	trace_pxd_queue_rq(pxd_dev->dev_id, pxd_dev->minor, rq_data_dir(rq),
 		req_op(rq), blk_rq_pos(rq) * SECTOR_SIZE, blk_rq_bytes(rq),
 		rq->nr_phys_segments, rq->cmd_flags, rq->bio, rq->biotail, rq->bio && rq->bio == rq->biotail, rq->bio ? BIO_SECTOR(rq->bio) * SECTOR_SIZE : -1);
+
+	/* Instrumentation: detect I/O arriving before device is fully exported.
+	 * This is the race window introduced by removal of blk_mq_freeze_queue
+	 * in pxd_init_disk (commit c8c0b31). I/O arriving here before
+	 * exported=true means it will be queued on fc->pending with nobody
+	 * processing it until init_io() is called by userspace. */
+	if (!pxd_dev->exported) {
+		printk_ratelimited(KERN_WARNING
+			"pxd: IO on device %llu (minor %d) BEFORE export complete "
+			"op=%d off=%llu len=%u caller=%s[%d]\n",
+			pxd_dev->dev_id, pxd_dev->minor, req_op(rq),
+			(unsigned long long)(blk_rq_pos(rq) * SECTOR_SIZE),
+			blk_rq_bytes(rq), current->comm, current->pid);
+	}
+
 	if (BLK_RQ_IS_PASSTHROUGH(rq) || !READ_ONCE(fc->allow_disconnected))
 		return BLK_STS_IOERR;
 
@@ -1206,6 +1223,9 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
 
+	blk_mq_freeze_queue(q);
+	printk(KERN_WARNING "pxd: pxd_init_disk: queue FROZEN for device\n");
+
 	return 0;
 }
 
@@ -1391,6 +1411,62 @@ out_module:
 	return err;
 }
 
+/* ---- REPRO: kernel thread that simulates udev IO ----
+ *
+ * This thread tries to enter the block queue via blk_mq_alloc_request
+ * (blocking, flags=0) — exactly what udev/blkid does when probing a
+ * new pxd device.
+ *
+ * WITHOUT fix (queue not frozen):
+ *   Thread enters queue immediately → holds request for 30s
+ *   → q_usage_counter pinned > 0 → add_disk's wbt_init freeze
+ *   waits forever → DEADLOCK (px-storage stuck)
+ *
+ * WITH fix (queue frozen in pxd_init_disk):
+ *   Thread blocks on blk_queue_enter (queue frozen) → add_disk's
+ *   wbt_init does nested freeze (succeeds immediately) → add_disk
+ *   returns → blk_mq_unfreeze_queue → thread unblocks → enters
+ *   queue → frees request → exits cleanly
+ *
+ * Same code, different outcome — proves the fix works.
+ */
+struct repro_io_data {
+	struct pxd_device *pxd_dev;
+	uint64_t dev_id;
+};
+
+static int repro_io_thread(void *data)
+{
+	struct repro_io_data *rd = data;
+	struct request *rq;
+
+	printk(KERN_WARNING "pxd: device %llu REPRO thread: "
+		"calling blk_mq_alloc_request (simulating udev IO)...\n",
+		rd->dev_id);
+
+	rq = blk_mq_alloc_request(rd->pxd_dev->disk->queue,
+				   REQ_OP_READ, 0);
+	if (IS_ERR(rq)) {
+		printk(KERN_WARNING "pxd: device %llu REPRO thread: "
+			"alloc_request failed (%ld)\n",
+			rd->dev_id, PTR_ERR(rq));
+		goto out;
+	}
+
+	/* Do NOT free the request — leave q_usage_counter permanently > 0.
+	 * This simulates udev IO that enters pxd_queue_rq and never
+	 * completes (because init_io hasn't been called during startup).
+	 * add_disk → wbt_init → blk_mq_freeze_queue will wait forever
+	 * for q_usage_counter to drain — PERMANENT DEADLOCK. */
+	printk(KERN_WARNING "pxd: device %llu REPRO thread: "
+		"IO entered queue (q_usage_counter permanently > 0). "
+		"add_disk will deadlock in blk_mq_freeze_queue_wait.\n",
+		rd->dev_id);
+out:
+	kfree(rd);
+	return 0;
+}
+
 ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
@@ -1427,6 +1503,20 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		goto cleanup;
 	}
 
+	/* Launch repro thread to simulate udev IO (see repro_io_thread above).
+	 * msleep(100) gives the thread time to run and attempt to enter
+	 * the queue before we call add_disk. */
+	{
+		struct repro_io_data *rd;
+		rd = kmalloc(sizeof(*rd), GFP_KERNEL);
+		if (rd) {
+			rd->pxd_dev = pxd_dev;
+			rd->dev_id = dev_id;
+			kthread_run(repro_io_thread, rd, "pxd-repro-%llu",
+				    dev_id);
+			msleep(100);
+		}
+	}
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(5,15,50) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && (defined(__EL8__) || defined(__SUSE_EQ_SP5__)))
 	err = device_add_disk(&pxd_dev->dev, pxd_dev->disk, NULL);
@@ -1435,6 +1525,10 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 #else
 	add_disk(pxd_dev->disk);
 #endif
+
+	printk(KERN_WARNING "pxd: device %llu REPRO: add_disk returned "
+		"(deadlock did NOT trigger)\n", dev_id);
+
 	if (err) {
 		device_unregister(&pxd_dev->dev);
 		pxd_free_disk(pxd_dev);
@@ -1445,6 +1539,9 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	spin_lock(&pxd_dev->lock);
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+	printk(KERN_WARNING "pxd: pxd_export: queue UNFROZEN for device %llu\n",
+		dev_id);
 	return 0;
 cleanup:
     spin_lock(&ctx->lock);

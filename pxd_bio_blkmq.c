@@ -165,6 +165,12 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
                 // it is possible to call suspend during initial creation with
                 // no disk, ignore as in any case, no IO can flow through.
                 if (pxd_dev->disk && pxd_dev->disk->queue) {
+                        printk(KERN_INFO "pxd: device %llu suspend_io: "
+                                "about to quiesce queue exported=%d "
+                                "nslowPath=%d caller=%s[%d]\n",
+                                pxd_dev->dev_id, pxd_dev->exported,
+                                atomic_read(&pxd_dev->fp.nslowPath),
+                                current->comm, current->pid);
                         blk_mq_quiesce_queue(pxd_dev->disk->queue);
                         atomic_set(&fp->blkmq_frozen, 1);
                 }
