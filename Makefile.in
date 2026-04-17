@@ -105,6 +105,45 @@ ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(9|10)\.x86_64'; echo $$?),0)
 PXDEFINES += -D__EL9_STREAM__
 endif
 
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el9.*'; echo $$?),0)
+
+# Extract kernel build number for EL9 (e.g., 5.14.0-691.el9 -> 691)
+EL9_BUILD=$(shell echo $(CHK_KVER) | sed -n -E 's/.*-([0-9]+)\..*el9.*/\1/p')
+ifneq ($(EL9_BUILD),)
+# blk_mq_freeze_queue() kernel API changed in rhel since version 5.14.0-611 kernel version
+ifeq ($(shell test $(EL9_BUILD) -ge 603; echo $$?),0)
+PXDEFINES += -D__BLK_Q_FREEZE_WITH_MEMFLAG__
+endif
+endif
+
+endif
+
+
+# EL10 Specific kernel checks, uapi version.h file has RHEL specific defines maybe can use.
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el10.*'; echo $$?),0)
+
+ifeq ($(shell test -f /proc/version && grep -q ".stream" /proc/version; echo $$?),0)
+PXDEFINES += -D__BLK_Q_FREEZE_WITH_MEMFLAG__
+endif
+
+PXDEFINES += -D__PX_BLKMQ__ -D__EL10__
+# Extract kernel build number for EL10 (e.g., 6.12.0-124.el10 -> 124)
+EL10_BUILD=$(shell echo $(CHK_KVER) | sed -n -E 's/.*-([0-9]+)\..*el10.*/\1/p')
+ifneq ($(EL10_BUILD),)
+# blk_mq_freeze_queue() kernel API changed in rhel 10 since version 6.12.0-55 kernel version
+ifeq ($(shell test $(EL10_BUILD) -gt 55; echo $$?),0)
+PXDEFINES += -D__BLK_Q_FREEZE_WITH_MEMFLAG__
+endif
+endif
+
+endif
+
+
+# ELRepo 9-10 Specific kernel checks
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(9|10)\.elrepo\.x86_64'; echo $$?),0)
+PXDEFINES += -D__ELREPO9__
+endif
+
 # Oracle UEK Specific kernel checks
 ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9]uek\.x86_64'; echo $$?),0)
 PXDEFINES += -D__ORACLE_UEK__
