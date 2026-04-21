@@ -1233,6 +1233,14 @@ static int pxd_init_disk(struct pxd_device *pxd_dev)
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
 
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(__SUSE_GTE_16_0__))
+	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#else
+	blk_mq_freeze_queue(q);
+#endif
+#endif
+
 	return 0;
 }
 
@@ -1458,6 +1466,13 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	spin_lock(&pxd_dev->lock);
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(__SUSE_GTE_16_0__))
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
+#else
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
+#endif
 	return 0;
 cleanup:
     spin_lock(&ctx->lock);
