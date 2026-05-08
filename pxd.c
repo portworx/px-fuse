@@ -1064,7 +1064,7 @@ static const struct blk_mq_ops pxd_mq_ops = {
 #endif /* __PX_BLKMQ__ */
 #endif /* __PXD_BIO_BLKMQ__ */
 
-static int pxd_init_disk(struct pxd_device *pxd_dev)
+static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_flag)
 {
 	struct gendisk *disk;
 	struct request_queue *q;
@@ -1414,6 +1414,7 @@ out_module:
 
 ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 {
+	unsigned int blk_mq_queue_flag = 0;
 	struct pxd_context *ctx = container_of(fc, struct pxd_context, fc);
 	struct pxd_device *pxd_dev = find_pxd_device(ctx, dev_id);
 	int err = 0;
@@ -1435,7 +1436,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 		goto cleanup;
 	}
 
-	err = pxd_init_disk(pxd_dev);
+	err = pxd_init_disk(pxd_dev, &blk_mq_queue_flag);
 	if (err) {
 		module_put(THIS_MODULE);
 		goto cleanup;

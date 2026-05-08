@@ -393,7 +393,7 @@ void PxdFastpathTest::dev_add_fastpath(pxd_add_out &add, int &minor, std::string
 	ssize_t write_bytes = writev(ctl_fd, iov, 2);
     if (write_bytes <= 0) {
         fprintf(stderr, "writev failed: errno=%d (%s)\n", errno, strerror(errno));
-        fprintf(stderr, "dev_id=%llu, size=%zu, ctl_fd=%d\n", 
+        fprintf(stderr, "dev_id=%lu, size=%zu, ctl_fd=%d\n", 
                 add.dev_id, add.size, ctl_fd);
     }
 	ASSERT_GT(write_bytes, 0);
