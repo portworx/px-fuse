@@ -1213,7 +1213,6 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	if (pxd_dev->discard_size > 0) {
 		DISCARD_ENABLE(q);
 	}
-	
 
     q->limits.discard_granularity = PXD_MAX_DISCARD_GRANULARITY;
     q->limits.discard_alignment = PXD_MAX_DISCARD_GRANULARITY;
@@ -1234,7 +1233,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	pxd_dev->disk = disk;
 
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(__SUSE_GTE_16_0__))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(CONFIG_SUSE_VERSION) && (CONFIG_SUSE_VERSION >= 16))
 	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
 #else
 	blk_mq_freeze_queue(q);
@@ -1404,7 +1403,7 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_ext_out *add)
 out_fp:
 	pxd_fastpath_cleanup(pxd_dev);
 out_id:
-	ida_remove(&pxd_minor_ida, new_minor);
+	pxd_ida_remove(&pxd_minor_ida, new_minor);
 out_module:
 	if (pxd_dev)
 		kfree(pxd_dev);
@@ -1468,7 +1467,7 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
 #if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(__SUSE_GTE_16_0__))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(CONFIG_SUSE_VERSION) && (CONFIG_SUSE_VERSION >= 16))
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
 #else
 	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
@@ -1481,7 +1480,7 @@ cleanup:
     list_del(&pxd_dev->node);
     --ctx->num_devices;
 	pxd_dev->exported = false;
-	ida_remove(&pxd_minor_ida, pxd_dev->minor);
+	pxd_ida_remove(&pxd_minor_ida, pxd_dev->minor);
     spin_unlock(&pxd_dev->lock);
     spin_unlock(&ctx->lock);
 	kfree(pxd_dev);
@@ -1504,19 +1503,8 @@ static void pxd_finish_remove(struct work_struct *work)
 
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_HAS_NO_PART_SCAN__)))
-	// del_gendisk will try to fsync device
-	// so freeze queue and then *mark queue dead* to ensure no new reqs
-	// gets accepted.
-    blk_freeze_queue_start(pxd_dev->disk->queue);
-    blk_mark_disk_dead(pxd_dev->disk);
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
-	// del_gendisk will not submit any new IO.
-	// so freeze queue and then queue dying, to ensure no new reqs
-	// gets accepted.
-    blk_freeze_queue_start(pxd_dev->disk->queue);
-    blk_set_queue_dying(pxd_dev->disk->queue);
-#endif
+	blk_freeze_queue_start(pxd_dev->disk->queue);
+	pxd_mark_device_dead(pxd_dev);
 	// kernel bug here, disk deletion code, fsync IO, checking for disk dead while queue is marked dying,
 	// which will never happen, and the disk deletion code is stuck in deadlock.
 	// in this case, allow IOs to go to the queue and let px-storage handle IO
@@ -2340,7 +2328,7 @@ static void pxd_dev_device_release(struct device *dev)
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
 
 	pxd_free_disk(pxd_dev);
-	ida_remove(&pxd_minor_ida, pxd_dev->minor);
+	pxd_ida_remove(&pxd_minor_ida, pxd_dev->minor);
 	pxd_mem_printk("freeing dev %llu pxd device %px\n", pxd_dev->dev_id, pxd_dev);
 	pxd_dev->magic = PXD_POISON;
 	kfree(pxd_dev);
