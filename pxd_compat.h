@@ -267,7 +267,7 @@ static inline int ida_get(struct ida *ida, unsigned int min, unsigned int max, g
 	#endif
 }
 
-static inline void ida_remove(struct ida *ida, unsigned int id)
+static inline void pxd_ida_remove(struct ida *ida, unsigned int id)
 {
 	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,18,0)
 	ida_free(ida, id);
