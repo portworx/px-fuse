@@ -1568,22 +1568,19 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
-#endif
 	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
-	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
-#endif
-
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0) || (defined(__EL8__) && defined(GD_READ_ONLY))
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0) || (defined(__EL8__) && defined(GD_READ_ONLY))
 	revalidate_disk_size(pxd_dev->disk, true);
-#else
+	#else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
-#endif
+	#endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+	pxd_dev->size = update_size->size;
+	spin_unlock(&pxd_dev->lock);
+	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #endif
 	put_device(&pxd_dev->dev);
 
