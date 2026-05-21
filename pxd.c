@@ -1038,6 +1038,27 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 #ifdef __ELREPO9__
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
 	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
+#else
+	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
+	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
+	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
+	                            (pxd_dev->discard_size / SECTOR_SIZE) : 0;
+	  struct queue_limits lim = {
+		  .logical_block_size = PXD_LBS,
+		  .physical_block_size = PXD_LBS,
+		  .max_segment_size = SEGMENT_SIZE,
+		  .max_segments = PXD_MAX_IO / PXD_LBS,
+		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
+		  .discard_alignment = pxd_dev->discard_granularity,
+		  .discard_granularity = pxd_dev->discard_granularity,
+		  .io_min = PXD_LBS,
+		  .io_opt = PXD_LBS,
+		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
+		  // Control write_zeroes: enable if PXD_DEV_CAP_WRITE_ZEROES capability is set
+		  .max_write_zeroes_sectors = wz_sectors
+	  };
+	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
 #endif
 #elif defined(RHEL_RELEASE_CODE)
 #if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
@@ -1620,12 +1641,13 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
-#else
-	// set_capacity is sufficient for modifying disk size from 5.11 onwards
-	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #endif
 	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
+#endif
 
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
