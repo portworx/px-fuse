@@ -352,6 +352,27 @@ static inline struct gendisk *pxd_alloc_disk(struct pxd_device *pxd_dev)
 
 	return disk;
 }
+
+static inline void pxd_freeze_queue(struct request_queue *q, unsigned int *blk_mq_queue_flag) {
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(CONFIG_SUSE_VERSION))
+	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
+#else
+	blk_mq_freeze_queue(q);
+#endif
+#endif
+}
+
+static inline void pxd_unfreeze_queue(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_flag) {
+#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(CONFIG_SUSE_VERSION))
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue, *blk_mq_queue_flag);
+#else
+	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
+#endif
+#endif
+}
+
 #endif /* __PX_BLKMQ__ */
 
 #endif //GDFS_PXD_COMPAT_H
