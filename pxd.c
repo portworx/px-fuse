@@ -1035,59 +1035,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	  }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
-#ifdef __ELREPO9__
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
-	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
-#endif
-#elif defined(RHEL_RELEASE_CODE)
-#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9, 6)
-	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
-	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
-	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
-	                            (pxd_dev->discard_size / SECTOR_SIZE) : 0;
-	  struct queue_limits lim = {
-		  .logical_block_size = PXD_LBS,
-		  .physical_block_size = PXD_LBS,
-		  .max_segment_size = SEGMENT_SIZE,
-		  .max_segments = PXD_MAX_IO / PXD_LBS,
-		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
-		  .discard_alignment = pxd_dev->discard_granularity,
-		  .discard_granularity = pxd_dev->discard_granularity,
-		  .io_min = PXD_LBS,
-		  .io_opt = PXD_LBS,
-		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
-		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
-		  // Control write_zeroes: enable if PXD_DEV_CAP_WRITE_ZEROES capability is set
-		  .max_write_zeroes_sectors = wz_sectors
-	  };
-	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
-#else
-	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
-#endif
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || ((LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)) && !defined(__ORACLE_UEK__))
-	  // WriteZero: enable only if capability is set AND fastpath is NOT enabled
-	  // (fastpath uses LVM which doesn't support discard/write_zeroes)
-	  unsigned int wz_sectors = (pxd_has_cap(pxd_dev, PXD_DEV_CAP_WRITE_ZEROES) && !fastpath_enabled(pxd_dev)) ?
-	                            (pxd_dev->discard_size / SECTOR_SIZE) : 0;
-	  struct queue_limits lim = {
-		  .logical_block_size = PXD_LBS,
-		  .physical_block_size = PXD_LBS,
-		  .max_segment_size = SEGMENT_SIZE,
-		  .max_segments = PXD_MAX_IO / PXD_LBS,
-		  .max_hw_sectors = PXD_MAX_IO / SECTOR_SIZE,
-		  .discard_alignment = pxd_dev->discard_granularity,
-		  .discard_granularity = pxd_dev->discard_granularity,
-		  .io_min = PXD_LBS,
-		  .io_opt = PXD_LBS,
-		  .max_hw_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
-		  .max_discard_sectors = pxd_dev->discard_size / SECTOR_SIZE,
-		  // Control write_zeroes: enable if PXD_DEV_CAP_WRITE_ZEROES capability is set
-		  .max_write_zeroes_sectors = wz_sectors
-	  };
-	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, &lim, pxd_dev);
-#else
-	  disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
-#endif
+	  disk = pxd_alloc_disk(pxd_dev);
 
 	  if (IS_ERR(disk)) {
 		blk_mq_free_tag_set(&pxd_dev->tag_set);
@@ -1205,13 +1153,7 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	q->queuedata = pxd_dev;
 	pxd_dev->disk = disk;
 
-#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(CONFIG_SUSE_VERSION) && (CONFIG_SUSE_VERSION >= 16))
-	*blk_mq_queue_flag = blk_mq_freeze_queue(q);
-#else
-	blk_mq_freeze_queue(q);
-#endif
-#endif
+	pxd_freeze_queue(q, blk_mq_queue_flag);
 
 	return 0;
 }
@@ -1451,13 +1393,9 @@ ssize_t pxd_export(struct fuse_conn *fc, uint64_t dev_id)
 	spin_lock(&pxd_dev->lock);
 	pxd_dev->exported = true;
 	spin_unlock(&pxd_dev->lock);
-#if defined __PX_BLKMQ__ && !defined __PXD_BIO_MAKEREQ__
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,14,0) || defined(__BLK_Q_FREEZE_WITH_MEMFLAG__) || (LINUX_VERSION_CODE >= KERNEL_VERSION(6,5,0) && defined(CONFIG_SUSE_VERSION) && (CONFIG_SUSE_VERSION >= 16))
-	blk_mq_unfreeze_queue(pxd_dev->disk->queue, blk_mq_queue_flag);
-#else
-	blk_mq_unfreeze_queue(pxd_dev->disk->queue);
-#endif
-#endif
+
+	pxd_unfreeze_queue(pxd_dev, &blk_mq_queue_flag);
+
 	return 0;
 cleanup:
     spin_lock(&ctx->lock);
@@ -1620,21 +1558,19 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 	set_capacity(pxd_dev->disk, update_size->size / SECTOR_SIZE);
-#else
-	// set_capacity is sufficient for modifying disk size from 5.11 onwards
-	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
-#endif
 	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
-
 	// set_capacity is sufficient for modifying disk size from 5.11 onwards
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0) || (defined(__EL8__) && defined(GD_READ_ONLY))
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,10,0) || (defined(__EL8__) && defined(GD_READ_ONLY))
 	revalidate_disk_size(pxd_dev->disk, true);
-#else
+	#else
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
-#endif
+	#endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+	pxd_dev->size = update_size->size;
+	spin_unlock(&pxd_dev->lock);
+	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);
 #endif
 	put_device(&pxd_dev->dev);
 
@@ -2060,12 +1996,12 @@ static char* __strtok_r(char *src, const char delim, char **saveptr) {
 
 static void __strip_nl(const char *src, char *dst, int maxlen) {
 	char *tmp;
-	int len=strlen(src);
-
-
+	int len;
 	if (!src || !dst) {
 		return;
 	}
+
+	len = strlen(src);
 
 	dst[0] = '\0';
 	if (!len) {
