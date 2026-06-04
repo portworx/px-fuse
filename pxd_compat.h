@@ -284,6 +284,7 @@ static inline struct gendisk *pxd_alloc_disk(struct pxd_device *pxd_dev)
 {
 	struct gendisk *disk;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0)
 #ifdef __ELREPO9__
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,9,0)
 	disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
@@ -349,7 +350,7 @@ static inline struct gendisk *pxd_alloc_disk(struct pxd_device *pxd_dev)
 #else
 	disk = blk_mq_alloc_disk(&pxd_dev->tag_set, pxd_dev);
 #endif
-
+#endif
 	return disk;
 }
 
