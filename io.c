@@ -305,6 +305,10 @@ static int io_ring_ctx_init(struct io_ring_ctx *ctx, struct io_uring_params *par
 	INIT_LIST_HEAD(&ctx->defer_list);
 	INIT_LIST_HEAD(&ctx->sock_poll_list);
 
+	/* Last: mark fully initialized so the release/poll/mmap paths can
+	 * tell apart a freshly opened (kzalloc'd) fd from a torn-down one. */
+	ctx->inited = true;
+
 	return 0;
 }
 
@@ -2657,6 +2661,14 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 
 static void io_ring_ctx_wait_and_kill(struct io_ring_ctx *ctx)
 {
+	/* If the fd was opened but PXD_IOC_INIT_IO was never issued, none of
+	 * the percpu_ref / mutex / completion / queues are initialized.
+	 * Just free the bare allocation. */
+	if (!ctx->inited) {
+		kfree(ctx);
+		return;
+	}
+
 	mutex_lock(&ctx->uring_lock);
 	percpu_ref_kill(&ctx->refs);
 	mutex_unlock(&ctx->uring_lock);
@@ -2819,7 +2831,11 @@ static int io_uring_open(struct inode *inode, struct file *file)
 {
 	struct io_ring_ctx *ctx;
 
-	ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
+	/* kzalloc, not kmalloc: the release/poll/mmap paths can fire before
+	 * io_ring_ctx_init() runs (e.g. fd closed without PXD_IOC_INIT_IO).
+	 * Zero state lets the ->inited flag start out false and lets those
+	 * paths bail cleanly. */
+	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (ctx == NULL)
 		return -ENOMEM;
 
@@ -2866,6 +2882,31 @@ static long io_uring_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 {
 	struct io_ring_ctx *ctx = filp->private_data;
 
+	if (!ctx)
+		return -EINVAL;
+
+	/* PXD_IOC_INIT_IO is the only command allowed on a not-yet-initialized
+	 * ring context.  For every other PXD ioctl we recognize, require the
+	 * ctx to be fully set up before touching percpu_ref / mutex / wait
+	 * queues / workqueue.  Unknown ioctls fall through to ENOTTY via
+	 * the default case below. */
+	switch (cmd) {
+	case PXD_IOC_INIT_IO:
+		break;
+	case PXD_IOC_WAKE_UP_SQO:
+	case PXD_IOC_RUN_IO_QUEUE:
+	case PXD_IOC_REGISTER_FILE:
+	case PXD_IOC_UNREGISTER_FILE:
+	case PXD_IOC_REGISTER_BUFFERS:
+	case PXD_IOC_UNREGISTER_BUFFERS:
+	case PXD_IOC_REGISTER_REGION:
+		if (!ctx->inited)
+			return -EINVAL;
+		break;
+	default:
+		break;
+	}
+
 	switch (cmd) {
 	case PXD_IOC_WAKE_UP_SQO:
 		wake_up(&ctx->sqo_wait);
@@ -2901,10 +2942,18 @@ static unsigned io_uring_poll(struct file *file, poll_table *wait)
 {
 	unsigned mask = POLLOUT | POLLWRNORM;
 	struct io_ring_ctx *ctx = file->private_data;
-	struct fuse_queue_cb *cb = ctx->responses_cb;
+	struct fuse_queue_cb *cb;
 
 	if (!ctx)
 		return POLLERR;
+
+	/* Uninitialized ctx: no cq_wait queue, no responses_cb mapping yet.
+	 * Treat as "writable, nothing to read" so userspace gets a clean
+	 * answer instead of a kernel oops. */
+	if (!ctx->inited)
+		return mask;
+
+	cb = ctx->responses_cb;
 
 	poll_wait(file, &ctx->cq_wait, wait);
 
@@ -2962,9 +3011,14 @@ static struct vm_operations_struct io_uring_vm_ops = {
 
 static int io_uring_mmap(struct file *filp, struct vm_area_struct *vma)
 {
+	struct io_ring_ctx *ctx = filp->private_data;
+
+	if (!ctx || !ctx->inited)
+		return -EINVAL;
+
 	vma->vm_ops = &io_uring_vm_ops;
 	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_private_data = filp->private_data;
+	vma->vm_private_data = ctx;
 	io_uring_vm_open(vma);
 	return 0;
 }

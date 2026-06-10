@@ -66,6 +66,11 @@ struct io_ring_ctx {
 		unsigned int		flags;
 		bool			compat;
 		bool			account_mem;
+		/* Set to true at the end of io_ring_ctx_init().  Release path
+		 * (io_ring_ctx_wait_and_kill / poll / mmap) must early-return when
+		 * this is false: a freshly opened fd has zero-initialized state
+		 * but no percpu_ref / mutex / waitqueue / workqueue set up. */
+		bool			inited;
 
 		unsigned		cached_sq_head;
 		unsigned		sq_entries;
