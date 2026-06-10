@@ -1880,8 +1880,11 @@ static int io_req_set_file(struct io_ring_ctx *ctx, const struct sqe_submit *s,
 	if (!io_op_needs_file(s->sqe))
 		return 0;
 
-	/* Only fixed files supported */
-	BUG_ON(!(flags & IOSQE_FIXED_FILE));
+	/* Only fixed files supported. Userspace can send arbitrary SQEs
+	 * (including bogus opcodes); a missing IOSQE_FIXED_FILE flag must be
+	 * a graceful rejection, not a BUG_ON that takes down the kernel. */
+	if (unlikely(!(flags & IOSQE_FIXED_FILE)))
+		return -EINVAL;
 
 	if (unlikely(!ctx->user_files ||
 		     (unsigned) fd >= ctx->nr_user_files))
