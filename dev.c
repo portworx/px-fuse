@@ -27,6 +27,9 @@
 #include "pxd_fastpath.h"
 #include "pxd_core.h"
 #include "pxd_trace.h"
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#include "io.h"
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 #define PAGE_CACHE_GET(page) get_page(page)
@@ -1093,6 +1096,21 @@ __acquires(fc->lock)
 	end_requests(fc, &fc->processing);
 }
 
+void fuse_queue_init_cb(struct fuse_queue_cb *cb)
+{
+	cb->w.sequence = 1;
+	cb->w.read = 0;
+	cb->w.write = 0;
+	spin_lock_init(&cb->w.lock);
+
+	cb->r.write = 0;
+	cb->r.read = 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	pxd_uring_init_cb(cb);
+#endif
+}
+
 static void fuse_conn_free_allocs(struct fuse_conn *fc)
 {
 	if (fc->per_cpu_ids)
@@ -1101,6 +1119,9 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 		kfree(fc->free_ids);
 	if (fc->request_map)
 		kfree(fc->request_map);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	pxd_uring_free_conn(fc);
+#endif
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1146,6 +1167,14 @@ int fuse_conn_init(struct fuse_conn *fc)
 		struct fuse_per_cpu_ids *my_ids = per_cpu_ptr(fc->per_cpu_ids, cpu);
 		memset(my_ids, 0, sizeof(*my_ids));
 	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	rc = pxd_uring_init_conn(fc);
+	if (rc) {
+		printk(KERN_ERR "pxd: failed to initialize uring connection: %d\n", rc);
+		goto err_out;
+	}
+#endif
 
 	fc->reqctr = 0;
 	return 0;

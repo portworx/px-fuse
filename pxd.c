@@ -40,6 +40,11 @@
 #include "pxd_compat.h"
 #include "pxd_core.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+#include "pxd_io_uring.h"
+#include "io.h"
+#endif
+
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
 #endif
@@ -2513,10 +2518,25 @@ static int pxd_init(void)
 {
 	int err, i, j;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	err = -ENOMEM;
+	req_cachep = KMEM_CACHE(io_kiocb, SLAB_HWCACHE_ALIGN);
+	if (!req_cachep) {
+		printk(KERN_ERR "pxd: failed to initialize io request cache\n");
+		goto out;
+	}
+
+	err = io_ring_register_device();
+	if (err) {
+		printk(KERN_ERR "pxd: failed to register io dev: %d\n", err);
+		goto out_req_cache;
+	}
+#endif
+
 	err = fuse_dev_init();
 	if (err) {
 		printk(KERN_ERR "pxd: failed to initialize fuse: %d\n", err);
-		goto out;
+		goto out_io_ring;
 	}
 
 	pxd_contexts = kzalloc(sizeof(pxd_contexts[0]) * pxd_num_contexts,
@@ -2590,6 +2610,15 @@ out_fuse:
 	kfree(pxd_contexts);
 out_fuse_dev:
 	fuse_dev_cleanup();
+out_io_ring:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	io_ring_unregister_device();
+out_req_cache:
+	if (req_cachep) {
+		kmem_cache_destroy(req_cachep);
+		req_cachep = NULL;
+	}
+#endif
 out:
 	return err;
 }
@@ -2597,6 +2626,10 @@ out:
 static void pxd_exit(void)
 {
 	int i;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	io_ring_unregister_device();
+#endif
 
 	fastpath_cleanup();
 	pxd_sysfs_exit();
@@ -2612,6 +2645,13 @@ static void pxd_exit(void)
 	fuse_dev_cleanup();
 
 	kfree(pxd_contexts);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	if (req_cachep) {
+		kmem_cache_destroy(req_cachep);
+		req_cachep = NULL;
+	}
+#endif
 
 	printk(KERN_INFO "pxd: driver unloaded\n");
 }

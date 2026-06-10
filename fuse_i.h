@@ -161,7 +161,7 @@ struct ____cacheline_aligned fuse_queue_writer {
 	uint32_t write;         /** cached write index */
 	uint32_t read;		/** cached read index */
 	spinlock_t lock;	/** writer lock */
-	uint32_t pad_0;
+	uint32_t need_wake_up;	/** if true reader needs wake up call */
 	uint64_t sequence;        /** next request sequence number */
 	uint64_t pad[5];
 };
@@ -288,6 +288,12 @@ struct fuse_conn {
 
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	/** Shared-memory request/response queues used by the io_uring transport.
+	 *  Allocated and freed via pxd_uring_init_conn() / pxd_uring_free_conn(). */
+	struct fuse_conn_queues *queue;
+#endif
 };
 
 /** Device operations */
@@ -367,6 +373,11 @@ void fuse_req_init_context(struct fuse_req *req);
 
 void request_end(struct fuse_conn *fc, struct fuse_req *req, bool lock);
 struct fuse_req *request_find(struct fuse_conn *fc, u64 unique);
+
+/* Generic queue control-block init. Defined in dev.c. The body also calls
+ * pxd_uring_init_cb() (declared in io.h) when uring is compiled in, so any
+ * uring-specific per-CB setup lives in io.c, not here. */
+void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 
 #endif
 #endif /* _FS_FUSE_I_H */
