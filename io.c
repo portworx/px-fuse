@@ -2659,10 +2659,59 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	kfree(ctx);
 }
 
+/* Synchronous teardown for the PXD_IOC_INIT_IO failure path.
+ *
+ * Why we cannot reuse io_ring_ctx_wait_and_kill() here: that path is meant
+ * for live rings with potential in-flight IOs holding refs.  It calls
+ * percpu_ref_kill(), waits on ctx_done, then frees the ctx.  Two problems
+ * if we call it from inside the INIT_IO ioctl after a setup failure:
+ *   1) percpu_ref_kill() is then invoked a second time when userspace later
+ *      closes the fd (release path), because file->private_data still
+ *      points at the same ctx.  That triggers the
+ *      "percpu_ref_kill_and_confirm called more than once" WARN.
+ *   2) io_ring_ctx_free() kfree()'s the ctx; the subsequent release path
+ *      operates on freed memory.
+ *
+ * No IO has been submitted at this point and no extra refs have been taken,
+ * so we can synchronously unwind everything io_ring_ctx_init() and
+ * io_sq_offload_start() allocated and reset ctx->inited.  The eventual
+ * release path then sees ctx->inited == false and just kfree()s ctx.
+ */
+static void io_ring_ctx_init_undo(struct io_ring_ctx *ctx)
+{
+	if (ctx->sqo_wq) {
+		destroy_workqueue(ctx->sqo_wq);
+		ctx->sqo_wq = NULL;
+	}
+	if (ctx->sqo_thread) {
+		io_sq_thread_stop(ctx);
+	}
+	if (ctx->sqo_mm) {
+		mmdrop(ctx->sqo_mm);
+		ctx->sqo_mm = NULL;
+	}
+	if (ctx->user_files) {
+		kfree(ctx->user_files);
+		ctx->user_files = NULL;
+		ctx->nr_user_files = 0;
+	}
+	if (ctx->queue) {
+		vfree(ctx->queue);
+		ctx->queue = NULL;
+		ctx->requests_cb = NULL;
+		ctx->responses_cb = NULL;
+		ctx->requests = NULL;
+		ctx->responses = NULL;
+	}
+	percpu_ref_exit(&ctx->refs);
+	ctx->inited = false;
+}
+
 static void io_ring_ctx_wait_and_kill(struct io_ring_ctx *ctx)
 {
-	/* If the fd was opened but PXD_IOC_INIT_IO was never issued, none of
-	 * the percpu_ref / mutex / completion / queues are initialized.
+	/* If the fd was opened but PXD_IOC_INIT_IO was never issued (or it
+	 * failed and we undid via io_ring_ctx_init_undo), none of the
+	 * percpu_ref / mutex / completion / queues are initialized.
 	 * Just free the bare allocation. */
 	if (!ctx->inited) {
 		kfree(ctx);
@@ -2859,6 +2908,11 @@ static long io_ring_ioctl_init(struct io_ring_ctx *ctx, unsigned long arg)
 	struct io_uring_params params;
 	int ret;
 
+	/* INIT_IO is one-shot per fd.  Allowing it twice would double-init
+	 * percpu_ref / mutex / completion and leak the first allocation. */
+	if (ctx->inited)
+		return -EBUSY;
+
 	if (copy_from_user(&params, (void *)arg, sizeof(params)))
 		return -EFAULT;
 
@@ -2868,12 +2922,14 @@ static long io_ring_ioctl_init(struct io_ring_ctx *ctx, unsigned long arg)
 
 	ret = io_sq_offload_start(ctx, &params);
 	if (ret != 0) {
-		io_ring_ctx_wait_and_kill(ctx);
+		io_ring_ctx_init_undo(ctx);
 		return ret;
 	}
 
-	if (copy_to_user((void *)arg, &params, sizeof(params)))
+	if (copy_to_user((void *)arg, &params, sizeof(params))) {
+		io_ring_ctx_init_undo(ctx);
 		return -EFAULT;
+	}
 
 	return 0;
 }
