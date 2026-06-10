@@ -179,7 +179,7 @@ struct ____cacheline_aligned fuse_queue_reader {
 
 #include <pthread.h>
 #include <atomic>
-#include "spin_lock.h"   /* px::spinlock — owned by px-fuse, no px-storage dependency */
+#include "spin_lock.h"   /* px::spinlock, owned by px-fuse, no px-storage dependency */
 
 /*
  * Userspace side of the shared-memory queue control blocks. Layout-compatible
@@ -187,7 +187,7 @@ struct ____cacheline_aligned fuse_queue_reader {
  * 8 in both halves) so the mmap'd ring is interpretable by either party.
  *
  * The reader-side px::spinlock is the userspace synchronization primitive
- * paired with the kernel's need_wake_up signaling — both occupy the same
+ * paired with the kernel's need_wake_up signaling. Both occupy the same
  * 4-byte slot at offset 8 of the reader half. px-fuse ships its own
  * spin_lock.h so this header has no dependency on px-storage.
  */

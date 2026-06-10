@@ -8,7 +8,7 @@
  * ABI surface (io_uring_sqe, cqe, params, IORING_* opcodes/flags) and
  * mirrors only the two CB fields it actually reads/writes via the mmap'd
  * queue (r.read, r.write). That keeps the test as a small, independent
- * ABI witness — if the kernel struct layout drifts, the static_assert below
+ * ABI witness. If the kernel struct layout drifts, the static_assert below
  * catches it without needing a rebuild of every userspace consumer.
  * Sizes/offsets must match the kernel side of fuse_i.h:
  *
@@ -47,7 +47,7 @@
 #include <vector>
 
 extern "C" {
-#include "pxd.h"   // safe — does not pull in fuse_i.h
+#include "pxd.h"   // safe: does not pull in fuse_i.h
 }
 
 namespace {
@@ -124,7 +124,7 @@ constexpr size_t kCachelineSize = 64;
 // Mirror of kernel-side struct fuse_queue_cb: a 64-byte writer half followed
 // by a 64-byte reader half whose first 8 bytes are { uint32_t read; uint32_t write; }.
 struct fuse_queue_cb_mirror {
-	unsigned char w_opaque[kCachelineSize]; // writer half — kernel uses internally
+	unsigned char w_opaque[kCachelineSize]; // writer half, kernel uses internally
 	struct {
 		std::atomic<uint32_t> read;  // offset 64
 		std::atomic<uint32_t> write; // offset 68

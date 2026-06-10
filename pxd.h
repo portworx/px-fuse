@@ -45,7 +45,7 @@
 #define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 #define PXD_IOC_DETACH_DEVICE		_IO(PXD_IOCTL_MAGIC, 11)	/* 0x50580b */
 
-/* io_uring transport ioctls — issued on /dev/pxd/pxd-io.
+/* io_uring transport ioctls, issued on /dev/pxd/pxd-io.
  * Stale uring branch used 11..15; release already uses 11 for DETACH_DEVICE,
  * so the uring set is shifted to 12..16. */
 #define PXD_IOC_INIT_IO			_IO(PXD_IOCTL_MAGIC, 12)	/* 0x50580c */
@@ -182,7 +182,7 @@ struct pxd_add_ext_out {
 };
 
 /* Device capability flags */
-#define PXD_DEV_CAP_WRITE_ZEROES    (1 << 0)  /* WriteZero→Discard optimization */
+#define PXD_DEV_CAP_WRITE_ZEROES    (1 << 0)  /* WriteZero to Discard optimization */
 /* Reserved for future use: bits 1-31 */
 
 /**

@@ -10,8 +10,17 @@
  * Layout-compatible with a raw pthread_spinlock_t: sizeof(px::spinlock) ==
  * sizeof(pthread_spinlock_t), no vtable. This is required because the same
  * bytes also overlay the kernel-side fuse_queue_reader { need_wake_up; pad; }
- * slot — kernel and userspace share the mmap'd queue verbatim.
+ * slot. Kernel and userspace share the mmap'd queue verbatim.
+ *
+ * This header is C++ only. The kernel module never includes it: fuse_i.h
+ * gates the userspace block on __KERNEL__, and __KERNEL__ is defined for
+ * the kernel build (see Makefile.in: KBUILD_CPPFLAGS := -D__KERNEL__).
+ * The guard below catches accidental inclusion from C translation units.
  */
+
+#ifndef __cplusplus
+#error "spin_lock.h is C++ only; include from a C++ TU or guard with #ifdef __cplusplus"
+#endif
 
 #include <pthread.h>
 
