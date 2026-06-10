@@ -50,6 +50,41 @@ extern "C" {
 #include "pxd.h"   // safe: does not pull in fuse_i.h
 }
 
+// gtest 1.8 (Ubuntu 18.04 / GLib gtester era) lacks GTEST_SKIP. Provide a
+// shim that prints a [  SKIPPED ] line and returns from the test. On gtest
+// 1.10+ this falls through to the real macro.
+#ifndef GTEST_SKIP
+namespace pxd_test_compat {
+class SkipNotice {
+  public:
+	SkipNotice(const char *file, int line)
+	{
+		std::cerr << "[  SKIPPED ] " << file << ":" << line << ": ";
+	}
+	~SkipNotice() { std::cerr << std::endl; }
+	template <typename T> SkipNotice &operator<<(const T &v)
+	{
+		std::cerr << v;
+		return *this;
+	}
+};
+} // namespace pxd_test_compat
+// Streaming form: PXD_SKIP() << "reason"; then return;
+// Used inside the SKIP_IF_* macros below so call sites stay readable.
+#define PXD_SKIP_STREAM() ::pxd_test_compat::SkipNotice(__FILE__, __LINE__)
+#define PXD_SKIP_AND_RETURN(msg)                                                             \
+	do {                                                                                     \
+		PXD_SKIP_STREAM() << msg;                                                            \
+		return;                                                                              \
+	} while (0)
+#else
+#define PXD_SKIP_AND_RETURN(msg)                                                             \
+	do {                                                                                     \
+		GTEST_SKIP() << msg;                                                                 \
+		return;                                                                              \
+	} while (0)
+#endif
+
 namespace {
 
 constexpr const char *kPxdIoDev = "/dev/pxd/pxd-io";
@@ -153,14 +188,14 @@ bool pxd_io_dev_available()
 #define SKIP_IF_NO_PXD_IO()                                                                  \
 	do {                                                                                     \
 		if (!pxd_io_dev_available()) {                                                       \
-			GTEST_SKIP() << kPxdIoDev << " not present (load px.ko first)";                  \
+			PXD_SKIP_AND_RETURN("/dev/pxd/pxd-io not present (load px.ko first)");           \
 		}                                                                                    \
 	} while (0)
 
 #define SKIP_IF_NOT_ROOT()                                                                   \
 	do {                                                                                     \
 		if (!running_as_root()) {                                                            \
-			GTEST_SKIP() << "test requires root (CAP_SYS_ADMIN for mmap / page-pin)";        \
+			PXD_SKIP_AND_RETURN("test requires root (CAP_SYS_ADMIN for mmap / page-pin)");   \
 		}                                                                                    \
 	} while (0)
 
