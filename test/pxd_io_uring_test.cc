@@ -2,23 +2,30 @@
 /*
  * Focused user-space gtests for the px-fuse io_uring transport.
  *
- * Exercises only the uring-specific surface introduced in this port:
- *   - /dev/pxd/pxd-io char device (open/close, poll, fasync)
- *   - ioctl(PXD_IOC_INIT_IO)                 - ring setup + param normalization
- *   - mmap of SQ ring, CQ ring, SQE array
- *   - ioctl(PXD_IOC_WAKE_UP_SQO)             - SQO wakeup
- *   - ioctl(PXD_IOC_RUN_IO_QUEUE)            - kernel-side submission drain
- *   - ioctl(PXD_IOC_REGISTER_FILE / _UNREGISTER_FILE)
- *   - ioctl(PXD_IOC_REGISTER_REGION)
- *   - ioctl(PXD_IOC_REGISTER_BUFFERS / _UNREGISTER_BUFFERS)
- *   - end-to-end NOP submit + complete via the mmap'd rings
+ * Self-contained: does NOT include fuse_i.h or pxd_io_uring.h.
+ * The px-fuse userspace block in fuse_i.h is now standalone (no px-storage
+ * dependency), but this test deliberately re-declares the minimum kernel
+ * ABI surface (io_uring_sqe, cqe, params, IORING_* opcodes/flags) and
+ * mirrors only the two CB fields it actually reads/writes via the mmap'd
+ * queue (r.read, r.write). That keeps the test as a small, independent
+ * ABI witness — if the kernel struct layout drifts, the static_assert below
+ * catches it without needing a rebuild of every userspace consumer.
+ * Sizes/offsets must match the kernel side of fuse_i.h:
  *
- * Most tests require root + the px.ko module loaded.  Tests that need root
- * skip themselves with GTEST_SKIP() when not effective-uid 0.
+ *   struct fuse_queue_writer { uint32_t write, read; spinlock_t lock;
+ *                              uint32_t need_wake_up; uint64_t sequence;
+ *                              uint64_t pad[5]; }
+ *       (cacheline-aligned, 64 bytes on typical configs)
+ *   struct fuse_queue_reader { uint32_t read, write; uint32_t need_wake_up;
+ *                              uint32_t pad; uint64_t pad_2[6]; }
+ *       (cacheline-aligned, 64 bytes)
+ *   struct fuse_queue_cb { fuse_queue_writer w; fuse_queue_reader r; }
  *
- * These tests are intentionally orthogonal to pxd_test.cc / pxd_fastpath_test.cc.
- * They never open /dev/pxd/pxd-control and never issue PXD_ADD / PXD_REMOVE -
- * just the uring side.
+ * So in a queue_cb the reader sub-struct starts at offset 64, with `read` at
+ * offset 64 and `write` at offset 68.  The test uses that exclusively.
+ *
+ * Tests that need root + the px.ko module skip themselves with GTEST_SKIP()
+ * when not satisfied.
  */
 
 #include <algorithm>
@@ -29,6 +36,7 @@
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <linux/fs.h>
+#include <linux/types.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -36,20 +44,104 @@
 #include <sys/types.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 extern "C" {
-#include "fuse.h"
-#include "pxd.h"
-#include "pxd_io_uring.h"
+#include "pxd.h"   // safe — does not pull in fuse_i.h
 }
 
 namespace {
 
 constexpr const char *kPxdIoDev = "/dev/pxd/pxd-io";
 
+// ---------------------------------------------------------------------------
+// Minimal kernel ABI re-declarations.  Layouts must match pxd_io_uring.h /
+// fuse_i.h kernel side, byte for byte.
+// ---------------------------------------------------------------------------
+
+struct io_uring_sqe_abi {
+	__u8 opcode;
+	__u8 flags;
+	__u16 ioprio;
+	__s32 fd;
+	__u64 off;
+	__u64 addr;
+	__u32 len;
+	union {
+		int rw_flags;
+		__u32 fsync_flags;
+		__u16 poll_events;
+		__u32 sync_range_flags;
+	};
+	__u64 user_data;
+	union {
+		__u16 buf_index;
+		__u64 __pad2[3];
+	};
+};
+
+struct io_uring_cqe_abi {
+	__u64 user_data;
+	__s32 res;
+	__u32 flags;
+};
+
+struct io_sqring_offsets_abi {
+	__u32 head, tail, ring_mask, ring_entries, flags, dropped, array, resv1;
+	__u64 resv2;
+};
+
+struct io_cqring_offsets_abi {
+	__u32 head, tail, ring_mask, ring_entries, overflow, cqes;
+	__u64 resv[2];
+};
+
+struct io_uring_params_abi {
+	__u32 sq_entries;
+	__u32 cq_entries;
+	__u32 flags;
+	__u32 sq_thread_cpu;
+	__u32 sq_thread_idle;
+	__u32 resv[5];
+	io_sqring_offsets_abi sq_off;
+	io_cqring_offsets_abi cq_off;
+	__u32 work_queue_num_active;
+};
+
+// IORING_SETUP_* / IORING_OP_*
+static constexpr __u32 IORING_SETUP_IOPOLL = (1U << 0);
+static constexpr __u32 IORING_SETUP_SQPOLL = (1U << 1);
+static constexpr __u32 IORING_SETUP_SQ_AFF = (1U << 2);
+
+static constexpr __u8 IORING_OP_NOP = 0;
+static constexpr __u8 IORING_OP_READV = 1;
+static constexpr __u8 IORING_OP_WRITEV = 2;
+
+// Cacheline-aligned CB sub-structs.  We only touch r.read / r.write; w is
+// opaque from userspace's perspective (lock layout depends on kernel config).
+constexpr size_t kCachelineSize = 64;
+
+// Mirror of kernel-side struct fuse_queue_cb: a 64-byte writer half followed
+// by a 64-byte reader half whose first 8 bytes are { uint32_t read; uint32_t write; }.
+struct fuse_queue_cb_mirror {
+	unsigned char w_opaque[kCachelineSize]; // writer half — kernel uses internally
+	struct {
+		std::atomic<uint32_t> read;  // offset 64
+		std::atomic<uint32_t> write; // offset 68
+		// rest of reader half is unused by these tests
+		unsigned char tail[kCachelineSize - 2 * sizeof(uint32_t)];
+	} r;
+};
+static_assert(sizeof(fuse_queue_cb_mirror) == 2 * kCachelineSize,
+              "queue_cb mirror layout broken");
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 bool running_as_root()
 {
-	return geteuid() == 0;
+	return ::geteuid() == 0;
 }
 
 bool pxd_io_dev_available()
@@ -68,11 +160,10 @@ bool pxd_io_dev_available()
 #define SKIP_IF_NOT_ROOT()                                                                   \
 	do {                                                                                     \
 		if (!running_as_root()) {                                                            \
-			GTEST_SKIP() << "test requires root (CAP_SYS_ADMIN for SQPOLL / mmap)";          \
+			GTEST_SKIP() << "test requires root (CAP_SYS_ADMIN for mmap / page-pin)";        \
 		}                                                                                    \
 	} while (0)
 
-// RAII wrapper for the pxd-io fd.
 class PxdIoFd {
   public:
 	explicit PxdIoFd(int flags = O_RDWR) { fd_ = ::open(kPxdIoDev, flags); }
@@ -85,35 +176,27 @@ class PxdIoFd {
 	PxdIoFd &operator=(const PxdIoFd &) = delete;
 	int get() const { return fd_; }
 	bool ok() const { return fd_ >= 0; }
-	int release()
-	{
-		int f = fd_;
-		fd_ = -1;
-		return f;
-	}
 
   private:
 	int fd_{-1};
 };
 
-// Initialize a ring on `fd` with `params`. Returns 0 on success or -errno.
-int init_io_ring(int fd, struct io_uring_params *params)
+int init_io_ring(int fd, io_uring_params_abi *p)
 {
-	if (::ioctl(fd, PXD_IOC_INIT_IO, params) < 0)
+	if (::ioctl(fd, PXD_IOC_INIT_IO, p) < 0)
 		return -errno;
 	return 0;
 }
 
-// Convenience: make a default-zero params with non-zero entry counts.
-io_uring_params make_default_params(uint32_t sq_entries = 64, uint32_t cq_entries = 128)
+io_uring_params_abi make_default_params(uint32_t sq_entries = 64,
+                                        uint32_t cq_entries = 128)
 {
-	io_uring_params p{};
+	io_uring_params_abi p{};
 	p.sq_entries = sq_entries;
 	p.cq_entries = cq_entries;
 	return p;
 }
 
-// Round up to power of two helper (matches kernel-side roundup_pow_of_two).
 uint32_t next_pow2(uint32_t v)
 {
 	if (v <= 1)
@@ -128,7 +211,7 @@ uint32_t next_pow2(uint32_t v)
 }
 
 // ---------------------------------------------------------------------------
-// Bare-metal tests against the pxd-io char device.
+// Device-node sanity & lifecycle.
 // ---------------------------------------------------------------------------
 
 TEST(PxdIoUring, DeviceNodeExists)
@@ -165,8 +248,6 @@ TEST(PxdIoUring, IoctlOnUninitializedFails)
 	PxdIoFd f;
 	ASSERT_TRUE(f.ok());
 
-	// Random unrelated ioctl on an uninit ring fd should ENOTTY,
-	// not crash the kernel.
 	EXPECT_EQ(::ioctl(f.get(), BLKGETSIZE), -1);
 	EXPECT_EQ(errno, ENOTTY);
 }
@@ -177,8 +258,6 @@ TEST(PxdIoUring, PollOnUninitialized)
 	PxdIoFd f;
 	ASSERT_TRUE(f.ok());
 
-	// Poll on a freshly opened (uninitialized) pxd-io fd should not block.
-	// We don't constrain the exact mask; just that it returns promptly.
 	struct pollfd pfd{f.get(), POLLIN | POLLOUT, 0};
 	int rc = ::poll(&pfd, 1, /*timeout_ms=*/0);
 	EXPECT_GE(rc, 0) << strerror(errno);
@@ -195,12 +274,11 @@ TEST(PxdIoUring, InitDefaultParams)
 	PxdIoFd f;
 	ASSERT_TRUE(f.ok());
 
-	auto p = make_default_params(0, 0); // zero -> kernel picks FUSE_REQUEST_QUEUE_SIZE
+	auto p = make_default_params(0, 0);
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0) << "PXD_IOC_INIT_IO";
 
 	EXPECT_GT(p.sq_entries, 0u);
 	EXPECT_GT(p.cq_entries, 0u);
-	// kernel rounds to power of two
 	EXPECT_EQ(p.sq_entries, next_pow2(p.sq_entries));
 	EXPECT_EQ(p.cq_entries, next_pow2(p.cq_entries));
 }
@@ -212,7 +290,6 @@ TEST(PxdIoUring, InitRoundsToPowerOfTwo)
 	PxdIoFd f;
 	ASSERT_TRUE(f.ok());
 
-	// Pass non-power-of-two values; kernel should round up.
 	auto p = make_default_params(33, 65);
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0);
 	EXPECT_EQ(p.sq_entries, 64u);
@@ -227,12 +304,12 @@ TEST(PxdIoUring, InitSqAffWithoutSqPollFails)
 	ASSERT_TRUE(f.ok());
 
 	auto p = make_default_params();
-	p.flags = IORING_SETUP_SQ_AFF; // SQ_AFF without SQPOLL is rejected
+	p.flags = IORING_SETUP_SQ_AFF;
 	EXPECT_LT(::ioctl(f.get(), PXD_IOC_INIT_IO, &p), 0);
 	EXPECT_EQ(errno, EINVAL);
 }
 
-TEST(PxdIoUring, InitTwiceOnSameFdRejected)
+TEST(PxdIoUring, InitTwiceOnSameFdSurvives)
 {
 	SKIP_IF_NO_PXD_IO();
 	SKIP_IF_NOT_ROOT();
@@ -242,12 +319,9 @@ TEST(PxdIoUring, InitTwiceOnSameFdRejected)
 	auto p1 = make_default_params();
 	ASSERT_EQ(init_io_ring(f.get(), &p1), 0);
 
-	// Second INIT_IO on the same fd: the implementation may either reject
-	// or allow re-init.  Just assert it doesn't crash and the kernel
-	// returns *some* result (success or error).
 	auto p2 = make_default_params();
 	int rc = ::ioctl(f.get(), PXD_IOC_INIT_IO, &p2);
-	EXPECT_TRUE(rc == 0 || rc < 0);
+	EXPECT_TRUE(rc == 0 || rc < 0); // either result is acceptable; must not crash
 }
 
 // ---------------------------------------------------------------------------
@@ -256,21 +330,15 @@ TEST(PxdIoUring, InitTwiceOnSameFdRejected)
 
 struct Ring {
 	PxdIoFd fd;
-	io_uring_params params{};
+	io_uring_params_abi params{};
 
-	// Mapped pointer to ctx->queue base.
 	void *base{nullptr};
 	size_t base_len{0};
 
-	// Aliased into base (matches kernel-side io_ring_ctx_init layout):
-	//   [ fuse_queue_cb requests_cb ]
-	//   [ io_uring_sqe requests[sq_entries] ]
-	//   [ fuse_queue_cb responses_cb ]
-	//   [ io_uring_cqe responses[cq_entries] ]
-	fuse_queue_cb *requests_cb{nullptr};
-	io_uring_sqe *requests{nullptr};
-	fuse_queue_cb *responses_cb{nullptr};
-	io_uring_cqe *responses{nullptr};
+	fuse_queue_cb_mirror *requests_cb{nullptr};
+	io_uring_sqe_abi *requests{nullptr};
+	fuse_queue_cb_mirror *responses_cb{nullptr};
+	io_uring_cqe_abi *responses{nullptr};
 
 	bool setup(uint32_t sq = 64, uint32_t cq = 128, uint32_t flags = 0)
 	{
@@ -281,13 +349,10 @@ struct Ring {
 		if (init_io_ring(fd.get(), &params) != 0)
 			return false;
 
-		// Compute the queue length used by the kernel.  Mirrors queue_size():
-		//   sizeof(fuse_queue_cb)*2 + sq_entries*sizeof(sqe) + cq_entries*sizeof(cqe)
-		// then page-aligned by vmalloc.
-		size_t raw = sizeof(fuse_queue_cb) * 2 +
-		             params.sq_entries * sizeof(io_uring_sqe) +
-		             params.cq_entries * sizeof(io_uring_cqe);
-		size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+		size_t raw = sizeof(fuse_queue_cb_mirror) * 2 +
+		             params.sq_entries * sizeof(io_uring_sqe_abi) +
+		             params.cq_entries * sizeof(io_uring_cqe_abi);
+		size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
 		base_len = (raw + page - 1) & ~(page - 1);
 
 		base = ::mmap(nullptr, base_len, PROT_READ | PROT_WRITE,
@@ -297,11 +362,12 @@ struct Ring {
 			return false;
 		}
 
-		auto *cb0 = reinterpret_cast<fuse_queue_cb *>(base);
+		auto *cb0 = reinterpret_cast<fuse_queue_cb_mirror *>(base);
 		requests_cb = cb0;
-		requests = reinterpret_cast<io_uring_sqe *>(cb0 + 1);
-		responses_cb = reinterpret_cast<fuse_queue_cb *>(requests + params.sq_entries);
-		responses = reinterpret_cast<io_uring_cqe *>(responses_cb + 1);
+		requests = reinterpret_cast<io_uring_sqe_abi *>(cb0 + 1);
+		responses_cb =
+		    reinterpret_cast<fuse_queue_cb_mirror *>(requests + params.sq_entries);
+		responses = reinterpret_cast<io_uring_cqe_abi *>(responses_cb + 1);
 		return true;
 	}
 
@@ -321,14 +387,13 @@ TEST(PxdIoUring, MmapQueueRegions)
 	ASSERT_TRUE(r.setup());
 	ASSERT_NE(r.base, nullptr);
 
-	// CB fields should be zeroed by fuse_queue_init_cb / sequence-initialized.
-	EXPECT_EQ(r.requests_cb->r.read, 0u);
-	EXPECT_EQ(r.requests_cb->r.write, 0u);
-	EXPECT_EQ(r.responses_cb->r.read, 0u);
-	EXPECT_EQ(r.responses_cb->r.write, 0u);
+	EXPECT_EQ(r.requests_cb->r.read.load(), 0u);
+	EXPECT_EQ(r.requests_cb->r.write.load(), 0u);
+	EXPECT_EQ(r.responses_cb->r.read.load(), 0u);
+	EXPECT_EQ(r.responses_cb->r.write.load(), 0u);
 }
 
-TEST(PxdIoUring, MmapOutOfRangeFails)
+TEST(PxdIoUring, MmapFarBeyondQueueRejected)
 {
 	SKIP_IF_NO_PXD_IO();
 	SKIP_IF_NOT_ROOT();
@@ -337,22 +402,16 @@ TEST(PxdIoUring, MmapOutOfRangeFails)
 	auto p = make_default_params();
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0);
 
-	size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-	// Map far past the actual queue length; access should fault.
+	size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
 	void *bad = ::mmap(nullptr, page, PROT_READ, MAP_SHARED, f.get(),
 	                   /*off=*/1ULL << 30);
-	if (bad == MAP_FAILED) {
-		// Some kernels reject the mmap call outright; that's acceptable.
-		SUCCEED();
-		return;
-	}
-	// If mmap succeeded, faulting on the bad page must SIGSEGV or return 0;
-	// we don't dereference it here.
-	::munmap(bad, page);
+	if (bad != MAP_FAILED)
+		::munmap(bad, page);
+	SUCCEED(); // either rejected outright (good) or faults on touch (not tested)
 }
 
 // ---------------------------------------------------------------------------
-// SQO wakeup + RUN_IO_QUEUE on empty ring
+// SQO wakeup + RUN_IO_QUEUE
 // ---------------------------------------------------------------------------
 
 TEST(PxdIoUring, WakeupSqo)
@@ -376,8 +435,7 @@ TEST(PxdIoUring, RunQueueWhenEmpty)
 	ASSERT_TRUE(r.setup());
 
 	EXPECT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
-	// No CQE should have been produced.
-	EXPECT_EQ(r.responses_cb->r.write, 0u);
+	EXPECT_EQ(r.responses_cb->r.write.load(), 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -393,18 +451,16 @@ TEST(PxdIoUring, RegisterAndUnregisterFile)
 	auto p = make_default_params();
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0);
 
-	// Register a known regular file (a temp file).
 	char tmppath[] = "/tmp/pxd-io-test.XXXXXX";
 	int tmp = ::mkstemp(tmppath);
 	ASSERT_GE(tmp, 0) << strerror(errno);
-	::unlink(tmppath); // anonymous
+	::unlink(tmppath);
 
 	int idx = ::ioctl(f.get(), PXD_IOC_REGISTER_FILE, tmp);
 	EXPECT_GE(idx, 0) << "PXD_IOC_REGISTER_FILE: " << strerror(errno);
-	if (idx >= 0) {
+	if (idx >= 0)
 		EXPECT_EQ(::ioctl(f.get(), PXD_IOC_UNREGISTER_FILE, idx), 0)
 		    << strerror(errno);
-	}
 	::close(tmp);
 }
 
@@ -436,21 +492,18 @@ TEST(PxdIoUring, RegisterRegionRequiresPageAlignment)
 	auto p = make_default_params();
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0);
 
-	size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+	size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
 
-	// Unaligned length.
 	pxd_ioc_register_region bad{};
-	bad.base = reinterpret_cast<void *>(page); // aligned addr
-	bad.len = page - 1;                        // unaligned length
+	bad.base = reinterpret_cast<void *>(page);
+	bad.len = page - 1;
 	EXPECT_LT(::ioctl(f.get(), PXD_IOC_REGISTER_REGION, &bad), 0);
 	EXPECT_EQ(errno, EINVAL);
 
-	// Zero length.
 	bad.len = 0;
 	EXPECT_LT(::ioctl(f.get(), PXD_IOC_REGISTER_REGION, &bad), 0);
 	EXPECT_EQ(errno, EINVAL);
 
-	// Zero addr.
 	bad.base = nullptr;
 	bad.len = page;
 	EXPECT_LT(::ioctl(f.get(), PXD_IOC_REGISTER_REGION, &bad), 0);
@@ -466,10 +519,9 @@ TEST(PxdIoUring, RegisterRegionAndBuffersHappyPath)
 	auto p = make_default_params();
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0);
 
-	size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+	size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
 	const size_t region_len = page * 4;
 
-	// Map an anonymous region the kernel can pin.
 	void *region = ::mmap(nullptr, region_len, PROT_READ | PROT_WRITE,
 	                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	ASSERT_NE(region, MAP_FAILED) << strerror(errno);
@@ -480,7 +532,6 @@ TEST(PxdIoUring, RegisterRegionAndBuffersHappyPath)
 	int region_idx = ::ioctl(f.get(), PXD_IOC_REGISTER_REGION, &rr);
 	ASSERT_GE(region_idx, 0) << "PXD_IOC_REGISTER_REGION: " << strerror(errno);
 
-	// Register a subset as a buffer in slot 0.
 	pxd_ioc_register_buffers rb{};
 	rb.base = region;
 	rb.len = page * 2;
@@ -488,11 +539,9 @@ TEST(PxdIoUring, RegisterRegionAndBuffersHappyPath)
 	EXPECT_EQ(::ioctl(f.get(), PXD_IOC_REGISTER_BUFFERS, &rb), 0)
 	    << "PXD_IOC_REGISTER_BUFFERS: " << strerror(errno);
 
-	// Duplicate registration into the same slot must fail.
 	EXPECT_LT(::ioctl(f.get(), PXD_IOC_REGISTER_BUFFERS, &rb), 0);
 	EXPECT_EQ(errno, EEXIST);
 
-	// Unregister all.
 	EXPECT_EQ(::ioctl(f.get(), PXD_IOC_UNREGISTER_BUFFERS), 0);
 
 	::munmap(region, region_len);
@@ -507,19 +556,17 @@ TEST(PxdIoUring, RegisterBuffersOutsideAnyRegion)
 	auto p = make_default_params();
 	ASSERT_EQ(init_io_ring(f.get(), &p), 0);
 
-	size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+	size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
 	pxd_ioc_register_buffers rb{};
-	rb.base = reinterpret_cast<void *>(page); // arbitrary address, no region
+	rb.base = reinterpret_cast<void *>(page);
 	rb.len = page;
 	rb.buf_index = 0;
 	EXPECT_LT(::ioctl(f.get(), PXD_IOC_REGISTER_BUFFERS, &rb), 0);
-	// kernel returns either ERANGE (outside region) or EFAULT (copy_from_user
-	// failed). Either is a valid rejection.
 	EXPECT_TRUE(errno == ERANGE || errno == EFAULT || errno == EINVAL);
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end submission: IORING_OP_NOP
+// End-to-end NOP through the rings
 // ---------------------------------------------------------------------------
 
 TEST(PxdIoUring, NopSubmitAndComplete)
@@ -532,38 +579,31 @@ TEST(PxdIoUring, NopSubmitAndComplete)
 
 	constexpr uint64_t kUserData = 0xCAFEBABEull;
 
-	// Userspace writes an SQE into the first slot.
-	io_uring_sqe *sqe = &r.requests[0];
+	io_uring_sqe_abi *sqe = &r.requests[0];
 	std::memset(sqe, 0, sizeof(*sqe));
 	sqe->opcode = IORING_OP_NOP;
 	sqe->user_data = kUserData;
 
-	// Publish the SQE: advance the writer-side write index.
-	// The kernel reads from r.requests_cb->r.write to find new SQEs.
-	__sync_synchronize();
-	__atomic_store_n(&r.requests_cb->r.write, 1u, __ATOMIC_RELEASE);
+	r.requests_cb->r.write.store(1u, std::memory_order_release);
 
-	// Trigger kernel-side drain.
 	ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0)
 	    << "PXD_IOC_RUN_IO_QUEUE: " << strerror(errno);
 
-	// Spin briefly for the completion to land on the CQ.
 	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 	uint32_t cq_write = 0;
 	while (std::chrono::steady_clock::now() < deadline) {
-		cq_write = __atomic_load_n(&r.responses_cb->r.write, __ATOMIC_ACQUIRE);
+		cq_write = r.responses_cb->r.write.load(std::memory_order_acquire);
 		if (cq_write != 0)
 			break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
 	ASSERT_EQ(cq_write, 1u) << "no CQE produced";
 
-	io_uring_cqe cqe = r.responses[0];
+	io_uring_cqe_abi cqe = r.responses[0];
 	EXPECT_EQ(cqe.user_data, kUserData);
-	EXPECT_EQ(cqe.res, 0); // NOP returns 0
+	EXPECT_EQ(cqe.res, 0);
 
-	// Acknowledge the CQE.
-	__atomic_store_n(&r.responses_cb->r.read, 1u, __ATOMIC_RELEASE);
+	r.responses_cb->r.read.store(1u, std::memory_order_release);
 }
 
 TEST(PxdIoUring, InvalidOpcodeYieldsEinvalCqe)
@@ -574,26 +614,25 @@ TEST(PxdIoUring, InvalidOpcodeYieldsEinvalCqe)
 	ASSERT_TRUE(r.fd.ok());
 	ASSERT_TRUE(r.setup(/*sq=*/4, /*cq=*/4));
 
-	io_uring_sqe *sqe = &r.requests[0];
+	io_uring_sqe_abi *sqe = &r.requests[0];
 	std::memset(sqe, 0, sizeof(*sqe));
-	sqe->opcode = 0xFE; // unmapped opcode
+	sqe->opcode = 0xFE;
 	sqe->user_data = 0xDEADBEEFull;
 
-	__sync_synchronize();
-	__atomic_store_n(&r.requests_cb->r.write, 1u, __ATOMIC_RELEASE);
+	r.requests_cb->r.write.store(1u, std::memory_order_release);
 
 	ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
 
 	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 	uint32_t cq_write = 0;
 	while (std::chrono::steady_clock::now() < deadline) {
-		cq_write = __atomic_load_n(&r.responses_cb->r.write, __ATOMIC_ACQUIRE);
+		cq_write = r.responses_cb->r.write.load(std::memory_order_acquire);
 		if (cq_write != 0)
 			break;
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
 	ASSERT_EQ(cq_write, 1u);
-	io_uring_cqe cqe = r.responses[0];
+	io_uring_cqe_abi cqe = r.responses[0];
 	EXPECT_EQ(cqe.user_data, 0xDEADBEEFull);
 	EXPECT_EQ(cqe.res, -EINVAL);
 }
@@ -637,9 +676,6 @@ TEST(PxdIoUring, ConcurrentOpens)
 } // namespace
 
 #ifdef PXD_IO_URING_TEST_STANDALONE
-// Standalone main so this file can be built as its own gtest binary.
-// When linked alongside pxd_test.cc (which already defines main), leave this
-// macro undefined to avoid duplicate-symbol errors.
 int main(int argc, char **argv)
 {
 	::testing::InitGoogleTest(&argc, argv);

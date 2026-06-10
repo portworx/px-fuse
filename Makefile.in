@@ -274,15 +274,19 @@ install:
 test_clean:
 	@/bin/rm -f test/pxd_test test/pxd_io_uring_test
 
+# Compatibility shim for older gtest (<1.10) that doesn't know
+# INSTANTIATE_TEST_SUITE_P yet — map it to the older _CASE_P macro.
+GTEST_COMPAT := -DINSTANTIATE_TEST_SUITE_P=INSTANTIATE_TEST_CASE_P
+
 pxd_test: test/pxd_test.cc test/pxd_fastpath_test.cc test/pxd_io_uring_test.cc
 	@echo "Building Tests ..."
-	g++ -I. -std=c++11 test/pxd_test.cc test/pxd_fastpath_test.cc test/pxd_io_uring_test.cc -lgtest -lboost_iostreams -lpthread -o test/pxd_test
+	g++ -I. -std=c++11 $(GTEST_COMPAT) test/pxd_test.cc test/pxd_fastpath_test.cc test/pxd_io_uring_test.cc -lgtest -lboost_iostreams -lpthread -o test/pxd_test
 
 # Standalone uring-only test binary. Builds even if userspace doesn't want the
 # rest of the test surface. Run as root with px.ko loaded.
 pxd_io_uring_test: test/pxd_io_uring_test.cc
 	@echo "Building uring tests ..."
-	g++ -I. -std=c++11 -DPXD_IO_URING_TEST_STANDALONE test/pxd_io_uring_test.cc \
+	g++ -I. -std=c++11 $(GTEST_COMPAT) -DPXD_IO_URING_TEST_STANDALONE test/pxd_io_uring_test.cc \
 		-lgtest -lpthread -o test/pxd_io_uring_test
 
 rpm:

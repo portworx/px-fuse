@@ -179,7 +179,18 @@ struct ____cacheline_aligned fuse_queue_reader {
 
 #include <pthread.h>
 #include <atomic>
-#include "spin_lock.h"
+#include "spin_lock.h"   /* px::spinlock — owned by px-fuse, no px-storage dependency */
+
+/*
+ * Userspace side of the shared-memory queue control blocks. Layout-compatible
+ * with the kernel side above (sizeof == 64 each, lock/wake-up slot at offset
+ * 8 in both halves) so the mmap'd ring is interpretable by either party.
+ *
+ * The reader-side px::spinlock is the userspace synchronization primitive
+ * paired with the kernel's need_wake_up signaling — both occupy the same
+ * 4-byte slot at offset 8 of the reader half. px-fuse ships its own
+ * spin_lock.h so this header has no dependency on px-storage.
+ */
 
 /** writer control block */
 struct alignas(64) fuse_queue_writer {
@@ -196,7 +207,7 @@ struct alignas(64) fuse_queue_writer {
 struct alignas(64) fuse_queue_reader {
 	std::atomic<uint32_t> read;	/** read index updated by reader */
 	std::atomic<uint32_t> write;	/** write index updated by writer */
-	px::spinlock lock;
+	px::spinlock lock;		/** reader-side lock */
 	uint64_t pad_2[6];
 };
 
