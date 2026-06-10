@@ -844,6 +844,20 @@ static int build_bvec(struct fuse_req *req, int *rw, size_t off, size_t len,
 	return len;
 }
 
+/* Look up an in-flight fuse_req by (ctx-id, unique-id). Defined here so the
+ * lookup helper stays uring-local and dev.c doesn't grow a uring-specific
+ * symbol. Uses find_context() from pxd_core.h and request_find() from
+ * fuse_i.h, both already provided by release. */
+static struct fuse_req *request_find_in_ctx(unsigned ctx, u64 unique)
+{
+	struct pxd_context *pctx = find_context(ctx);
+
+	if (!pctx)
+		return NULL;
+
+	return request_find(&pctx->fc, unique);
+}
+
 static int io_import_bvec(struct io_kiocb *req, int *rw,
 			   const struct sqe_submit *s, struct bio_vec **iovec,
 			   struct iov_iter *iter)
