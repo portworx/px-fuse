@@ -192,15 +192,30 @@ struct ____cacheline_aligned fuse_queue_reader {
  * spin_lock.h so this header has no dependency on px-storage.
  */
 
-/** writer control block */
+/** writer control block.
+ *
+ * Layout follows master umq-master/px-fuse/fuse_i.h userspace half:
+ *   write (4) | read (4) | lock (4) | need_wake_up (4)
+ *   sequence (8) | committed_ (4) | in_runq (1) | pad_1[3]
+ *   pad_2[8] (32) = 64 bytes total under alignas(64).
+ *
+ * need_wake_up is the kernel<->userspace wake signaling slot for SQPOLL mode:
+ * the kernel sets it to IORING_SQ_NEED_WAKEUP before sleeping; userspace ORs
+ * in `will_wake_up` and issues PXD_IOC_WAKE_UP_SQO. committed_ and in_runq are
+ * userspace-only batching state (sync mode) and never touched by the kernel.
+ */
 struct alignas(64) fuse_queue_writer {
 	uint32_t write;         	/** cached write index */
 	uint32_t read;			/** cached read index */
 	pthread_spinlock_t lock;	/** writer lock */
-	bool in_runq;			/** a thread is processing the queue */
-	char pad_1[3];
+	uint32_t need_wake_up;		/** kernel SQ thread wake-up flags */
 	uint64_t sequence;        	/** next request sequence number */
-	uint64_t pad[5];
+	uint32_t committed_;		/** last write index committed to reader
+					 *  (userspace batched-commit cursor) */
+	bool in_runq;			/** a thread is processing the queue
+					 *  (userspace sync-drain dedupe flag) */
+	char pad_1[3];
+	uint32_t pad_2[8];
 };
 
 /** reader control block */
