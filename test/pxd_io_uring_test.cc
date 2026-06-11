@@ -3,22 +3,36 @@
  * Focused user-space gtests for the px-fuse io_uring transport.
  *
  * Self-contained: does NOT include fuse_i.h or pxd_io_uring.h.
- * The px-fuse userspace block in fuse_i.h is now standalone (no px-storage
- * dependency), but this test deliberately re-declares the minimum kernel
- * ABI surface (io_uring_sqe, cqe, params, IORING_* opcodes/flags) and
- * mirrors only the two CB fields it actually reads/writes via the mmap'd
- * queue (r.read, r.write). That keeps the test as a small, independent
- * ABI witness. If the kernel struct layout drifts, the static_assert below
- * catches it without needing a rebuild of every userspace consumer.
+ * The px-fuse fuse_queue_cb is shared between kernel and userspace and now
+ * exposes only typed data slots plus an opaque 32-byte lock_storage region
+ * at offset 32 of each half (kernel placement-inits spinlock_t there;
+ * userspace placement-inits pthread_spinlock_t / px::spinlock). This test
+ * deliberately re-declares the minimum kernel ABI surface (io_uring_sqe,
+ * cqe, params, IORING_* opcodes/flags) and mirrors only the two CB fields
+ * it actually reads/writes via the mmap'd queue (r.read, r.write). That
+ * keeps the test as a small, independent ABI witness. If the kernel struct
+ * layout drifts, the static_assert below catches it without needing a
+ * rebuild of every userspace consumer.
  * Sizes/offsets must match the kernel side of fuse_i.h:
  *
- *   struct fuse_queue_writer { uint32_t write, read; spinlock_t lock;
- *                              uint32_t need_wake_up; uint64_t sequence;
- *                              uint64_t pad[5]; }
- *       (cacheline-aligned, 64 bytes on typical configs)
- *   struct fuse_queue_reader { uint32_t read, write; uint32_t need_wake_up;
- *                              uint32_t pad; uint64_t pad_2[6]; }
- *       (cacheline-aligned, 64 bytes)
+ *   struct fuse_queue_writer {
+ *       uint32_t write;          // offset  0
+ *       uint32_t read;           // offset  4
+ *       uint64_t sequence;       // offset  8 (load-bearing only on user_requests_cb)
+ *       uint32_t need_wake_up;   // offset 16 (load-bearing only on requests_cb)
+ *       uint32_t committed_;     // offset 20 (userspace, requests_cb only)
+ *       uint8_t  in_runq;        // offset 24 (userspace, requests_cb only)
+ *       uint8_t  __pad1[7];      // offset 25..31
+ *       uint8_t  lock_storage[32]; // offset 32: spinlock_t / pthread_spinlock_t
+ *   }   (cacheline-aligned, 64 bytes)
+ *
+ *   struct fuse_queue_reader {
+ *       uint32_t read;             // offset  0
+ *       uint32_t write;            // offset  4
+ *       uint8_t  __pad1[24];       // offset  8..31
+ *       uint8_t  lock_storage[32]; // offset 32
+ *   }   (cacheline-aligned, 64 bytes)
+ *
  *   struct fuse_queue_cb { fuse_queue_writer w; fuse_queue_reader r; }
  *
  * So in a queue_cb the reader sub-struct starts at offset 64, with `read` at

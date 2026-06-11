@@ -1098,13 +1098,40 @@ __acquires(fc->lock)
 
 void fuse_queue_init_cb(struct fuse_queue_cb *cb)
 {
+	/*
+	 * Layout invariants for the shared-memory queue. The userspace side of
+	 * the mmap'd region indexes these structs by raw offset, so any field
+	 * relocation here is an ABI break. Catch it at build time. The lock
+	 * slot is a 32-byte opaque region; spinlock_t must fit (with headroom
+	 * for LOCKDEP/DEBUG_SPINLOCK growth).
+	 */
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, write)        != 0);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, read)         != 4);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, sequence)     != 8);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, need_wake_up) != 16);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, committed_)   != 20);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, in_runq)      != 24);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_writer, lock_storage) != 32);
+	BUILD_BUG_ON(sizeof(struct fuse_queue_writer)                 != 64);
+
+	BUILD_BUG_ON(offsetof(struct fuse_queue_reader, read)         != 0);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_reader, write)        != 4);
+	BUILD_BUG_ON(offsetof(struct fuse_queue_reader, lock_storage) != 32);
+	BUILD_BUG_ON(sizeof(struct fuse_queue_reader)                 != 64);
+
+	BUILD_BUG_ON(sizeof(spinlock_t) > 32);
+
 	cb->w.sequence = 1;
 	cb->w.read = 0;
 	cb->w.write = 0;
-	spin_lock_init(&cb->w.lock);
+	cb->w.need_wake_up = 0;
+	cb->w.committed_ = 0;
+	cb->w.in_runq = 0;
+	spin_lock_init(fuse_qw_lock(&cb->w));
 
 	cb->r.write = 0;
 	cb->r.read = 0;
+	spin_lock_init(fuse_qr_lock(&cb->r));
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	pxd_uring_init_cb(cb);

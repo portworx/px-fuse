@@ -402,10 +402,10 @@ static void io_cqring_add_event(struct io_ring_ctx *ctx, u64 user_data,
 
 	unsigned long flags;
 
-	spin_lock_irqsave(&cb->w.lock, flags);
+	spin_lock_irqsave(fuse_qw_lock(&cb->w), flags);
 	io_cqring_fill_event(ctx, user_data, res);
 	io_commit_cqring(ctx);
-	spin_unlock_irqrestore(&cb->w.lock, flags);
+	spin_unlock_irqrestore(fuse_qw_lock(&cb->w), flags);
 }
 
 static void io_ring_drop_ctx_refs(struct io_ring_ctx *ctx, unsigned refs)
