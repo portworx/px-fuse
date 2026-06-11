@@ -46,16 +46,22 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <gtest/gtest.h>
 #include <linux/fs.h>
+#include <linux/loop.h>
 #include <linux/types.h>
+#include <memory>
 #include <poll.h>
+#include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -165,6 +171,9 @@ static constexpr __u32 IORING_SETUP_SQ_AFF = (1U << 2);
 static constexpr __u8 IORING_OP_NOP = 0;
 static constexpr __u8 IORING_OP_READV = 1;
 static constexpr __u8 IORING_OP_WRITEV = 2;
+static constexpr __u8 IORING_OP_FSYNC = 3;
+
+static constexpr __u8 IOSQE_FIXED_FILE_ABI = (1U << 0);
 
 // Cacheline-aligned CB sub-structs.  We only touch r.read / r.write; w is
 // opaque from userspace's perspective (lock layout depends on kernel config).
@@ -720,6 +729,372 @@ TEST(PxdIoUring, ConcurrentOpens)
 	for (auto &th : tt)
 		th.join();
 	EXPECT_EQ(failures.load(), 0);
+}
+
+// ===========================================================================
+// Loop-device IO path (writev / readv / fsync via raw kernel ABI).
+//
+// These tests exercise the actual IO opcodes against a file-backed loop
+// device. The loop device gives us a block-device fd whose contents we
+// fully control, without needing a real pxd minor. The submission/CQE
+// drain logic mirrors the NopSubmitAndComplete idiom above (write into
+// requests[], bump r.requests_cb->r.write, ioctl RUN_IO_QUEUE, poll
+// r.responses_cb->r.write, read CQE).
+//
+// All tests here require root (loop control + register_file) and skip
+// when /dev/loop-control is absent.
+// ===========================================================================
+
+#define SKIP_IF_NO_LOOP_CONTROL()                                                            \
+	do {                                                                                   \
+		struct stat _st;                                                               \
+		if (::stat("/dev/loop-control", &_st) != 0) {                                  \
+			PXD_SKIP_AND_RETURN("/dev/loop-control not present");                  \
+		}                                                                              \
+	} while (0)
+
+// RAII: mkstemp + ftruncate + LOOP_CTL_GET_FREE + LOOP_SET_FD. dtor reverses.
+class FileBackedLoop {
+  public:
+	explicit FileBackedLoop(size_t size_bytes) : size_(size_bytes)
+	{
+		char tmpl[] = "/tmp/pxd_uring_loop_XXXXXX";
+		backing_fd_ = ::mkstemp(tmpl);
+		if (backing_fd_ < 0) {
+			err_ = std::string("mkstemp: ") + std::strerror(errno);
+			return;
+		}
+		backing_path_ = tmpl;
+		if (::ftruncate(backing_fd_, static_cast<off_t>(size_)) != 0) {
+			err_ = std::string("ftruncate: ") + std::strerror(errno);
+			return;
+		}
+
+		int ctl = ::open("/dev/loop-control", O_RDWR);
+		if (ctl < 0) {
+			err_ = std::string("open(loop-control): ") + std::strerror(errno);
+			return;
+		}
+		int loop_n = ::ioctl(ctl, LOOP_CTL_GET_FREE);
+		int saved = errno;
+		::close(ctl);
+		if (loop_n < 0) {
+			err_ = std::string("LOOP_CTL_GET_FREE: ") + std::strerror(saved);
+			return;
+		}
+		char path[64];
+		std::snprintf(path, sizeof(path), "/dev/loop%d", loop_n);
+		loop_path_ = path;
+
+		loop_fd_ = ::open(path, O_RDWR);
+		if (loop_fd_ < 0) {
+			err_ = std::string("open(") + path + "): " + std::strerror(errno);
+			return;
+		}
+		if (::ioctl(loop_fd_, LOOP_SET_FD, backing_fd_) != 0) {
+			err_ = std::string("LOOP_SET_FD: ") + std::strerror(errno);
+			return;
+		}
+		bound_ = true;
+	}
+
+	~FileBackedLoop()
+	{
+		if (bound_ && loop_fd_ >= 0)
+			(void)::ioctl(loop_fd_, LOOP_CLR_FD, 0);
+		if (loop_fd_ >= 0)
+			::close(loop_fd_);
+		if (backing_fd_ >= 0)
+			::close(backing_fd_);
+		if (!backing_path_.empty())
+			::unlink(backing_path_.c_str());
+	}
+
+	FileBackedLoop(const FileBackedLoop &) = delete;
+	FileBackedLoop &operator=(const FileBackedLoop &) = delete;
+
+	bool ok() const { return bound_ && err_.empty(); }
+	const std::string &error() const { return err_; }
+	int loop_fd() const { return loop_fd_; }
+	const std::string &loop_path() const { return loop_path_; }
+	size_t size() const { return size_; }
+
+  private:
+	size_t size_;
+	int backing_fd_{-1};
+	int loop_fd_{-1};
+	bool bound_{false};
+	std::string backing_path_;
+	std::string loop_path_;
+	std::string err_;
+};
+
+struct AlignedFree {
+	void operator()(void *p) const { std::free(p); }
+};
+using AlignedBuf = std::unique_ptr<uint8_t, AlignedFree>;
+
+static AlignedBuf make_aligned(size_t bytes)
+{
+	void *p = nullptr;
+	if (::posix_memalign(&p, 4096, bytes) != 0)
+		return AlignedBuf{};
+	return AlignedBuf{static_cast<uint8_t *>(p)};
+}
+
+static void fill_pattern(uint8_t *buf, size_t bytes, uint32_t seed)
+{
+	uint32_t s = seed * 2654435761u + 1u;
+	for (size_t i = 0; i < bytes; ++i) {
+		s = s * 1103515245u + 12345u;
+		buf[i] = static_cast<uint8_t>((s >> 16) & 0xff);
+	}
+}
+
+// Wait for a CQE at the given expected_write_pos in the responses ring.
+// Returns true if the CQE landed within `timeout`.
+static bool wait_for_cqe(Ring &r, uint32_t expected_write_pos,
+                         std::chrono::milliseconds timeout = std::chrono::seconds(2))
+{
+	auto deadline = std::chrono::steady_clock::now() + timeout;
+	while (std::chrono::steady_clock::now() < deadline) {
+		auto w = r.responses_cb->r.write.load(std::memory_order_acquire);
+		if (w >= expected_write_pos)
+			return true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	return false;
+}
+
+// Acknowledge `n` CQEs by bumping the consumer cursor on responses_cb.
+static void ack_cqes(Ring &r, uint32_t n)
+{
+	r.responses_cb->r.read.store(n, std::memory_order_release);
+}
+
+// Fill in a writev/readv SQE.
+static void prep_rw_sqe(io_uring_sqe_abi *sqe, __u8 opcode, __s32 fixed_fd_idx,
+                        __u64 off, iovec *iov, int iovcnt, __u64 user_data)
+{
+	std::memset(sqe, 0, sizeof(*sqe));
+	sqe->opcode = opcode;
+	sqe->flags = IOSQE_FIXED_FILE_ABI;
+	sqe->fd = fixed_fd_idx;
+	sqe->off = off;
+	sqe->addr = reinterpret_cast<__u64>(iov);
+	sqe->len = static_cast<__u32>(iovcnt);
+	sqe->user_data = user_data;
+}
+
+static void prep_fsync_sqe(io_uring_sqe_abi *sqe, __s32 fixed_fd_idx, __u64 user_data)
+{
+	std::memset(sqe, 0, sizeof(*sqe));
+	sqe->opcode = IORING_OP_FSYNC;
+	sqe->flags = IOSQE_FIXED_FILE_ABI;
+	sqe->fd = fixed_fd_idx;
+	sqe->user_data = user_data;
+}
+
+TEST(PxdIoUring, LoopDeviceSetupTeardown)
+{
+	SKIP_IF_NOT_ROOT();
+	SKIP_IF_NO_LOOP_CONTROL();
+
+	FileBackedLoop loop(1 << 20);
+	ASSERT_TRUE(loop.ok()) << loop.error();
+	EXPECT_GE(loop.loop_fd(), 0);
+
+	uint64_t sz = 0;
+	ASSERT_EQ(::ioctl(loop.loop_fd(), BLKGETSIZE64, &sz), 0)
+	    << strerror(errno);
+	EXPECT_EQ(sz, loop.size());
+}
+
+TEST(PxdIoUring, WritevReadvRoundTripOnLoop)
+{
+	SKIP_IF_NO_PXD_IO();
+	SKIP_IF_NOT_ROOT();
+	SKIP_IF_NO_LOOP_CONTROL();
+
+	FileBackedLoop loop(1 << 20);
+	ASSERT_TRUE(loop.ok()) << loop.error();
+
+	Ring r;
+	ASSERT_TRUE(r.fd.ok());
+	ASSERT_TRUE(r.setup(/*sq=*/8, /*cq=*/8));
+
+	int fixed_idx = ::ioctl(r.fd.get(), PXD_IOC_REGISTER_FILE, loop.loop_fd());
+	ASSERT_GE(fixed_idx, 0) << "REGISTER_FILE: " << strerror(errno);
+
+	constexpr size_t kIo = 64 * 1024;
+	constexpr uint64_t kOff = 4096;
+	auto wbuf = make_aligned(kIo);
+	auto rbuf = make_aligned(kIo);
+	ASSERT_TRUE(wbuf && rbuf);
+	fill_pattern(wbuf.get(), kIo, 0xC0FFEE);
+	std::memset(rbuf.get(), 0, kIo);
+
+	uint32_t sq_pos = 0;
+	uint32_t cq_pos = 0;
+
+	// 1) writev
+	{
+		iovec iov{wbuf.get(), kIo};
+		prep_rw_sqe(&r.requests[sq_pos], IORING_OP_WRITEV, fixed_idx,
+		            kOff, &iov, 1, 0x11);
+		++sq_pos;
+		r.requests_cb->r.write.store(sq_pos, std::memory_order_release);
+		ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+		ASSERT_TRUE(wait_for_cqe(r, cq_pos + 1)) << "writev CQE timeout";
+		auto cqe = r.responses[cq_pos];
+		EXPECT_EQ(cqe.user_data, 0x11ull);
+		EXPECT_EQ(cqe.res, static_cast<int>(kIo));
+		++cq_pos;
+		ack_cqes(r, cq_pos);
+	}
+
+	// 2) fsync to flush through
+	{
+		prep_fsync_sqe(&r.requests[sq_pos & 7], fixed_idx, 0x22);
+		++sq_pos;
+		r.requests_cb->r.write.store(sq_pos, std::memory_order_release);
+		ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+		ASSERT_TRUE(wait_for_cqe(r, cq_pos + 1)) << "fsync CQE timeout";
+		auto cqe = r.responses[cq_pos & 7];
+		EXPECT_EQ(cqe.user_data, 0x22ull);
+		EXPECT_EQ(cqe.res, 0);
+		++cq_pos;
+		ack_cqes(r, cq_pos);
+	}
+
+	// 3) readv
+	{
+		iovec iov{rbuf.get(), kIo};
+		prep_rw_sqe(&r.requests[sq_pos & 7], IORING_OP_READV, fixed_idx,
+		            kOff, &iov, 1, 0x33);
+		++sq_pos;
+		r.requests_cb->r.write.store(sq_pos, std::memory_order_release);
+		ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+		ASSERT_TRUE(wait_for_cqe(r, cq_pos + 1)) << "readv CQE timeout";
+		auto cqe = r.responses[cq_pos & 7];
+		EXPECT_EQ(cqe.user_data, 0x33ull);
+		EXPECT_EQ(cqe.res, static_cast<int>(kIo));
+		++cq_pos;
+		ack_cqes(r, cq_pos);
+	}
+
+	EXPECT_EQ(std::memcmp(wbuf.get(), rbuf.get(), kIo), 0)
+	    << "data mismatch between writev and readv";
+
+	EXPECT_EQ(::ioctl(r.fd.get(), PXD_IOC_UNREGISTER_FILE, fixed_idx), 0);
+}
+
+TEST(PxdIoUring, MultipleWritevsCompleteOnLoop)
+{
+	SKIP_IF_NO_PXD_IO();
+	SKIP_IF_NOT_ROOT();
+	SKIP_IF_NO_LOOP_CONTROL();
+
+	constexpr size_t kSize = 4 * 1024 * 1024;
+	constexpr size_t kBlock = 4096;
+	constexpr uint32_t kCount = 16;
+
+	FileBackedLoop loop(kSize);
+	ASSERT_TRUE(loop.ok()) << loop.error();
+
+	Ring r;
+	ASSERT_TRUE(r.fd.ok());
+	ASSERT_TRUE(r.setup(/*sq=*/kCount * 2, /*cq=*/kCount * 2));
+
+	int fixed_idx = ::ioctl(r.fd.get(), PXD_IOC_REGISTER_FILE, loop.loop_fd());
+	ASSERT_GE(fixed_idx, 0) << strerror(errno);
+
+	std::vector<AlignedBuf> wbufs;
+	wbufs.reserve(kCount);
+	std::vector<iovec> iovs(kCount);
+
+	const uint32_t sq_mask = r.params.sq_entries - 1;
+	for (uint32_t i = 0; i < kCount; ++i) {
+		wbufs.push_back(make_aligned(kBlock));
+		ASSERT_TRUE(wbufs.back() != nullptr);
+		fill_pattern(wbufs.back().get(), kBlock, 0x1000u + i);
+		iovs[i].iov_base = wbufs.back().get();
+		iovs[i].iov_len = kBlock;
+		prep_rw_sqe(&r.requests[i & sq_mask], IORING_OP_WRITEV, fixed_idx,
+		            static_cast<uint64_t>(i) * kBlock, &iovs[i], 1,
+		            0xA000ull + i);
+	}
+	r.requests_cb->r.write.store(kCount, std::memory_order_release);
+	ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+	ASSERT_TRUE(wait_for_cqe(r, kCount)) << "writev batch CQE timeout";
+	const uint32_t cq_mask = r.params.cq_entries - 1;
+	for (uint32_t i = 0; i < kCount; ++i) {
+		auto cqe = r.responses[i & cq_mask];
+		EXPECT_EQ(cqe.res, static_cast<int>(kBlock))
+		    << "writev[" << i << "] cqe.res";
+	}
+	ack_cqes(r, kCount);
+
+	// Read each block back and verify content.
+	auto rbuf = make_aligned(kBlock);
+	ASSERT_TRUE(rbuf != nullptr);
+	uint32_t sq_pos = kCount;
+	uint32_t cq_pos = kCount;
+	for (uint32_t i = 0; i < kCount; ++i) {
+		std::memset(rbuf.get(), 0, kBlock);
+		iovec iov{rbuf.get(), kBlock};
+		prep_rw_sqe(&r.requests[sq_pos & sq_mask], IORING_OP_READV,
+		            fixed_idx, static_cast<uint64_t>(i) * kBlock, &iov,
+		            1, 0xB000ull + i);
+		++sq_pos;
+		r.requests_cb->r.write.store(sq_pos, std::memory_order_release);
+		ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+		ASSERT_TRUE(wait_for_cqe(r, cq_pos + 1))
+		    << "readv[" << i << "] CQE timeout";
+		auto cqe = r.responses[cq_pos & cq_mask];
+		EXPECT_EQ(cqe.res, static_cast<int>(kBlock));
+		++cq_pos;
+		ack_cqes(r, cq_pos);
+
+		EXPECT_EQ(std::memcmp(rbuf.get(), wbufs[i].get(), kBlock), 0)
+		    << "block " << i << " mismatched after read-back";
+	}
+
+	EXPECT_EQ(::ioctl(r.fd.get(), PXD_IOC_UNREGISTER_FILE, fixed_idx), 0);
+}
+
+TEST(PxdIoUring, FsyncOnLoop)
+{
+	SKIP_IF_NO_PXD_IO();
+	SKIP_IF_NOT_ROOT();
+	SKIP_IF_NO_LOOP_CONTROL();
+
+	FileBackedLoop loop(1 << 20);
+	ASSERT_TRUE(loop.ok()) << loop.error();
+
+	Ring r;
+	ASSERT_TRUE(r.fd.ok());
+	ASSERT_TRUE(r.setup(/*sq=*/4, /*cq=*/4));
+
+	int fixed_idx = ::ioctl(r.fd.get(), PXD_IOC_REGISTER_FILE, loop.loop_fd());
+	ASSERT_GE(fixed_idx, 0) << strerror(errno);
+
+	prep_fsync_sqe(&r.requests[0], fixed_idx, 0xF0F0);
+	r.requests_cb->r.write.store(1u, std::memory_order_release);
+	ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+	ASSERT_TRUE(wait_for_cqe(r, 1u));
+	auto cqe = r.responses[0];
+	EXPECT_EQ(cqe.user_data, 0xF0F0ull);
+	EXPECT_EQ(cqe.res, 0);
+	ack_cqes(r, 1u);
+
+	EXPECT_EQ(::ioctl(r.fd.get(), PXD_IOC_UNREGISTER_FILE, fixed_idx), 0);
 }
 
 } // namespace
