@@ -172,8 +172,18 @@ static constexpr __u8 IORING_OP_NOP = 0;
 static constexpr __u8 IORING_OP_READV = 1;
 static constexpr __u8 IORING_OP_WRITEV = 2;
 static constexpr __u8 IORING_OP_FSYNC = 3;
+// px-fuse extension opcodes (see pxd_io_uring.h).
+static constexpr __u8 IORING_OP_DISCARD_FIXED = 11;
 
 static constexpr __u8 IOSQE_FIXED_FILE_ABI = (1U << 0);
+// io_discard always requires a blocking context (returns -EAGAIN if invoked
+// from a non-blocking SQ thread). IOSQE_FORCE_ASYNC pushes it onto the
+// workqueue path so it can block.
+static constexpr __u8 IOSQE_FORCE_ASYNC_ABI = (1U << 2);
+
+// px-fuse pxd.h: 1 MiB granularity. blkdev_issue_discard is taken only when
+// off and len are at least one full granularity, aligned.
+static constexpr uint64_t kPxdDiscardGranularity = (1ULL << 20);
 
 // Cacheline-aligned CB sub-structs.  We only touch r.read / r.write; w is
 // opaque from userspace's perspective (lock layout depends on kernel config).
@@ -1092,6 +1102,70 @@ TEST(PxdIoUring, FsyncOnLoop)
 	auto cqe = r.responses[0];
 	EXPECT_EQ(cqe.user_data, 0xF0F0ull);
 	EXPECT_EQ(cqe.res, 0);
+	ack_cqes(r, 1u);
+
+	EXPECT_EQ(::ioctl(r.fd.get(), PXD_IOC_UNREGISTER_FILE, fixed_idx), 0);
+}
+
+static void prep_discard_sqe(io_uring_sqe_abi *sqe, __s32 fixed_fd_idx,
+                             __u64 off, __u32 bytes, __u64 user_data)
+{
+	std::memset(sqe, 0, sizeof(*sqe));
+	sqe->opcode = IORING_OP_DISCARD_FIXED;
+	// IOSQE_FIXED_FILE for the registered fd, IOSQE_FORCE_ASYNC because
+	// io_discard short-circuits with -EAGAIN unless invoked in a blocking
+	// context (see px_fuse/io.c::io_discard).
+	sqe->flags = IOSQE_FIXED_FILE_ABI | IOSQE_FORCE_ASYNC_ABI;
+	sqe->fd = fixed_fd_idx;
+	sqe->off = off;
+	sqe->len = bytes;
+	sqe->addr = 0;
+	sqe->user_data = user_data;
+}
+
+TEST(PxdIoUring, DiscardAlignedRangeOnLoop)
+{
+	SKIP_IF_NO_PXD_IO();
+	SKIP_IF_NOT_ROOT();
+	SKIP_IF_NO_LOOP_CONTROL();
+
+	// 4 MiB loop so we can issue a 1 MiB-aligned discard cleanly. The
+	// kernel's io_discard takes the blkdev_issue_discard branch only when
+	// the range covers at least one full PXD_MAX_DISCARD_GRANULARITY (1
+	// MiB), aligned.
+	constexpr size_t kSize = 4 * 1024 * 1024;
+	constexpr uint64_t kOff = kPxdDiscardGranularity;     // 1 MiB
+	constexpr uint32_t kLen = kPxdDiscardGranularity;     // 1 MiB
+
+	FileBackedLoop loop(kSize);
+	ASSERT_TRUE(loop.ok()) << loop.error();
+
+	Ring r;
+	ASSERT_TRUE(r.fd.ok());
+	ASSERT_TRUE(r.setup(/*sq=*/4, /*cq=*/4));
+
+	int fixed_idx = ::ioctl(r.fd.get(), PXD_IOC_REGISTER_FILE, loop.loop_fd());
+	ASSERT_GE(fixed_idx, 0) << strerror(errno);
+
+	prep_discard_sqe(&r.requests[0], fixed_idx, kOff, kLen, 0xD15CA8D);
+	r.requests_cb->r.write.store(1u, std::memory_order_release);
+	ASSERT_EQ(::ioctl(r.fd.get(), PXD_IOC_RUN_IO_QUEUE), 0);
+
+	ASSERT_TRUE(wait_for_cqe(r, 1u)) << "discard CQE timeout";
+	auto cqe = r.responses[0];
+	EXPECT_EQ(cqe.user_data, 0xD15CA8Dull);
+
+	// Loop devices may or may not advertise discard support depending on
+	// the backing fs's fallocate(PUNCH_HOLE) capability and the kernel's
+	// loop discard configuration. Accept success (0) or the canonical
+	// "not supported" returns; anything else is a real failure.
+	int res = cqe.res;
+	bool acceptable = (res == 0) || (res == -EOPNOTSUPP) || (res == -EINVAL);
+	EXPECT_TRUE(acceptable)
+	    << "discard returned unexpected res=" << res << " ("
+	    << std::strerror(-res) << ")";
+	GTEST_LOG_(INFO) << "discard res=" << res
+	                 << (res == 0 ? " (ok)" : " (not supported by loop)");
 	ack_cqes(r, 1u);
 
 	EXPECT_EQ(::ioctl(r.fd.get(), PXD_IOC_UNREGISTER_FILE, fixed_idx), 0);
