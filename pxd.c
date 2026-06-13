@@ -693,10 +693,25 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	trace_pxd_ioswitch_complete(pxd_dev->dev_id, pxd_dev->minor, req->in.h.opcode);
 
 	if (req->in.h.opcode == PXD_FAILOVER_TO_USERSPACE) {
-		// if the status is successful, then reissue IO to userspace
-		// else fail IO to complete.
-		disableFastPath(pxd_dev, true);
-
+		// disableFastPath was already invoked upfront in
+		// pxd_initiate_failover(); fp.fastpath is already false by now.
+		// PX has now acknowledged the cross-replica switch, so it is
+		// safe to admit IOs into native path.
+		//
+		// Splice failQ AND clear active_failover atomically under one
+		// fail_lock critical section. Both conditions must flip together
+		// to avoid a race window where pxd_queue_rq or an in-flight
+		// pxd_io_failover from a late clone -EIO observes
+		// active_failover=true and adds a fresh fproot to failQ AFTER
+		// the splice but BEFORE the gate clears - that entry would be
+		// orphaned and never serviced (the next failover cycle would
+		// drain it but new -EIOs may never happen). With them flipped
+		// together, any racing caller either:
+		//   - takes the lock first, sees active_failover=true, parks
+		//     on failQ; we splice it together with the others, OR
+		//   - takes the lock after us, sees active_failover=false, and
+		//     takes the post-ack native path (pxd_queue_rq -> slowpath,
+		//     pxd_io_failover -> reroute branch).
 		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
 		list_splice(&pxd_dev->fp.failQ, &ios);
 		INIT_LIST_HEAD(&pxd_dev->fp.failQ);
@@ -704,10 +719,18 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 	}
 
-	// reopen the suspended device
+	// Unquiesce blk-mq. After this point, deferred dispatches resume:
+	// pxd_queue_rq sees active_failover=false and fp.fastpath=false and
+	// routes new IOs to native. Order between these and the parked IOs
+	// we drain below is unconstrained, which is fine - PX has already
+	// acknowledged the switch, so the cross-replica state is consistent
+	// regardless of arrival order at the fuse channel from here on.
 	pxd_request_resume_internal(pxd_dev);
 
-	// reissue any failed IOs from local list
+	// Drain parked IOs to fuse. status=0 -> reroute to slowpath;
+	// status!=0 (PX rejected the switch or abort_work tripped) ->
+	// fail each with -EIO. No-op for PXD_FALLBACK_TO_KERNEL (ios is
+	// the empty list initialized at function entry).
 	pxd_reissuefailQ(pxd_dev, &ios, status);
 
 	return true;
@@ -753,6 +776,8 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 int pxd_initiate_failover(struct pxd_device *pxd_dev)
 {
 	int rc;
+	bool gate_set_by_me = false;
+	unsigned long flags;
 
 	if (!fastpath_active(pxd_dev)) {
 		// already in native path
@@ -769,8 +794,31 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return 0; // already initiated, skip it.
 	}
 
+	// Set the active_failover gate here so that EVERY caller of
+	// pxd_initiate_failover gets the failQ-parking behavior - including
+	// the PX-storage ioctl path (pxd_request_ioswitch(PXD_FAILOVER_TO_USERSPACE)),
+	// which is what PX invokes from reconcile_state() on startup to drive
+	// every fastpath-active device through a clean failover. pxd_io_failover()
+	// also sets this flag in its prologue (atomic with adding the failing
+	// fproot to failQ); the cmpxchg-style check here keeps that idempotent -
+	// we only mark gate_set_by_me=true when WE flipped it, so we know to
+	// roll it back on failure paths without disturbing pxd_io_failover's
+	// in-progress state.
+	spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+	if (!pxd_dev->fp.active_failover) {
+		pxd_dev->fp.active_failover = true;
+		gate_set_by_me = true;
+	}
+	spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+
 	rc = pxd_request_suspend_internal(pxd_dev, false, true);
 	if (rc) {
+		if (gate_set_by_me) {
+			spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+			__pxd_abortfailQ(pxd_dev);
+			pxd_dev->fp.active_failover = false;
+			spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+		}
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 		return rc;
 	}
@@ -778,9 +826,32 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
 	if (rc) {
 		pxd_request_resume(pxd_dev);
+		if (gate_set_by_me) {
+			spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+			__pxd_abortfailQ(pxd_dev);
+			pxd_dev->fp.active_failover = false;
+			spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+		}
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
+		return rc;
 	}
-	return rc;
+
+	// Failover req is now queued to PX userspace. Disable fastpath
+	// upfront so subsequent IOs arriving at pxd_queue_rq see
+	// fp.fastpath=false and route to native path - they will queue
+	// in the fuse channel *behind* the failover req, preserving the
+	// ordering invariant that PX sees the failover request first and
+	// orchestrates the cross-replica switch before any native IO is
+	// presented. Without this move, the small window between
+	// pxd_request_suspend_internal returning and PX acknowledging the
+	// switch could otherwise admit new fastpath IOs (e.g., via
+	// in-flight workers or any path not gated by the blk-mq quiesce).
+	// failQ remains undrained here - the drain happens in
+	// pxd_process_ioswitch_complete only after PX's ack confirms
+	// remote replicas have completed the switch.
+	disableFastPath(pxd_dev, true);
+
+	return 0;
 }
 
 int pxd_initiate_fallback(struct pxd_device *pxd_dev)
@@ -965,6 +1036,66 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 {
 	struct fp_root_context *fproot = &req->fproot;
 	fp_root_context_init(fproot);
+
+	// Failover orchestration gate.
+	// While active_failover=true the device has a PXD_FAILOVER_TO_USERSPACE
+	// request outstanding to PX, fastpath is being torn down, and no new
+	// IO may bypass the failover handshake. Park this request on failQ -
+	// pxd_process_ioswitch_complete will drain it to native path (slowpath)
+	// AFTER PX acks, so that PX has orchestrated the cross-replica switch
+	// before any IO is presented on the native path.
+	//
+	// Hot-path optimization: double-checked locking.
+	//   - First do an unlocked READ_ONCE - in the steady state
+	//     (no failover in flight) this is a single load and we go
+	//     straight to fastpath without ever touching fail_lock.
+	//   - Only if the unlocked read sees active_failover set do we
+	//     acquire fail_lock to re-confirm and park the fproot under
+	//     the same critical section that pxd_io_failover and the
+	//     completer use, preserving the failQ enqueue/splice invariant.
+	//
+	// Race the unlocked check tolerates:
+	//   active_failover transitions false -> true (set in pxd_io_failover
+	//   or pxd_initiate_failover, under fail_lock) just AFTER our read.
+	//   The IO proceeds to fastpath. Consequence is benign: it either
+	//   completes normally, or if its clone returns -EIO the existing
+	//   _end_clone_bio -> pxd_failover_initiate -> pxd_io_failover path
+	//   will by then observe active_failover=true (now visible because
+	//   it acquires fail_lock) and append the fproot to failQ. By the
+	//   time pxd_request_suspend_internal's blk_mq_quiesce_queue returns
+	//   from the originator, no further dispatches are admitted, so the
+	//   leak window is bounded.
+	//
+	// Race the locked re-check closes:
+	//   active_failover transitions true -> false (cleared in
+	//   pxd_process_ioswitch_complete under fail_lock) between our
+	//   unlocked read and the lock acquire. The locked re-check sees
+	//   false, we drop the lock and fall through to the fastpath branch -
+	//   which is correct because by then the completer has also drained
+	//   failQ and unquiesced blk-mq.
+	//
+	// Important properties:
+	//   - blk_mq_quiesce_queue (called inside pxd_initiate_failover via
+	//     pxd_request_suspend_internal) only synchronizes against new
+	//     dispatch, not against in-flight requests, so parking a started
+	//     request on failQ does NOT deadlock the quiesce.
+	//   - This check covers the case "IO is NOT in fastpath but failover
+	//     is in progress": once disableFastPath has flipped fp.fastpath
+	//     to false, the bare check on fp.fastpath alone would otherwise
+	//     leak IOs straight to native before PX has switched the targets.
+	//   - active_failover is set by pxd_io_failover() / pxd_initiate_failover()
+	//     and cleared only in pxd_process_ioswitch_complete() after the
+	//     ack, so this gate captures the full failover window end-to-end.
+	if (READ_ONCE(pxd_dev->fp.active_failover)) {
+		unsigned long flags;
+		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		if (pxd_dev->fp.active_failover) {
+			list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+			spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+			return BLK_STS_OK;
+		}
+		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+	}
 
 	// rcu read side critical section can't sleep
 	// fastpath_queue_work -> kthread_queue_work
@@ -1766,6 +1897,163 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	}
 }
 
+// pxdctx_reset_fastpath - reset fastpath state for every device on this ctx.
+//
+// Unlike pxdctx_set_connected(false), this does NOT touch pxd_dev->connected.
+// It is intended for the backstop path (pxd_abort_context, at
+// T+pxd_timeout_secs) where fc->allow_disconnected has already been flipped
+// to 0 and fuse_end_queued_requests has failed every queued fuse req - so
+// pxd_dev->connected adds nothing functionally and the only remaining job
+// is to tear down fastpath state per device.
+//
+// Uses the same snapshot-then-iterate pattern as pxdctx_set_connected()
+// disable path. The rationale is identical: pxd_fastpath_reset_device ->
+// disableFastPath -> pxd_suspend_io -> blk_mq_quiesce_queue can sleep, so
+// ctx->lock (spinlock) must be dropped before calling it. Refcount each
+// snapshotted pxd_dev to protect against parallel pxd_finish_remove racing
+// with us.
+static void pxdctx_reset_fastpath(struct pxd_context *ctx)
+{
+	size_t ndevs;
+	struct pxd_device **snap_list;
+	struct pxd_device *pxd_dev;
+	size_t i = 0;
+	size_t j;
+
+	// step 1: count entries under ctx->lock
+	spin_lock(&ctx->lock);
+	ndevs = ctx->num_devices;
+	spin_unlock(&ctx->lock);
+
+	// step 2: allocate snapshot list (may sleep, not under lock)
+	snap_list = kcalloc(ndevs, sizeof(*snap_list), GFP_KERNEL);
+
+	if (snap_list) {
+		// step 3: fill snapshot with refcounted device pointers
+		spin_lock(&ctx->lock);
+		list_for_each_entry(pxd_dev, &ctx->list, node) {
+			if (i >= ndevs) {
+				pr_warn("%s: ctx->list has more entries than snap_list, ignoring extra entries, devID : %llu minor %d\n",
+					__func__, pxd_dev->dev_id, pxd_dev->minor);
+				break;
+			}
+			get_device(&pxd_dev->dev);
+			snap_list[i++] = pxd_dev;
+		}
+		spin_unlock(&ctx->lock);
+
+		// step 4: walk the snapshot without ctx->lock; safe to sleep
+		for (j = 0; j < i; j++) {
+			pxd_fastpath_reset_device(snap_list[j]);
+			put_device(&snap_list[j]->dev);
+		}
+
+		// step 5: free snapshot
+		kfree(snap_list);
+		return;
+	}
+
+	// kcalloc failed: one-at-a-time pickup, O(n^2) but allocation-free.
+	// We can't use pxd_dev->connected as the "already processed" sentinel
+	// (we deliberately don't touch it), so use fastpath_active() instead:
+	// pxd_fastpath_reset_device clears fp.fastpath via disableFastPath,
+	// which makes the candidate predicate false on subsequent iterations.
+	for (;;) {
+		struct pxd_device *picked = NULL;
+
+		spin_lock(&ctx->lock);
+		list_for_each_entry(pxd_dev, &ctx->list, node) {
+			if (fastpath_enabled(pxd_dev) && fastpath_active(pxd_dev)) {
+				get_device(&pxd_dev->dev);
+				picked = pxd_dev;
+				break;
+			}
+		}
+		spin_unlock(&ctx->lock);
+
+		if (!picked) {
+			// no fastpath-active devices left
+			break;
+		}
+
+		pxd_fastpath_reset_device(picked);
+		put_device(&picked->dev);
+	}
+}
+
+// __pxdctx_arm_failover_gate - flip active_failover=true for every
+// fastpath-active device on this ctx. Caller MUST hold ctx->lock.
+//
+// The __ prefix follows the codebase convention (__pxd_abortfailQ,
+// __pxd_add2failQ): "caller is responsible for the surrounding lock."
+// Invoked from pxd_control_release() inside its existing ctx->lock
+// critical section to stop new IOs immediately on PX disconnect.
+//
+// This is NOT a failover initiation - we do not send a PXD_FAILOVER_TO_USERSPACE
+// fuse req, do not suspend blk-mq, do not disable fastpath, and do not touch
+// ioswitch_active. We only set the gate that pxd_queue_rq reads to decide
+// whether new dispatches park on failQ. The actual failover is initiated by
+// PX-storage on its next startup via the ioctl path
+// (pxd_request_ioswitch(PXD_FAILOVER_TO_USERSPACE) -> pxd_initiate_failover);
+// the gate we set here simply makes the parking start sooner so the application
+// experiences an immediate stall on PX-down instead of running ahead in
+// fastpath until PX comes back.
+//
+// Steady-state effect during the PX-down window:
+//   - new IO at pxd_queue_rq: unlocked READ_ONCE(active_failover) sees true,
+//     takes the fail_lock branch, list_add_tail to failQ, returns BLK_STS_OK.
+//     The application sees the IO as not-yet-completed and blocks (libaio
+//     iodepth fills up; sync IO blocks).
+//   - fastpath dispatches already past pxd_queue_rq continue against their
+//     backings and complete normally - nothing recalls them, and they're safe
+//     because they pre-date the disconnect.
+//   - if any of those in-flight clones -EIO, pxd_io_failover sees
+//     active_failover=true and adds the fproot to failQ via the else branch.
+//
+// On PX reopen, PX-storage's reconcile_state() ioctls PXD_FAILOVER_TO_USERSPACE
+// per fastpath_active device. pxd_initiate_failover runs, sees active_failover
+// already set (gate_set_by_me=false, so it won't roll it back on failure),
+// suspends, sends the fuse req, disables fastpath. PX writes the ack;
+// pxd_process_ioswitch_complete drains failQ via pxdmq_reroute_slowpath,
+// clears active_failover, unquiesces blk-mq. The parked IOs proceed through
+// native path; new IOs after that point also take native (gate cleared,
+// fp.fastpath cleared) until PX initiates a fallback to restore fastpath.
+//
+// If PX never returns within pxd_timeout_secs, the existing abort_work
+// backstop fires: fuse_end_queued_requests + pxdctx_reset_fastpath ->
+// pxd_fastpath_reset_device's defensive __pxd_abortfailQ fails the parked
+// IOs with -EIO.
+//
+// We deliberately do not use the snapshot+refcount pattern here because
+// nothing in the per-device loop can sleep - a single smp_store_release per
+// device finishes in nanoseconds, so the caller can safely hold ctx->lock
+// across the walk.
+static void __pxdctx_arm_failover_gate(struct pxd_context *ctx)
+{
+	struct list_head *cur;
+
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd_dev =
+			container_of(cur, struct pxd_device, node);
+
+		// Only meaningful for fastpath-active devices. Native-path
+		// devices already route to fuse via slowpath; gating them
+		// would just stall IO without benefit. fastpath_enabled() is
+		// the "registered as fastpath-capable" flag (persistent);
+		// fastpath_active() is the current state (fp.fastpath).
+		if (!fastpath_enabled(pxd_dev) || !fastpath_active(pxd_dev))
+			continue;
+
+		// active_failover is a single-byte gate flag; we don't touch
+		// failQ in this path so the per-device fail_lock isn't needed.
+		// smp_store_release publishes the write so the subsequent
+		// READ_ONCE on the pxd_queue_rq side observes it without
+		// further synchronization. ctx->lock (held by caller) covers
+		// the list walk only - separate concern.
+		smp_store_release(&pxd_dev->fp.active_failover, true);
+	}
+}
+
 static struct pxd_device *dev_to_pxd_dev(struct device *dev)
 {
 	return container_of(dev, struct pxd_device, dev);
@@ -2356,13 +2644,35 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		return 0;
 	}
 
+	// Single ctx->lock critical section: arm the failover gate (so new IOs
+	// stop immediately on PX-down by parking on failQ via pxd_queue_rq) AND
+	// flip fc->connected to 0.
+	//
+	// Arming the gate is NOT a failover initiation - no fuse req, no
+	// suspend, no fastpath disable, no ioswitch_active touch. The actual
+	// failover is initiated by PX-storage on its next startup via
+	// reconcile_state -> PXD_FAILOVER_TO_USERSPACE ioctl ->
+	// pxd_initiate_failover, which sees active_failover already set
+	// (gate_set_by_me=false, no rollback risk), suspends, sends the fuse
+	// req, disables fastpath. PX writes the ack;
+	// pxd_process_ioswitch_complete drains the parked failQ to native via
+	// pxdmq_reroute_slowpath, clears active_failover, unquiesces blk-mq.
+	// Application sees IO pause during PX-down and resume in native as
+	// soon as PX completes its failover - no 10-min stall, no IO loss.
 	spin_lock(&ctx->lock);
+	__pxdctx_arm_failover_gate(ctx);
 	if (READ_ONCE(ctx->fc.connected) == 0) {
 		pxd_printk("%s: not opened\n", __func__);
 	} else {
 		WRITE_ONCE(ctx->fc.connected, 0);
 	}
 
+	// abort_work is the only backstop: if PX never returns within
+	// pxd_timeout_secs, it flips fc->allow_disconnected=0, fails any
+	// queued fuse reqs, and runs pxdctx_reset_fastpath which (via
+	// pxd_fastpath_reset_device's defensive __pxd_abortfailQ) fails
+	// the parked failQ IOs with -EIO. Application sees error rather
+	// than indefinite hang.
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
 
@@ -2402,7 +2712,17 @@ static void pxd_abort_context(struct work_struct *work)
 	spin_lock(&fc->lock);
 	fuse_end_queued_requests(fc);
 	spin_unlock(&fc->lock);
-	pxdctx_set_connected(ctx, false);
+
+	// PX is permanently gone (no reopen within pxd_timeout_secs). Tear down
+	// fastpath per device. We switched from pxdctx_set_connected(ctx,false)
+	// to pxdctx_reset_fastpath(ctx) so we don't also flip pxd_dev->connected:
+	// that flag only gates pxd_open at the bdev layer, and with
+	// fc->allow_disconnected=0 already set above plus fuse_end_queued_requests
+	// having flushed every pending IO with an error, flipping it adds no
+	// safety. pxd_fastpath_reset_device (invoked per device) also runs a
+	// defensive __pxd_abortfailQ to fail any IO still parked on failQ -
+	// e.g., the post-ack tail window where active_failover is being cleared.
+	pxdctx_reset_fastpath(ctx);
 }
 
 static int pxd_context_init(struct pxd_context *ctx, int i)
