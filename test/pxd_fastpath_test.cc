@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <atomic>
 #include <boost/iostreams/device/file_descriptor.hpp>
 #include <boost/lexical_cast.hpp>
+#include <chrono>
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
@@ -1339,4 +1341,298 @@ TEST_P(PxdFastpathTest, write_zeroes_disabled_fastpath_with_capability)
     dev_remove_fastpath(add_v2.dev_id);
 
     std::cout << "=== Test PASSED: WriteZero disabled for fastpath ===" << std::endl;
+}
+
+// Read the per-device sysfs fastpath attribute (1 = fastpath active, 0 = native).
+static std::string read_fastpath_sysfs(int minor)
+{
+    int minor_num = minor & MINORMASK;
+    std::string path = "/sys/devices/pxd/" + std::to_string(minor_num) + "/fastpath";
+    std::ifstream f(path);
+    std::string status;
+    if (!(f >> status)) return std::string();
+    return status;
+}
+
+// Helper: push an unsolicited PXD_FAILOVER_TO_USERSPACE/PXD_FALLBACK_TO_KERNEL
+// notify into the kernel via the control fd. Mirrors the format used by
+// pxd-storage to drive force-switch from userspace.
+static ssize_t send_ioswitch_notify(int ctl_fd, uint64_t dev_id, int opcode)
+{
+    fuse_out_header oh;
+    pxd_ioswitch req;
+    struct iovec iov[2];
+
+    oh.unique = 0;
+    oh.error = opcode;
+    oh.len = sizeof(oh) + sizeof(req);
+
+    req.dev_id = dev_id;
+
+    iov[0].iov_base = &oh;
+    iov[0].iov_len = sizeof(oh);
+    iov[1].iov_base = &req;
+    iov[1].iov_len = sizeof(req);
+
+    return writev(ctl_fd, iov, 2);
+}
+
+// Reply success to a marker req surfaced from the kernel side.
+static ssize_t ack_marker_req(int ctl_fd, uint64_t unique)
+{
+    fuse_out_header oh;
+    oh.unique = unique;
+    oh.error = 0;
+    oh.len = sizeof(oh);
+    return ::write(ctl_fd, &oh, sizeof(oh));
+}
+
+// Test: PX-storage death (control fd close) on a fastpath-active device.
+//
+// Before PWX-49986, a closed PX control fd left fastpath armed; the next IO
+// error triggered pxd_io_failover but failover could only complete after the
+// abort_work backstop fired at T+PXD_TIMER_SECS_DEFAULT (~10 minutes).
+//
+// After the fix, pxd_control_release drives pxdctx_initiate_failover before
+// flipping fc->connected to 0. This test asserts: (a) close(ctl_fd) returns
+// promptly (no 10-min stall), (b) the device drops out of fastpath as soon
+// as the close returns (sysfs reflects fp.fastpath = 0).
+TEST_P(PxdFastpathTest, px_storage_death_triggers_immediate_failover)
+{
+    BackingDeviceType device_type = GetParam();
+    std::string backing_str = (device_type == BackingDeviceType::BACKING_FILE)
+                                 ? "backing file"
+                                 : "loop device";
+    std::cout << "=== Test: PX-storage death triggers immediate failover ("
+              << backing_str << ") ===" << std::endl;
+
+    pxd_add_ext_out add_ext;
+    add_ext.dev_id = 400;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+
+    std::string device_name;
+    int minor;
+    dev_add_fastpath(add_ext, minor, device_name);
+
+    ASSERT_EQ(read_fastpath_sysfs(minor), "1")
+        << "Device should be in fastpath before PX-storage death";
+
+    perform_io_test(device_name);
+
+    auto t0 = std::chrono::steady_clock::now();
+    close(ctl_fd);
+    ctl_fd = -1;
+    auto t1 = std::chrono::steady_clock::now();
+    long close_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "ctl_fd close took " << close_ms << " ms" << std::endl;
+
+    // 10s ceiling: pxd_initiate_failover's suspend path has up to a 60s
+    // sync wait, but with no in-flight IOs and a single device the actual
+    // close should complete in well under a second. The point of the
+    // assertion is to catch regressions to the pre-fix 10-minute path.
+    EXPECT_LT(close_ms, 10000)
+        << "ctl_fd close took " << close_ms
+        << " ms - regression: should not wait on the 10-min abort timer";
+
+    // disableFastPath runs inside pxd_initiate_failover, so fp.fastpath
+    // should be cleared by the time close() returns. Allow a small grace
+    // window for sysfs visibility.
+    bool fp_cleared = false;
+    for (int i = 0; i < 50; i++) {
+        if (read_fastpath_sysfs(minor) == "0") {
+            fp_cleared = true;
+            break;
+        }
+        usleep(100000);
+    }
+    EXPECT_TRUE(fp_cleared)
+        << "Device should be in native path after PX-storage death";
+
+    // Reopen control fd so the TearDown path can drive PXD_REMOVE.
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &args), 0);
+}
+
+// Test: userspace-driven force switch (failover -> fallback) while IOs flow.
+//
+// Validates the full driver-side switch protocol when PX-storage explicitly
+// requests the path change while application IO is in flight:
+//   1. Continuous writer thread issues O_DIRECT pwrites against the fastpath
+//      device. Before failover, those bypass the fuse channel entirely.
+//   2. PXD_FAILOVER_TO_USERSPACE notify forces failover. We expect a
+//      PXD_FAILOVER_TO_USERSPACE marker fuse req surfaced on ctl_fd, and
+//      subsequent PXD_WRITE reqs once the marker is acked (writes now flow
+//      through fuse on the native path).
+//   3. PXD_FALLBACK_TO_KERNEL notify forces fallback marker - we ack that too.
+TEST_P(PxdFastpathTest, force_failover_fallback_while_io_flows)
+{
+    BackingDeviceType device_type = GetParam();
+    std::string backing_str = (device_type == BackingDeviceType::BACKING_FILE)
+                                 ? "backing file"
+                                 : "loop device";
+    std::cout << "=== Test: Force failover/fallback while IOs flow ("
+              << backing_str << ") ===" << std::endl;
+
+    pxd_add_ext_out add_ext;
+    add_ext.dev_id = 401;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+
+    std::string device_name;
+    int minor;
+    dev_add_fastpath(add_ext, minor, device_name);
+
+    ASSERT_EQ(read_fastpath_sysfs(minor), "1")
+        << "Device should be in fastpath at test start";
+
+    std::atomic<int> failover_markers{0};
+    std::atomic<int> fallback_markers{0};
+    std::atomic<int> native_writes{0};
+    std::atomic<int> native_reads{0};
+    std::atomic<int> other_reqs{0};
+    std::atomic<bool> drainer_stop{false};
+
+    // Drainer thread plays the PX-storage role: replies to marker reqs and
+    // services any IOs that surface on the fuse channel (those imply the
+    // device is in native mode).
+    std::thread drainer([&]() {
+        struct rdwr_in rdwr;
+        while (!drainer_stop) {
+            int ret = wait_msg(1);
+            if (ret == -ETIMEDOUT || ret != 0) continue;
+
+            ssize_t n = read(ctl_fd, &rdwr, sizeof(rdwr));
+            if (n <= 0) continue;
+
+            switch (rdwr.in.opcode) {
+            case PXD_FAILOVER_TO_USERSPACE:
+                ack_marker_req(ctl_fd, rdwr.in.unique);
+                failover_markers++;
+                break;
+            case PXD_FALLBACK_TO_KERNEL:
+                ack_marker_req(ctl_fd, rdwr.in.unique);
+                fallback_markers++;
+                break;
+            case PXD_WRITE:
+                native_writes++;
+                finish_io(&rdwr);
+                break;
+            case PXD_READ:
+                native_reads++;
+                finish_io(&rdwr);
+                break;
+            default:
+                other_reqs++;
+                fail_io(&rdwr);
+            }
+        }
+    });
+
+    std::atomic<bool> io_stop{false};
+    std::atomic<int> io_ok{0};
+    std::atomic<int> io_err{0};
+    std::thread io_thread([&]() {
+        int fd = open(device_name.c_str(), O_RDWR | O_DIRECT);
+        if (fd < 0) return;
+        auto buf = aligned_buffer_fastpath(4096);
+        init_pattern_fastpath(buf.get(), 4096);
+
+        uint64_t off = 0;
+        while (!io_stop) {
+            ssize_t w = pwrite(fd, buf.get(), 4096, off % (50 * 1024 * 1024));
+            if (w == 4096) {
+                io_ok++;
+            } else {
+                io_err++;
+            }
+            off += 4096;
+            // Brief pause keeps the test from being dominated by IO churn.
+            usleep(1000);
+        }
+        close(fd);
+    });
+
+    // Let IOs flow on the fastpath for a moment.
+    sleep(1);
+
+    // Baseline: nothing should have hit the fuse channel while in fastpath.
+    int baseline_native_writes = native_writes.load();
+    EXPECT_EQ(baseline_native_writes, 0)
+        << "Expected zero fuse PXD_WRITE while in fastpath";
+
+    // Force failover.
+    ssize_t w = send_ioswitch_notify(ctl_fd, add_ext.dev_id,
+                                     PXD_FAILOVER_TO_USERSPACE);
+    ASSERT_GT(w, 0) << "PXD_FAILOVER_TO_USERSPACE notify failed: "
+                    << strerror(errno);
+
+    // Failover marker should surface and be acked.
+    for (int i = 0; i < 100; i++) {
+        if (failover_markers >= 1) break;
+        usleep(100000);
+    }
+    ASSERT_GE(failover_markers.load(), 1)
+        << "Failover marker was never surfaced to userspace";
+
+    // disableFastPath ran inside pxd_initiate_failover - sysfs should reflect
+    // native path now.
+    bool fp_cleared = false;
+    for (int i = 0; i < 50; i++) {
+        if (read_fastpath_sysfs(minor) == "0") {
+            fp_cleared = true;
+            break;
+        }
+        usleep(100000);
+    }
+    EXPECT_TRUE(fp_cleared) << "fastpath should be disabled after failover";
+
+    // Let IOs land on the native path for a moment.
+    sleep(1);
+    EXPECT_GT(native_writes.load(), baseline_native_writes)
+        << "Expected PXD_WRITE through fuse after failover";
+
+    // Force fallback marker. The marker itself does not re-arm fastpath
+    // (PX-storage drives that via the separate path-setup protocol), so we
+    // just verify the kernel surfaces the marker and accepts an ack.
+    w = send_ioswitch_notify(ctl_fd, add_ext.dev_id, PXD_FALLBACK_TO_KERNEL);
+    ASSERT_GT(w, 0) << "PXD_FALLBACK_TO_KERNEL notify failed: "
+                    << strerror(errno);
+
+    for (int i = 0; i < 100; i++) {
+        if (fallback_markers >= 1) break;
+        usleep(100000);
+    }
+    ASSERT_GE(fallback_markers.load(), 1)
+        << "Fallback marker was never surfaced to userspace";
+
+    // Tear down threads in the safe order: writer first (so no more reqs are
+    // queued), then drainer (so it doesn't race dev_remove's own cleaner on
+    // ctl_fd).
+    io_stop = true;
+    io_thread.join();
+    drainer_stop = true;
+    drainer.join();
+
+    std::cout << "Counters: failover=" << failover_markers.load()
+              << " fallback=" << fallback_markers.load()
+              << " native_writes=" << native_writes.load()
+              << " native_reads=" << native_reads.load()
+              << " io_ok=" << io_ok.load() << " io_err=" << io_err.load()
+              << std::endl;
 }
