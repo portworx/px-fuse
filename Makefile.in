@@ -143,8 +143,10 @@ PXDEFINES += -D__ELREPO9__
 endif
 
 # Oracle UEK Specific kernel checks
-ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(7|8|9|10)uek\.x86_64'; echo $$?),0)
+ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el(7|8|9)uek\.x86_64'; echo $$?),0)
 PXDEFINES += -D__ORACLE_UEK__
+else ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el10uek\.x86_64'; echo $$?),0)
+PXDEFINES += -D__ORACLE_UEK10__
 endif
 
 # Detect SUSE Linux Micro 6.0 or 6.1 inside PX container
