@@ -21,6 +21,7 @@ struct pxd_context {
 	int id;
 	struct miscdevice miscdev;
 	struct delayed_work abort_work;
+	struct work_struct failover_work;
 
 	uint64_t open_seq;
 };

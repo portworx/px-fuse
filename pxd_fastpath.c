@@ -745,6 +745,8 @@ out_file_failed:
 // the abort_work backstop (pxd_abort_context) via pxdctx_reset_fastpath()
 // at T+pxd_timeout_secs when PX never reopened the control fd.
 //
+// All below is true when @fail_io is true, otherwise, IOs are held within failQ waiting for either abort timer to fail them
+// or px-storage to come online and process them.
 // Important: this function never requeues IO. Any IO that hasn't already
 // completed must be failed here. Requeueing to native path is unsafe in
 // the node-wipe / device-remove case because:
@@ -755,7 +757,7 @@ out_file_failed:
 //     servicing the fuse channel) is the thing being torn down.
 // Routing to native is only safe inside pxd_process_ioswitch_complete after
 // a real PX ack of PXD_FAILOVER_TO_USERSPACE.
-void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	struct pxd_context *ctx = pxd_dev->ctx;
@@ -763,12 +765,13 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 	struct fuse_req *req;
 	unsigned long flags;
 	bool ioswitch_active;
+	struct list_head ios;
 
 	if (!fastpath_enabled(pxd_dev)) {
 		return;
 	}
 
-	disableFastPath(pxd_dev, true);
+	disableFastPath(pxd_dev, skip_sync);
 
 	ioswitch_active = atomic_read(&fp->ioswitch_active);
 	// abort any inflight ioswitch.
@@ -797,15 +800,24 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev)
 	// completer path above did not run, or it ran but failed to find the
 	// req), failQ may still hold IOs. Fail them with -EIO so callers in
 	// D state on these requests are released; never requeue.
-	spin_lock_irqsave(&fp->fail_lock, flags);
-	if (!list_empty(&fp->failQ)) {
-		printk(KERN_WARNING "pxd device %llu: reset with %s failQ; failing all\n",
-			pxd_dev->dev_id,
-			ioswitch_active ? "leftover" : "non-empty");
-		__pxd_abortfailQ(pxd_dev);
-		fp->active_failover = false;
+	if (fail_io) {
+		spin_lock_irqsave(&fp->fail_lock, flags);
+		if (!list_empty(&fp->failQ)) {
+			printk(KERN_WARNING "pxd device %llu: reset with %s failQ; failing all\n",
+				pxd_dev->dev_id,
+				ioswitch_active ? "leftover" : "non-empty");
+			__pxd_abortfailQ(pxd_dev);
+			fp->active_failover = false;
+		}
+		spin_unlock_irqrestore(&fp->fail_lock, flags);
+	} else {
+		// reissue IOs to native path
+                INIT_LIST_HEAD(&ios);
+                spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+                list_splice_init(&pxd_dev->fp.failQ, &ios);
+                spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+                pxd_reissuefailQ(pxd_dev, &ios, 0);
 	}
-	spin_unlock_irqrestore(&fp->fail_lock, flags);
 
 	// resume from userspace IO suspends
 	pxd_request_resume(pxd_dev);

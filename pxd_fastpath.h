@@ -113,7 +113,9 @@ void pxd_abortfailQ(struct pxd_device *pxd_dev);
 
 // reset device called during device cleanup actions from any internal state.
 // consider node wipe, device remove while suspended etc.
-void pxd_fastpath_reset_device(struct pxd_device *pxd_dev);
+// skip_sync: if false, wait for IO to sync before reset; if true, skip sync
+// fail_io: if true, all queued IO on device will be failed immediately
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io);
 
 
 static inline

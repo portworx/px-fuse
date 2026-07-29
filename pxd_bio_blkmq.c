@@ -569,6 +569,32 @@ static void pxd_io_failover(struct kthread_work *work) {
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+	// userspace down for a very long time
+	if (pxd_dev->connected == false) {
+		/* fail right away */
+		struct fuse_req* req = fproot_to_fuse_request(fproot);
+                clone_cleanup(fproot);
+#ifndef __PX_BLKMQ__
+                blk_end_request(req->rq, -EIO, blk_rq_bytes(req->rq));
+                fuse_request_free(req);
+#else
+                blk_mq_end_request(req->rq, BLK_STS_IOERR);
+#endif
+		return;
+	}
+
+	// userspace not available now, disable fastpath and wait for IO to be picked up
+	if (pxd_dev->ctx->fc.connected == 0) {
+		/* userspace down - can queue directly without failover request */
+		struct fuse_req* req = fproot_to_fuse_request(fproot);
+		disableFastPath(pxd_dev, false /* skip sync */);
+                atomic_inc(&pxd_dev->fp.nslowPath);
+                clone_cleanup(fproot);
+		pxdmq_reroute_slowpath(req);
+		return;
+	}
+
+	// inform userspace about active io path failover
         // Enqueue and call. pxd_initiate_failover handles the three cases
         // internally: in-progress (no-op), orphan/native (splice+reissue
         // locally, return 0), or leader (full failover round-trip).
