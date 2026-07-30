@@ -22,10 +22,29 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct delayed_work abort_work;
 	struct work_struct failover_work;
-	/* Ctx-scoped fastpath freeze gate; toggled by pxd_fp_freeze_start/end.
-	 * Read (with READ_ONCE) by pxd_io_failover to short-circuit into the
-	 * safe branch during teardown. Not atomic_t: writer flow is single
-	 * (only failover_work / abort_work); readers pair with WRITE_ONCE. */
+
+	/* Ctx-scoped fastpath freeze gate.
+	 *
+	 * When set, a pxd_io_failover work item entering the failover state
+	 * machine does NOT pick branch (a)/(b)/(c). Instead it parks the
+	 * fproot on that device's existing pxd_dev->fp.failQ (using
+	 * fproot->wait, same linkage branch (c) uses) and returns without
+	 * calling pxd_initiate_failover. It does NOT hard-fail and does NOT
+	 * block the kthread worker.
+	 *
+	 * The ctx-teardown code (pxdctx_reset_fastpath called from
+	 * pxd_failover_work / pxd_abort_context) drains each device's failQ
+	 * with the appropriate mode (reissue-to-native for the soft path,
+	 * abort for the hard path). pxd_fp_freeze_end also drains once more
+	 * after clearing the gate to catch items that parked between the
+	 * reset_fastpath drain and the gate clear.
+	 *
+	 * Read by pxd_io_failover with READ_ONCE, written by
+	 * pxd_fp_freeze_start/end with WRITE_ONCE. Compiler barrier only; on
+	 * x86 aligned int reads are atomic. Cross-CPU visibility ordering is
+	 * provided by smp_wmb() in freeze_start/end and by the fastpath
+	 * kthread flush that follows the gate set.
+	 */
 	int fp_freeze;
 
 	uint64_t open_seq;

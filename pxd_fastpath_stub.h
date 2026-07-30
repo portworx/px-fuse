@@ -91,7 +91,7 @@ struct pxd_context;
 static inline
 void pxd_fp_freeze_start(struct pxd_context *ctx) {}
 static inline
-void pxd_fp_freeze_end(struct pxd_context *ctx) {}
+void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io) {}
 
 /// debug routines
 static inline

@@ -117,11 +117,27 @@ void pxd_abortfailQ(struct pxd_device *pxd_dev);
 // fail_io: if true, all queued IO on device will be failed immediately
 void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io);
 
-// Ctx-scoped quiescent window for fastpath. Sets ctx->fp_freeze so
-// pxd_io_failover routes into the safe branch, then drains all in-flight
-// fastpath work (kthread workers + gwq). Paired with pxd_fp_freeze_end().
+// Ctx-scoped quiescent window for fastpath transitions.
+//
+// pxd_fp_freeze_start:
+//   Sets ctx->fp_freeze so pxd_io_failover work items entering the failover
+//   state machine park on their device's failQ (via fproot->wait) instead
+//   of taking a branch decision. Then drains all in-flight fastpath work
+//   (kthread workers + gwq) so any item that started before the gate went
+//   up completes with the pre-freeze state - correct, it committed before
+//   the freeze.
+//
+// pxd_fp_freeze_end:
+//   Clears the gate and drains any items that parked between
+//   pxdctx_reset_fastpath's initial failQ drain and the gate clear.
+//   fail_io=false: reissue parked IOs to native path (used by
+//                  pxd_failover_work; the transition target IS native).
+//   fail_io=true:  abort parked IOs with -EIO (used by pxd_abort_context;
+//                  connection is dead, drop them).
+//
+// Called in matched pairs.
 void pxd_fp_freeze_start(struct pxd_context *ctx);
-void pxd_fp_freeze_end(struct pxd_context *ctx);
+void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io);
 
 
 static inline

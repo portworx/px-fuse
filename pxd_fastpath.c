@@ -53,8 +53,31 @@ static void fastpath_map_workers(void)
     }
 }
 
+/*
+ * Flush all fastpath kthread workers.
+ *
+ * Called from disableFastPath (and pxd_fp_freeze_start) to drain any
+ * fastpath work items so filp_close is safe. Two things this must NOT
+ * do:
+ *
+ * 1. Self-flush. If we're running as a work item on one of these very
+ *    workers (e.g. pxd_io_failover branch (b) chained into
+ *    disableFastPath), kthread_flush_worker on our own worker enqueues
+ *    a barrier and wait_for_completion's on it. The barrier can only
+ *    run after we return, and we can't return until the completion
+ *    fires - deadlock. Skip the current worker by comparing its
+ *    ->task against `current`.
+ *
+ * 2. Assume it drained follow-up work queued by items it flushed.
+ *    kthread_flush_worker's barrier is enqueued once at call time;
+ *    work items enqueued by a running flushed item land after the
+ *    barrier and are not waited for. That's a limitation of the
+ *    primitive, not this wrapper. Callers must not depend on
+ *    fastpath_flush_work draining chained work.
+ */
 static void fastpath_flush_work(void) {
        int node;
+       struct task_struct *self = current;
 
        for (node = 0; node < MAX_NUMNODES; node++) {
                struct pxfpcontext_per_node *c = &pxfpctxt[node];
@@ -62,7 +85,7 @@ static void fastpath_flush_work(void) {
                        int i;
                        for (i = 0; i < MAX_PXFP_WORKERS_PER_NODE; i++) {
                                struct kthread_worker *worker = c->fpworker[i];
-                               if (worker != NULL) {
+                               if (worker != NULL && worker->task != self) {
                                        kthread_flush_worker(worker);
                                }
                        }
@@ -178,9 +201,7 @@ int fastpath_init(void)
 
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 	printk(KERN_INFO"pxd inited with %d workers per numa node\n", MAX_PXFP_WORKERS_PER_NODE);
-	/* WQ_FREEZABLE lets pxd_fp_freeze_start()/end() create a ctx-scoped
-	 * quiescent window around teardown ops (see pxd_failover_work). */
-	gwq = alloc_workqueue("pxwq", WQ_HIGHPRI | WQ_FREEZABLE, 0);
+	gwq = alloc_workqueue("pxwq", WQ_HIGHPRI, 0);
 	if (!gwq) {
 		printk(KERN_ERR"fastpath workqueue alloc failure\n");
 		rc = -ENOMEM;
@@ -290,35 +311,143 @@ struct workqueue_struct* fastpath_workqueue(void)
 	return gwq; // only used by non-blkmq code and special cases
 }
 
-/* Ctx-scoped quiescent window for fastpath teardown.
+/* Ctx-scoped quiescent window for fastpath transitions.
  *
- * Sets ctx->fp_freeze so any newly-scheduled pxd_io_failover short-circuits
- * into the safe (fc-down) branch instead of racing pxdctx_reset_fastpath.
- * Then drains all in-flight work on the kthread_workers that dispatch
- * pxd_io_failover, plus the gwq workqueue used by sync/completion work.
- * By the time freeze_start returns, no pxd_io_failover for this ctx is
- * running or will start on the fastpath path.
+ * Kernel workqueues have no module-callable "freeze" primitive
+ * (freeze_workqueues_begin/thaw_workqueues are not EXPORT_SYMBOL'd and
+ * are driven only by the PM subsystem). WQ_FREEZABLE only participates
+ * in system suspend/resume. We implement the freeze semantic ourselves
+ * for the fastpath IO path.
  *
- * WQ_FREEZABLE on gwq means gwq can additionally be halted by system PM;
- * freeze_start/end give us the equivalent semantics from module context
- * without depending on the PM freezer.
+ * Invariant enforced by this pair:
+ *   Every writer of pxd_dev->connected, pxd_dev->fp.fastpath, or
+ *   ctx->fc.connected runs INSIDE a freeze window. Every reader that
+ *   makes a branch decision (pxd_io_failover) either observed the
+ *   pre-window state (started before the gate; drained by freeze_start)
+ *   or the post-window state (parked during the window; drained by
+ *   freeze_end or the intervening pxdctx_reset_fastpath). It never
+ *   observes a mid-transition state.
+ *
+ * Park zone: pxd_dev->fp.failQ. When gate is set, pxd_io_failover
+ * simply list_add_tail(&fproot->wait, &pxd_dev->fp.failQ) under
+ * fp.fail_lock and returns. The existing drain functions
+ * (pxd_reissuefailQ / __pxd_abortfailQ) handle the parked items.
+ *
+ * Note during a failover_work/abort_work-driven freeze, ctx->fc.connected
+ * is already 0 (pxd_control_release wrote it before scheduling). So a
+ * fastpath IO error that races the freeze naturally would take branch (b)
+ * or (a); neither uses failQ. The only way an item lands on failQ during
+ * this window is via the park path here. That means the drain in
+ * freeze_end catches only parked items, never mid-branch-(c) items.
  */
 void pxd_fp_freeze_start(struct pxd_context *ctx)
 {
 	WRITE_ONCE(ctx->fp_freeze, 1);
-	/* Order the gate write ahead of the flush; readers of fp_freeze in
+	/* Order gate-set ahead of the flush; readers of fp_freeze in
 	 * pxd_io_failover use READ_ONCE and pair with this. */
 	smp_wmb();
+	/* Drain: any pxd_io_failover kthread work already running gets to
+	 * complete with pre-freeze state. New pxd_io_failover work queued
+	 * after this write observes fp_freeze=1 and parks. */
 	fastpath_flush_work();
 	if (gwq != NULL) {
 		flush_workqueue(gwq);
 	}
 }
 
-void pxd_fp_freeze_end(struct pxd_context *ctx)
+void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io)
 {
+	struct pxd_device *pxd_dev;
+	size_t ndevs;
+	struct pxd_device **snap_list;
+	size_t i = 0;
+	size_t j;
+	unsigned long flags;
+	struct list_head ios;
+
+	/* Clear the gate. New pxd_io_failover items entering after this
+	 * observe fp_freeze=0 and take the normal (a)/(b)/(c) branches.
+	 * They do NOT touch failQ under the park path.
+	 *
+	 * Ordering: smp_wmb before the write so writers who set device
+	 * state during the freeze window are visible to readers who see
+	 * fp_freeze=0. */
 	smp_wmb();
 	WRITE_ONCE(ctx->fp_freeze, 0);
+
+	/* Drain any items that parked between pxdctx_reset_fastpath's
+	 * per-device failQ drain and the gate-clear above. Because we're
+	 * in a failover_work/abort_work path, ctx->fc.connected is still 0,
+	 * so branch (c) can't fire; anything on failQ right now is a parked
+	 * item from the freeze window (see the note in freeze_start).
+	 *
+	 * Use snapshot+refcount to avoid holding ctx->lock across
+	 * pxd_reissuefailQ (which does bio submission through the native
+	 * path and can sleep). */
+	spin_lock(&ctx->lock);
+	ndevs = ctx->num_devices;
+	spin_unlock(&ctx->lock);
+
+	if (ndevs == 0) {
+		return;
+	}
+
+	snap_list = kcalloc(ndevs, sizeof(*snap_list), GFP_KERNEL);
+	if (!snap_list) {
+		/* Best-effort: without allocation we can't do the drain safely.
+		 * The stragglers will be caught by any subsequent teardown or
+		 * by pxd_abort_context's __pxd_abortfailQ if that fires. Log
+		 * loudly so this is visible. */
+		pr_warn("%s: ctx %s: kcalloc failed; parked IOs may linger on failQ\n",
+			__func__, ctx->name);
+		return;
+	}
+
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		if (i >= ndevs) {
+			break;
+		}
+		if (READ_ONCE(pxd_dev->removing)) {
+			continue;
+		}
+		if (!fastpath_enabled(pxd_dev)) {
+			continue;
+		}
+		get_device(&pxd_dev->dev);
+		snap_list[i++] = pxd_dev;
+	}
+	spin_unlock(&ctx->lock);
+
+	for (j = 0; j < i; j++) {
+		struct pxd_device *dev = snap_list[j];
+
+		INIT_LIST_HEAD(&ios);
+		spin_lock_irqsave(&dev->fp.fail_lock, flags);
+		list_splice_init(&dev->fp.failQ, &ios);
+		spin_unlock_irqrestore(&dev->fp.fail_lock, flags);
+
+		if (list_empty(&ios)) {
+			put_device(&dev->dev);
+			continue;
+		}
+
+		if (fail_io) {
+			/* Hard-fail path: put the items back on failQ under lock
+			 * and run the abort helper (it walks failQ and ends each
+			 * request with -EIO). */
+			spin_lock_irqsave(&dev->fp.fail_lock, flags);
+			list_splice(&ios, &dev->fp.failQ);
+			__pxd_abortfailQ(dev);
+			dev->fp.active_failover = false;
+			spin_unlock_irqrestore(&dev->fp.fail_lock, flags);
+		} else {
+			/* Soft path: reissue to native (status=0). */
+			pxd_reissuefailQ(dev, &ios, 0);
+		}
+		put_device(&dev->dev);
+	}
+	kfree(snap_list);
 }
 
 void pxd_abortfailQ(struct pxd_device *pxd_dev)
@@ -626,25 +755,70 @@ int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
 	return 0;
 }
 
+/*
+ * Concurrency model:
+ *   disableFastPath can be reached from multiple call sites concurrently
+ *   for the same device:
+ *     - pxdctx_reset_fastpath (inside a freeze window)
+ *     - pxd_io_failover branch (b) (on a fastpath kthread worker,
+ *       outside the freeze window)
+ *     - pxd_fastpath_vol_cleanup / pxd_debug_switch_nativepath (ioctl)
+ *     - pxd_init_fastpath_target's out_file_failed unwind
+ *     - pxd_finish_remove via pxd_fastpath_reset_device
+ *
+ *   We do NOT hold a mutex across this function because pxd_suspend_io
+ *   waits on the blk_mq freeze counter, and a fastpath work item that
+ *   holds an rq ref may be trying to enter disableFastPath itself
+ *   (branch (b)). That would produce circular wait: A holds mutex and
+ *   waits on B's rq; B holds rq and waits on A's mutex.
+ *
+ *   Instead, ownership is decided by an atomic xchg on fp->fastpath.
+ *   Exactly one caller sees prev=true and runs the full disable
+ *   sequence; every other caller observes fp->fastpath=false and
+ *   returns immediately. The file-close loop uses xchg on each
+ *   fp->file[i] so a stale entry can't be closed twice even if a
+ *   caller sneaks between the top gate and the loop.
+ *
+ *   xchg is atomic and full-barrier on every arch Linux supports
+ *   (x86 XCHG, arm64 SWP/LL-SC, ppc/riscv LL-SC, s390 CS). It works
+ *   on any word-sized lvalue including plain struct pointer fields;
+ *   the fp->file[i] slot qualifies.
+ */
 void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
-	int nfd = fp->nfd;
 	int i;
+	bool prev;
 
-	if (!fastpath_enabled(pxd_dev) || !pxd_dev->fp.nfd ||
-			!fastpath_active(pxd_dev)) {
-		pxd_dev->fp.nfd = 0;
-		pxd_dev->fp.fastpath = false;
+	/* If the device was never configured for fastpath (or nfd is
+	 * already zero from a prior teardown), normalize state and exit.
+	 * WRITE_ONCE the gate so any spinning reader observes the value. */
+	if (!fastpath_enabled(pxd_dev) || !fp->nfd) {
+		fp->nfd = 0;
+		WRITE_ONCE(fp->fastpath, false);
 		return;
 	}
 
+	/* Claim ownership. Only the caller that flips true->false runs the
+	 * disable sequence. Others get prev=false and return - fp->fastpath
+	 * is already false from their perspective, which is the sole
+	 * post-condition callers depend on. */
+	prev = xchg(&fp->fastpath, false);
+	if (!prev) {
+		return;
+	}
+
+	/* pxd_suspend_io freezes the blk_mq queue and waits for in-flight
+	 * requests to drop their refs. Combined with the WRITE_ONCE above
+	 * (via xchg) and the RCU grace period below, no new fastpath IO
+	 * can be dispatched and no in-flight fastpath IO is still running
+	 * by the time we get past synchronize_rcu(). */
 	pxd_suspend_io(pxd_dev);
-	WRITE_ONCE(pxd_dev->fp.fastpath, false);
-	// in pxd_queue_rq, if there are existing readers in the RCU read side critical section
-	// synchronize_rcu will wait for them to end (queue to fastpath kthread)
+	/* in pxd_queue_rq, if there are existing readers in the RCU read
+	 * side critical section synchronize_rcu will wait for them to end
+	 * (queue to fastpath kthread). */
 	synchronize_rcu();
-	// at this point, all readers would see pxd_dev->fp.fastpath = false
+	/* at this point, all readers would see fp->fastpath = false */
 	fastpath_flush_work();
 
 	if (PXD_ACTIVE(pxd_dev)) {
@@ -661,10 +835,16 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		}
 	}
 
-	for (i = 0; i < nfd; i++) {
-		if (fp->file[i] != NULL) {
-			filp_close(fp->file[i], NULL);
-			fp->file[i] = NULL;
+	/* Atomically claim each file slot. Only the caller that xchg's out
+	 * a non-NULL pointer closes it - no double-close even if a stale
+	 * caller past the ownership xchg above (there shouldn't be one,
+	 * but this is belt-and-braces) reaches this loop. Iterate the full
+	 * array rather than nfd, because nfd could race concurrently and
+	 * a NULL slot is a no-op. */
+	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+		struct file *f = xchg(&fp->file[i], NULL);
+		if (f) {
+			filp_close(f, NULL);
 		}
 	}
 	fp->nfd = 0;

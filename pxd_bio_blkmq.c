@@ -560,11 +560,17 @@ err:
 
 // failover handling
 //
-// Three-way branch matching the commit description:
-//  (a) pxd_dev->connected == false OR ctx->fp_freeze == 1:
-//      userspace has been down long enough that the driver decided to
-//      hard-fail (abort_work already ran), or a ctx-scoped freeze is in
-//      progress and we must not race the teardown. Fail IO immediately.
+// Three-way branch + park-during-freeze:
+//  (park) ctx->fp_freeze == 1:
+//      a ctx-scoped teardown/reopen is in progress. Do not commit to a
+//      branch decision - the state we'd observe is transient. Park the
+//      fproot on this device's failQ (same list branch (c) uses).
+//      pxd_fp_freeze_end / pxdctx_reset_fastpath drain failQ with the
+//      correct mode (reissue-native for soft path, abort for hard path).
+//      We do NOT call pxd_initiate_failover from here.
+//  (a) pxd_dev->connected == false:
+//      abort_work already ran; userspace has been down past the timeout.
+//      Fail IO with -EIO.
 //  (b) ctx->fc.connected == 0 (userspace down, still within abort timer):
 //      switch this device to native slowpath locally without a coordinated
 //      failover request, and re-queue the IO through fuse (which holds it
@@ -575,8 +581,11 @@ err:
 // All shared-flag reads use READ_ONCE. Writers (pxd_control_release,
 // _pxd_setup, pxd_fp_freeze_start/end) use WRITE_ONCE. This is a compiler
 // barrier only, matching the RCU protocol disableFastPath already uses on
-// fp.fastpath. On x86 aligned int/bool loads are atomic, so READ_ONCE
-// mainly prevents load fusing / speculative reordering across the branch.
+// fp.fastpath. On x86 aligned int/bool loads are atomic; on other archs
+// READ_ONCE/WRITE_ONCE prevent torn/fused accesses. Cross-CPU ordering
+// with respect to the freeze gate is provided by smp_wmb() in
+// pxd_fp_freeze_start/end and by the fastpath kthread flush that follows
+// the gate set.
 static void pxd_io_failover(struct kthread_work *work) {
         struct fp_root_context *fproot =
             container_of(work, struct fp_root_context, work);
@@ -586,17 +595,29 @@ static void pxd_io_failover(struct kthread_work *work) {
         unsigned long flags;
         bool dev_conn;
         bool ctx_conn;
-        bool frozen;
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+	/* Park during ctx freeze. Re-check the gate under fp.fail_lock so
+	 * pxd_fp_freeze_end can't clear the gate + drain failQ in between
+	 * our READ_ONCE and our list_add. If gate was cleared while we
+	 * were racing, we fall through and take a normal branch below. */
+	if (READ_ONCE(ctx->fp_freeze)) {
+		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		if (READ_ONCE(ctx->fp_freeze)) {
+			list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+			spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+			return;
+		}
+		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+	}
+
 	dev_conn = READ_ONCE(pxd_dev->connected);
 	ctx_conn = READ_ONCE(ctx->fc.connected) != 0;
-	frozen   = READ_ONCE(ctx->fp_freeze) != 0;
 
-	// (a) hard-fail: device disconnected or ctx is under freeze teardown
-	if (!dev_conn || frozen) {
+	// (a) hard-fail: device disconnected past the abort timeout
+	if (!dev_conn) {
 		/* fail right away */
 		struct fuse_req* req = fproot_to_fuse_request(fproot);
                 clone_cleanup(fproot);

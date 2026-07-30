@@ -1458,13 +1458,14 @@ static void pxd_finish_remove(struct work_struct *work)
 	struct pxd_device *pxd_dev = container_of(work, struct pxd_device, remove_work);
 	pr_info("%s: dev %llu\n", __func__, pxd_dev->dev_id);
 
-	/* Clear connected so a racing pxd_io_failover takes the (a) hard-fail
-	 * branch instead of trying to coordinate with userspace on a device
-	 * that is going away. Paired with READ_ONCE in pxd_io_failover. */
-	spin_lock(&pxd_dev->lock);
-	WRITE_ONCE(pxd_dev->connected, false);
-	spin_unlock(&pxd_dev->lock);
-
+	/* Do NOT touch pxd_dev->connected here. That flag is a ctx-scope
+	 * connectivity signal (owned by _pxd_setup / freeze windows). At this
+	 * point the device is being unregistered from the kernel; pxd_dev is
+	 * kept alive only by outstanding get_device() refs from concurrent
+	 * consumers (snap_list captures in a freeze window, sysfs opens,
+	 * in-flight IO). Those consumers make their own decisions based on
+	 * whatever ctx-level state exists at the time; the removal path
+	 * shouldn't second-guess them. */
 	pxd_fastpath_reset_device(pxd_dev, true /* skip sync */, true /* fail io */);
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
@@ -2443,6 +2444,14 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	flush_work(&ctx->failover_work);// wait for it to complete
 	fuse_restart_requests(fc);
 
+	/* Reconnect is a decision-carrying state transition. Wrap the state
+	 * writes (fc.connected 0->1 and pxd_dev->connected false->true via
+	 * pxdctx_set_connected) in a freeze so any pxd_io_failover work
+	 * that races the reopen parks on failQ, and gets reissued to
+	 * native at freeze_end (they can go through the native path;
+	 * userspace is now up so it will service them via fuse). */
+	pxd_fp_freeze_start(ctx);
+
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
 	WRITE_ONCE(fc->connected, 1);
@@ -2452,6 +2461,11 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	file->private_data = fc;
 
 	pxdctx_set_connected(ctx);
+
+	/* fail_io=false: reissue any parked items to native. Userspace is up
+	 * (fc.connected=1); the reissued IOs will get serviced through the
+	 * fuse queue like any other native-path IO. */
+	pxd_fp_freeze_end(ctx, false /* fail io */);
 
 	++ctx->open_seq;
 
@@ -2521,19 +2535,22 @@ static void pxd_failover_work(struct work_struct *work)
 	printk(KERN_ERR "PXD_FAILOVER (%s:%u): initiating fastpath failover...",
 		ctx->name, ctx->id);
 
-	/* Create a ctx-scoped quiescent window:
-	 *   1. set ctx->fp_freeze -> pxd_io_failover short-circuits into (a)
-	 *      hard-fail (frozen == true).
-	 *   2. flush all fastpath kthread workers + gwq so any in-flight
-	 *      pxd_io_failover completes before we touch device state.
-	 *   3. run pxdctx_reset_fastpath -> per-device disableFastPath +
-	 *      failQ reissue.
-	 *   4. clear ctx->fp_freeze.
-	 * WQ_FREEZABLE on gwq gives the same guarantee for system-PM
-	 * transitions if they happen to overlap. */
+	/* Create a ctx-scoped quiescent window for the fastpath->native
+	 * transition:
+	 *   1. freeze_start sets ctx->fp_freeze so any pxd_io_failover work
+	 *      item entering the failover state machine parks on its
+	 *      device's failQ (list_add via fproot->wait) and returns.
+	 *      Then flushes all fastpath kthread workers + gwq so items
+	 *      that started before the gate went up complete first.
+	 *   2. pxdctx_reset_fastpath switches each fastpath device to
+	 *      native and drains its failQ via pxd_reissuefailQ(status=0).
+	 *   3. freeze_end clears the gate and drains any items that parked
+	 *      between step 2's drain and step 3's clear. fail_io=false so
+	 *      those stragglers are reissued to native (matching the
+	 *      transition target). */
 	pxd_fp_freeze_start(ctx);
 	pxdctx_reset_fastpath(ctx, false /* fail io */);
-	pxd_fp_freeze_end(ctx);
+	pxd_fp_freeze_end(ctx, false /* fail io */);
 }
 
 static void pxd_abort_context(struct work_struct *work)
@@ -2559,11 +2576,13 @@ static void pxd_abort_context(struct work_struct *work)
 	// Tear down fastpath per device (also fails any leftover failQ IOs
 	// via the defensive __pxd_abortfailQ inside pxd_fastpath_reset_device).
 	// Wrap in the freeze window so any late pxd_io_failover work items on
-	// the fastpath kthread_workers are drained before we start touching
-	// device state.
+	// the fastpath kthread_workers park on failQ (see pxd_io_failover)
+	// and get aborted along with the rest. fail_io=true tells freeze_end
+	// to abort straggler parked items with -EIO (consistent with the hard
+	// teardown semantic of abort_work).
 	pxd_fp_freeze_start(ctx);
 	pxdctx_reset_fastpath(ctx, true /* fail io */);
-	pxd_fp_freeze_end(ctx);
+	pxd_fp_freeze_end(ctx, true /* fail io */);
 }
 
 static int pxd_context_init(struct pxd_context *ctx, int i)
