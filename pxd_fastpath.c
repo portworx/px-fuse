@@ -178,7 +178,9 @@ int fastpath_init(void)
 
 	printk(KERN_INFO"PXD_BIO_BLKMQ CPU %d/%d, NUMA nodes %d/%d\n", num_online_cpus(), NR_CPUS, num_online_nodes(), MAX_NUMNODES);
 	printk(KERN_INFO"pxd inited with %d workers per numa node\n", MAX_PXFP_WORKERS_PER_NODE);
-	gwq = alloc_workqueue("pxwq", WQ_HIGHPRI, 0);
+	/* WQ_FREEZABLE lets pxd_fp_freeze_start()/end() create a ctx-scoped
+	 * quiescent window around teardown ops (see pxd_failover_work). */
+	gwq = alloc_workqueue("pxwq", WQ_HIGHPRI | WQ_FREEZABLE, 0);
 	if (!gwq) {
 		printk(KERN_ERR"fastpath workqueue alloc failure\n");
 		rc = -ENOMEM;
@@ -286,6 +288,37 @@ void fastpath_cleanup(void)
 struct workqueue_struct* fastpath_workqueue(void)
 {
 	return gwq; // only used by non-blkmq code and special cases
+}
+
+/* Ctx-scoped quiescent window for fastpath teardown.
+ *
+ * Sets ctx->fp_freeze so any newly-scheduled pxd_io_failover short-circuits
+ * into the safe (fc-down) branch instead of racing pxdctx_reset_fastpath.
+ * Then drains all in-flight work on the kthread_workers that dispatch
+ * pxd_io_failover, plus the gwq workqueue used by sync/completion work.
+ * By the time freeze_start returns, no pxd_io_failover for this ctx is
+ * running or will start on the fastpath path.
+ *
+ * WQ_FREEZABLE on gwq means gwq can additionally be halted by system PM;
+ * freeze_start/end give us the equivalent semantics from module context
+ * without depending on the PM freezer.
+ */
+void pxd_fp_freeze_start(struct pxd_context *ctx)
+{
+	WRITE_ONCE(ctx->fp_freeze, 1);
+	/* Order the gate write ahead of the flush; readers of fp_freeze in
+	 * pxd_io_failover use READ_ONCE and pair with this. */
+	smp_wmb();
+	fastpath_flush_work();
+	if (gwq != NULL) {
+		flush_workqueue(gwq);
+	}
+}
+
+void pxd_fp_freeze_end(struct pxd_context *ctx)
+{
+	smp_wmb();
+	WRITE_ONCE(ctx->fp_freeze, 0);
 }
 
 void pxd_abortfailQ(struct pxd_device *pxd_dev)

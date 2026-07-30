@@ -22,6 +22,11 @@ struct pxd_context {
 	struct miscdevice miscdev;
 	struct delayed_work abort_work;
 	struct work_struct failover_work;
+	/* Ctx-scoped fastpath freeze gate; toggled by pxd_fp_freeze_start/end.
+	 * Read (with READ_ONCE) by pxd_io_failover to short-circuit into the
+	 * safe branch during teardown. Not atomic_t: writer flow is single
+	 * (only failover_work / abort_work); readers pair with WRITE_ONCE. */
+	int fp_freeze;
 
 	uint64_t open_seq;
 };

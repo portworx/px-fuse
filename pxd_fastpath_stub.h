@@ -85,7 +85,13 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 }
 
 static inline
-void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync) {}
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io) {}
+
+struct pxd_context;
+static inline
+void pxd_fp_freeze_start(struct pxd_context *ctx) {}
+static inline
+void pxd_fp_freeze_end(struct pxd_context *ctx) {}
 
 /// debug routines
 static inline

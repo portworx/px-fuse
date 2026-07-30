@@ -28,6 +28,19 @@
 
 using namespace std::placeholders;
 
+/* gtest compat shims for older libgtest builds (<1.10) that lack the
+ * modern spelling. Both macros are drop-in equivalents for what we use. */
+#ifndef INSTANTIATE_TEST_SUITE_P
+#define INSTANTIATE_TEST_SUITE_P INSTANTIATE_TEST_CASE_P
+#endif
+#ifndef GTEST_SKIP
+#define GTEST_SKIP()                                                          \
+    do {                                                                      \
+        std::cerr << "SKIP: " << __FILE__ << ":" << __LINE__ << std::endl;    \
+        return;                                                               \
+    } while (0)
+#endif
+
 // Enum to define backing device types for parameterized tests
 enum class BackingDeviceType {
     BACKING_FILE,
@@ -1654,9 +1667,18 @@ TEST_P(PxdFastpathTest, force_failover_fallback_while_io_flows)
  * - No deadlock/hang waiting for sync on frozen queue
  * - No dangling frozen device state
  */
-TEST_F(FastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
+TEST_P(PxdFastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
 {
+    /* Runs against both BACKING_FILE and LOOP_DEVICE param values via the
+     * existing INSTANTIATE_TEST_SUITE_P below. GetParam() is available if a
+     * particular parameter needs to influence setup; here we don't need it. */
     std::cout << "\n=== CRITICAL TEST: Detach with active ioswitch (dm-flakey) ===" << std::endl;
+
+    /* Precondition: dm-flakey module must be loadable. */
+    if (system("modprobe dm-flakey >/dev/null 2>&1") != 0) {
+        std::cerr << "dm-flakey unavailable; skipping" << std::endl;
+        GTEST_SKIP();
+    }
 
     // Setup loop device and dm-flakey
     TempLoopDevice loop_dev(100);  // 100 MB backing file
@@ -1713,9 +1735,9 @@ TEST_F(FastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
     add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
     add_ext.enable_fp = 1;  // Enable fastpath
     add_ext.paths.count = 1;
-    strncpy(add_ext.paths.devpath[0], dm_path, sizeof(add_ext.paths.devpath[0]) - 1);
+    strncpy(add_ext.paths.devpath[0], dm_path.c_str(), sizeof(add_ext.paths.devpath[0]) - 1);
 
-    dev_add_ext(add_ext, minor, device_name);
+    dev_add_fastpath(add_ext, minor, device_name);
     std::cout << "Fastpath device added: " << device_name << std::endl;
 
     // Thread to submit I/O to the failing range and trigger failover
@@ -1765,7 +1787,7 @@ TEST_F(FastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
     std::cout << "Starting device detach..." << std::endl;
     auto detach_start = std::chrono::steady_clock::now();
 
-    dev_remove(add_ext.dev_id);  // Should unfreeze queue and cleanly remove
+    dev_remove_fastpath(add_ext.dev_id);  // Should unfreeze queue and cleanly remove
 
     auto detach_end = std::chrono::steady_clock::now();
     auto detach_duration = std::chrono::duration_cast<std::chrono::seconds>(detach_end - detach_start).count();
@@ -1796,9 +1818,15 @@ TEST_F(FastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
  * - Userspace resync/negotiates I/O path if needed
  * - Clean state, no stale control messages left behind
  */
-TEST_F(FastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
+TEST_P(PxdFastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
 {
     std::cout << "\n=== CRITICAL TEST: Control FD close with active ioswitch (dm-flakey) ===" << std::endl;
+
+    /* Precondition: dm-flakey module must be loadable. */
+    if (system("modprobe dm-flakey >/dev/null 2>&1") != 0) {
+        std::cerr << "dm-flakey unavailable; skipping" << std::endl;
+        GTEST_SKIP();
+    }
 
     // Setup loop device and dm-flakey
     TempLoopDevice loop_dev(100);
@@ -1837,9 +1865,9 @@ TEST_F(FastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
     add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
     add_ext.enable_fp = 1;
     add_ext.paths.count = 1;
-    strncpy(add_ext.paths.devpath[0], dm_path, sizeof(add_ext.paths.devpath[0]) - 1);
+    strncpy(add_ext.paths.devpath[0], dm_path.c_str(), sizeof(add_ext.paths.devpath[0]) - 1);
 
-    dev_add_ext(add_ext, minor, device_name);
+    dev_add_fastpath(add_ext, minor, device_name);
     std::cout << "Device added: " << device_name << " (fastpath enabled)" << std::endl;
 
     // Thread to trigger failover via I/O failure
@@ -1885,11 +1913,11 @@ TEST_F(FastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
     std::cout << "\nVerifying device is still accessible..." << std::endl;
     int dev_fd = open(device_name.c_str(), O_RDONLY);
     if (dev_fd >= 0) {
-        std::cout << "✅ Device remains accessible after control FD close" << std::endl;
+        std::cout << "OK: Device remains accessible after control FD close" << std::endl;
         close(dev_fd);
         EXPECT_TRUE(true) << "Device should remain accessible";
     } else {
-        std::cout << "⚠ Device may be inaccessible (expected in integration test)" << std::endl;
+        std::cout << "WARN: Device may be inaccessible (expected in integration test)" << std::endl;
     }
 
     io_thread.join();

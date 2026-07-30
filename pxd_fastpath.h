@@ -117,6 +117,12 @@ void pxd_abortfailQ(struct pxd_device *pxd_dev);
 // fail_io: if true, all queued IO on device will be failed immediately
 void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io);
 
+// Ctx-scoped quiescent window for fastpath. Sets ctx->fp_freeze so
+// pxd_io_failover routes into the safe branch, then drains all in-flight
+// fastpath work (kthread workers + gwq). Paired with pxd_fp_freeze_end().
+void pxd_fp_freeze_start(struct pxd_context *ctx);
+void pxd_fp_freeze_end(struct pxd_context *ctx);
+
 
 static inline
 struct block_device* get_bdev(struct file *fileh)
