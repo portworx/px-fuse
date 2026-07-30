@@ -1967,6 +1967,15 @@ TEST_P(PxdFastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
 
     io_thread.join();
 
+    /* Reopen control fd so TearDown -> dev_remove_fastpath can drive
+     * PXD_REMOVE. Same pattern as px_storage_death_triggers_immediate_failover.
+     * Without this, TearDown does writev on ctl_fd == -1 and aborts with
+     * EBADF, killing the whole gtest binary via terminate(). */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &args), 0);
+
     std::cout << "\n=== CRITICAL TEST PASSED: Control FD close handled correctly ===" << std::endl;
     std::cout << "Device remains exported, fastpath disabled, I/O via userspace" << std::endl;
 }
