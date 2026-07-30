@@ -455,23 +455,182 @@ to userspace but the driver reaches a consistent state. Device removal
 proceeds normally.
 
 
-## Part 4. Summary for reviewers
+## Part 4. Design contract
 
-Adding a new writer of pxd_dev->connected, fp.fastpath, or
-fc.connected? Put it inside a freeze window (invariant 1) or explain
-why the state isn't decision-carrying for that call site.
+The invariants in Part 2 are contracts that specific classes of code
+must uphold. Below is the contract stated in terms of design behaviour,
+independent of any particular call site.
 
-Adding a new reader that makes a branch decision on those fields?
-Copy the READ_ONCE + park-on-failQ pattern from pxd_io_failover
-(invariant 2).
 
-Adding a new caller of disableFastPath? Nothing to do; xchg handles
-the concurrency (invariant 3).
+### 4.1 Writer contract for decision-carrying state
 
-Adding a new synchronous call to fastpath_flush_work from a code path
-that might already be a fastpath worker? The self-flush is already
-skipped (invariant 4), but consider whether the flush is redundant
-given pxd_suspend_io's blk_mq freeze already drains rq-tied work.
+Decision-carrying state fields:
+  pxd_dev->connected
+  pxd_dev->fp.fastpath  (true -> false transitions)
+  ctx->fc.connected
 
-Adding a new iteration over ctx->list? Use the snap+refcount pattern
-(invariant 5).
+Contract:
+  Any write to a decision-carrying field executes inside a matched
+  pxd_fp_freeze_start / pxd_fp_freeze_end pair on the same ctx. The
+  write itself uses WRITE_ONCE.
+
+Implication:
+  A decision-carrying field is either fully-pre-transition or
+  fully-post-transition from the perspective of any reader that is not
+  currently parked. There is no observable intermediate value.
+
+Exceptions permitted:
+  1. Initialising writes performed before the object is discoverable
+     (e.g. pxd_add sets pxd_dev->connected = true before the device
+     is added to ctx->list).
+  2. Writes that are irrelevant to fastpath IO branching (e.g.
+     enableFastPath sets fp.fastpath = true; this transitions the
+     device INTO a state where reads become meaningful, so no reader
+     has yet committed to an obsolete value).
+  3. Writes serialised by a stronger mechanism the freeze protocol
+     defers to (e.g. FUSE's own RCU protocol around
+     fc->allow_disconnected).
+
+
+### 4.2 Reader contract for branch decisions
+
+Definition: a branch-decision reader is any code that reads one or
+more decision-carrying fields and dispatches based on their values.
+pxd_io_failover is the canonical example.
+
+Contract:
+  Before observing any decision-carrying field, the reader observes
+  ctx->fp_freeze via READ_ONCE. If the gate is set, the reader parks
+  the work item on the device's pxd_dev->fp.failQ under fp.fail_lock,
+  re-checks the gate under the same lock, and returns without
+  branching. The gate check under lock is required to prevent the
+  freeze-end drain from missing an item that was mid-park.
+
+Implication:
+  A branch-decision reader never observes a mid-transition value.
+  Every observation is either fully-pre-transition (started before
+  freeze_start's flush) or fully-post-transition (parked, then
+  drained by pxdctx_reset_fastpath or freeze_end).
+
+The failQ linkage (fproot->wait) is shared between the park path and
+branch (c). A single fproot is on the list for exactly one reason at
+a time; the gate check ordering (park path runs before branch
+selection) enforces this.
+
+
+### 4.3 Concurrency contract for disableFastPath
+
+Contract:
+  disableFastPath is safe under arbitrary concurrent invocation on
+  the same pxd_dev. Ownership is arbitrated by xchg on fp->fastpath.
+  Exactly one caller executes the suspend / RCU / flush / file-close
+  sequence per transition; all other callers observe the transition
+  as already complete on return.
+
+  Backing file slots (fp->file[i]) are claimed by xchg to NULL. A
+  file is closed exactly once, by the caller that xchg's the
+  non-NULL pointer out.
+
+Implication:
+  New call sites for disableFastPath require no additional
+  serialisation. Locks around the call would be actively harmful,
+  because disableFastPath calls pxd_suspend_io which waits on the
+  blk_mq freeze counter; any lock held across that wait risks
+  circular wait with a fastpath work item that holds an rq ref and
+  is itself trying to enter disableFastPath.
+
+
+### 4.4 Self-flush contract for fastpath_flush_work
+
+Contract:
+  fastpath_flush_work is safe to call from any context, including
+  from within a fastpath kthread_worker's work function. When called
+  from a fastpath worker, that worker is not itself flushed; only
+  peer workers are drained.
+
+Implication:
+  Any code path that reaches fastpath_flush_work (directly or via
+  disableFastPath) can be reached from a fastpath work item without
+  causing self-deadlock. The follow-up work queued after the current
+  work item on the same worker is not drained by this call, but the
+  code that follows fastpath_flush_work (e.g. the file-close loop in
+  disableFastPath) must be robust against that follow-up work
+  observing NULL file slots after the xchg clears them.
+
+
+### 4.5 Iteration contract for ctx->list
+
+Contract:
+  Iteration over ctx->list that performs any operation which may
+  sleep, allocate, or synchronise with other subsystems on a per-
+  device basis executes as: (i) snapshot device pointers under
+  ctx->lock with get_device, (ii) drop ctx->lock, (iii) process each
+  snap entry outside ctx->lock, (iv) put_device on each snap. During
+  the snapshot pass, bounds checks precede removing checks precede
+  get_device so that a partial iteration does not leak references.
+
+Implication:
+  Per-device operations may sleep (pxd_suspend_io, disableFastPath,
+  pxd_reissuefailQ) without holding ctx->lock. Concurrent add / remove
+  of unrelated devices on the same ctx is safe. A device that begins
+  removal after the snapshot is captured is caught by the second
+  removing check under flush_work(remove_work) and skipped.
+
+
+### 4.6 Scheduling ordering contract for failover_work
+
+Contract:
+  pxd_control_release writes fc->connected = 0 before it schedules
+  failover_work. Any workqueue worker that picks up failover_work
+  observes fc->connected == 0 on entry. pxd_failover_work asserts
+  this with WARN_ON_ONCE.
+
+Implication:
+  Code that examines fc->connected inside pxd_failover_work may rely
+  on the value being 0. Similarly for pxd_abort_context.
+
+
+### 4.7 Drain paths for queued fuse requests
+
+Two drain paths exist for IO that landed on the fuse slow path (via
+pxd_io_failover branch (b) or pxd_reissuefailQ) while userspace was
+disconnected:
+
+  Path 1 (abort backstop):
+    At T + pxd_timeout_secs after close, abort_work runs
+    fuse_end_queued_requests. Every request on fc->pending or
+    fc->processing is ended with -ECONNABORTED. The block layer
+    completes waiting IO submitters.
+
+  Path 2 (userspace reconnect and drain):
+    pxd_control_open calls fuse_restart_requests, which moves
+    requests from fc->processing back to fc->pending. Userspace
+    subsequently reads ctl_fd, receives each request, and responds
+    (with success or error). The block layer completes IO submitters
+    based on the response.
+
+Implication:
+  Callers that queue IO on the fuse slow path do not need a private
+  timeout. Either the userspace reconnect (nominal case) or
+  abort_work (backstop) will unblock any waiter. Test code that
+  wants deterministic termination sets pxd_timeout_secs to the
+  driver minimum (30s) so path 1 activates quickly.
+
+
+### 4.8 Lifecycle contract for pxd_dev
+
+Contract:
+  pxd_dev remains addressable to any code path that took get_device
+  on it, until that code path calls put_device. pxd_finish_remove
+  runs pxd_fastpath_reset_device to normalise per-device state
+  (fp.fastpath, failQ, backing files) but does not modify ctx-scope
+  connectivity fields (pxd_dev->connected). The final put_device
+  from device_unregister waits for all outstanding refs before the
+  pxd_dev is kfreed.
+
+Implication:
+  Removal is orthogonal to ctx connectivity. Concurrent transitions
+  (control fd close, abort, reopen) do not need to know about
+  in-flight removal; the freeze snap+refcount pattern serialises
+  correctly with pxd_finish_remove via flush_work(remove_work) and
+  the removing check.
