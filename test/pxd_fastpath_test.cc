@@ -2195,6 +2195,15 @@ TEST_P(PxdFastpathTest, race_detach_and_ctrl_fd_close_using_dm_flakey)
     dev_add_fastpath(add_ext, minor, device_name);
     std::cout << "Device added: " << device_name << std::endl;
 
+    /* Lower pxd_timeout_secs to the driver minimum (30s) so abort_work
+     * fires within test-tolerable time after close(ctl_fd). Otherwise
+     * a pwrite that got routed to the fuse slow path during the
+     * failover window sits in fc->processing for the default 600s
+     * (nobody is reading ctl_fd), blocking io_thr.join(). abort_work's
+     * fuse_end_queued_requests ends those with -ECONNABORTED,
+     * unblocking pwrite. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
     /* Open a separate tool control fd (ctx 10) that we can drive the detach
      * ioctl from independently of the main ctl_fd we're about to close. */
     int tool_fd = open(control_device_fastpath(10).c_str(), O_RDWR);
@@ -2256,9 +2265,10 @@ TEST_P(PxdFastpathTest, race_detach_and_ctrl_fd_close_using_dm_flakey)
         << "unexpected detach outcome rc=" << detach_rc
         << " errno=" << detach_errno;
 
-    /* Stop the failing IO stream FIRST so io_thr closes its fd and
-     * drops the device's open_count to 0. Otherwise TearDown's
-     * PXD_REMOVE gets -EBUSY forever. */
+    /* Stop the failing IO stream. pwrite may be blocked in the fuse
+     * slow path (see the write_pxd_timeout call above); it will
+     * unblock at T+30s when abort_work fires and ends queued fuse
+     * requests with -ECONNABORTED. Bounded wait. */
     stop_io.store(true);
     io_thr.join();
 
@@ -2328,6 +2338,12 @@ TEST_P(PxdFastpathTest, race_ctrl_fd_reopen_during_failover_using_dm_flakey)
     dev_add_fastpath(add_ext, minor, device_name);
     std::cout << "Device added: " << device_name << std::endl;
 
+    /* Short timeout so abort_work fails any IO stuck in fc->processing
+     * after each close(). Reopen resets pxd_timeout_secs back to the
+     * driver default (600s), so we re-arm the short timeout after
+     * each cycle. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
     /* Continuous failing IO so pxd_io_failover is queued repeatedly. */
     std::atomic<bool> stop_io{false};
     std::atomic<uint64_t> io_err_count{0};
@@ -2365,6 +2381,10 @@ TEST_P(PxdFastpathTest, race_ctrl_fd_reopen_during_failover_using_dm_flakey)
         ASSERT_GT(ctl_fd, 0) << "reopen failed: " << strerror(errno);
         pxd_ioctl_init_args init_args;
         ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+        /* pxd_control_open resets pxd_timeout_secs to the default (600s).
+         * Re-arm the 30s abort so the next close's IO gets aborted
+         * quickly rather than stuck for 10 minutes. */
+        ASSERT_EQ(0, write_pxd_timeout(minor, 30));
 
         /* Let one more round of failing IO happen before the next cycle. */
         usleep(200000);
@@ -2375,8 +2395,27 @@ TEST_P(PxdFastpathTest, race_ctrl_fd_reopen_during_failover_using_dm_flakey)
               << io_err_count.load() << std::endl;
     EXPECT_LT(dur, 60) << "close/reopen cycles took too long; likely stuck";
 
+    /* At this point ctl_fd is open (last cycle ended with a reopen). Any
+     * IOs queued in fc->processing from prior close windows were
+     * restarted by pxd_control_open's fuse_restart_requests but nobody
+     * is reading ctl_fd, so io_thr's next pwrite still blocks. Force a
+     * final close so abort_work (armed for 30s) can fire and fail the
+     * queued IOs, unblocking io_thr. */
+    std::cout << "Final close so abort_work can fail queued IO..." << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
     stop_io.store(true);
+    /* io_thr.join blocks until abort_work fires and
+     * fuse_end_queued_requests ends the pending pwrite with
+     * -ECONNABORTED. pxd_timeout_secs was set to 30s at test start. */
     io_thr.join();
+
+    /* Reopen for TearDown. */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
 
     /* Device must still be present and accessible. If any cycle left the
      * driver in a bad state, this open would fail. */
@@ -2427,6 +2466,11 @@ TEST_P(PxdFastpathTest, race_multiple_disable_fastpath_concurrent_using_dm_flake
     int minor = 0;
     dev_add_fastpath(add_ext, minor, device_name);
     std::cout << "Device added: " << device_name << std::endl;
+
+    /* Short timeout so abort_work fails queued IOs quickly after close.
+     * Without this the loser threads' pwrites sit in fc->processing for
+     * the default 600s (no ctl_fd reader) and join() would hang. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
 
     /* N concurrent IO threads pounding the failing range. Pinning to
      * different CPUs increases the chance of parallel dispatch onto
@@ -2548,6 +2592,11 @@ TEST_P(PxdFastpathTest, race_multi_device_ctrl_fd_close_using_dm_flakey)
         dev_add_fastpath(add_ext, devs[i].minor, devs[i].device_name);
         std::cout << "Device " << i << " added: " << devs[i].device_name << std::endl;
     }
+
+    /* pxd_timeout_secs is module-global; setting it via any device's
+     * sysfs affects all devices in this ctx. Short timeout so
+     * abort_work fails queued IOs on every device after close(). */
+    ASSERT_EQ(0, write_pxd_timeout(devs[0].minor, 30));
 
     /* One IO thread per device, all writing to the failing range in
      * parallel. Keeps pxd_io_failover work items in flight on multiple
@@ -2750,4 +2799,110 @@ TEST_P(PxdFastpathTest, race_abort_work_canceled_by_reopen_using_dm_flakey)
     if (dev_fd >= 0) close(dev_fd);
 
     std::cout << "=== RACE TEST PASSED: abort_work canceled cleanly ===" << std::endl;
+}
+
+/*
+ * RACE TEST: reopen ctl_fd -> userspace pulls and fails queued fuse reqs
+ *
+ * Why this matters (companion to abort_work coverage):
+ *   The freeze protocol relies on two complementary drains for IO that
+ *   got routed to the fuse slow path during a ctx transition:
+ *     - abort_work (T + pxd_timeout_secs) hard-fails everything.
+ *     - Reopen + userspace read cycles them back out normally.
+ *   The abort_work path is covered by other race tests. This test
+ *   drives the second path: after close(ctl_fd), IO gets queued in
+ *   fc->processing; reopen restarts them into fc->pending via
+ *   fuse_restart_requests; a userspace reader then pulls each req and
+ *   fails it. pwrite returns error, io_thr exits cleanly - WITHOUT
+ *   waiting for abort_work.
+ *
+ *   If fuse_restart_requests were broken or userspace couldn't drain
+ *   the pending list, io_thr.join would time out.
+ */
+TEST_P(PxdFastpathTest, race_reopen_userspace_drain_queued_reqs_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: reopen ctl_fd + userspace drain (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(1300, "pxd_test_flakey_reopen_drain",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    std::string device_name;
+    int minor = 0;
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Device added: " << device_name << std::endl;
+
+    /* Set a short timeout as a fallback safety net. If the userspace
+     * drain works correctly, io_thr exits well before abort_work fires. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* Single failing IO from a worker thread. Once it fails on the
+     * fastpath, the failover state machine routes it through the fuse
+     * slow path. On close(ctl_fd) it lingers in fc->processing until
+     * we reopen and drain. */
+    std::atomic<bool> stop_io{false};
+    std::atomic<uint64_t> io_err_count{0};
+    std::thread io_thr = start_failing_io_stream(device_name, stop_io, io_err_count);
+
+    /* Let io_thr accumulate errors and queue at least one req in flight. */
+    usleep(300000);
+    ASSERT_GT(io_err_count.load(), 0u);
+
+    std::cout << "Closing ctl_fd; IOs will land in fc->processing" << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    /* Let failover_work run and the next pwrite queue in fuse slow path. */
+    usleep(500000);
+
+    std::cout << "Reopening ctl_fd; fuse_restart_requests moves reqs to pending" << std::endl;
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+    /* Re-arm short timeout as a fallback; the drain below should
+     * complete well before it triggers. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* Now userspace drains ctl_fd - pull each fuse req and fail it.
+     * fail_io ends the request with -EIO which propagates to
+     * blk_mq_end_request; the block layer wakes the pwrite waiter.
+     * This validates the freeze-doc's assertion that reopen +
+     * userspace read is a valid drain path (not just abort_work). */
+    std::atomic<uint64_t> drained{0};
+    std::atomic<bool> stop_drain{false};
+    std::thread drain_thr([&]() {
+        struct rdwr_in rdwr;
+        while (!stop_drain.load()) {
+            int ret = wait_msg(1);
+            if (ret == -ETIMEDOUT) continue;
+            if (ret < 0) break;
+            ssize_t rb = read(ctl_fd, &rdwr, sizeof(rdwr));
+            if (rb > 0) {
+                fail_io(&rdwr);
+                drained.fetch_add(1);
+            }
+        }
+    });
+
+    /* Stop io_thr and wait for it. If userspace drain is working,
+     * pwrite errors out quickly (the drainer replies -EIO). If
+     * broken, we fall back to abort_work at T+30s. If both are
+     * broken, this hangs and the outer test framework catches it. */
+    stop_io.store(true);
+    io_thr.join();
+
+    stop_drain.store(true);
+    drain_thr.join();
+
+    std::cout << "Drained " << drained.load() << " fuse reqs; io_errs="
+              << io_err_count.load() << std::endl;
+    EXPECT_GT(drained.load(), 0u)
+        << "expected userspace to service at least one queued req";
+
+    std::cout << "=== RACE TEST PASSED: reopen + userspace drain works ===" << std::endl;
 }
