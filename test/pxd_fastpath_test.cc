@@ -540,10 +540,41 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 	int iter = 0;
 
 	fprintf(stderr, "%s: device removing %ld\n", __func__, dev_id);
+
+	/* Framework robustness: if ctl_fd was closed by a test and not reopened,
+	 * every writev below returns EBADF. Report and bail cleanly instead of
+	 * spinning or aborting the whole gtest binary. */
+	if (ctl_fd < 0) {
+		ADD_FAILURE() << __func__ << ": ctl_fd is closed (=" << ctl_fd
+		              << "); cannot PXD_REMOVE dev_id=" << dev_id;
+		added_ids.erase(dev_id);
+		return;
+	}
+
 	killed = false;
-	std::thread cleaner(&PxdFastpathTest::cleaner, this);
+	std::thread cleaner_thr(&PxdFastpathTest::cleaner, this);
+
+	/* RAII: whatever path we exit through (success, retry giveup, ADD_FAILURE),
+	 * always stop the cleaner and join it. Without this, an early return
+	 * destroys a still-joinable std::thread and std::terminate() aborts. */
+	struct CleanerJoiner {
+		bool *killed;
+		std::thread *thr;
+		~CleanerJoiner() {
+			*killed = true;
+			if (thr->joinable()) {
+				thr->join();
+			}
+		}
+	} joiner{&killed, &cleaner_thr};
+
 	sleep(1);
-	while (1) {
+
+	/* Retry PXD_REMOVE while the device reports EBUSY. Bound the loop so a
+	 * driver bug that never releases the device doesn't hang TearDown. */
+	const int max_iter = 30;
+	bool removed = false;
+	for (iter = 0; iter < max_iter; iter++) {
 		fprintf(stderr, "initiating dev cleanup\n");
 		oh.unique = 0;
 		oh.error = PXD_REMOVE;
@@ -557,25 +588,38 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 		iov[1].iov_base = &remove;
 		iov[1].iov_len = sizeof(remove);
 
+		int saved_errno = 0;
 		ssize_t write_bytes = writev(ctl_fd, iov, 2);
+		saved_errno = errno;
 		if (write_bytes > 0) {
 			fprintf(stderr, "device removal success\n");
-			ASSERT_EQ(write_bytes, oh.len);
+			EXPECT_EQ(write_bytes, (ssize_t)oh.len);
+			removed = true;
 			break;
 		}
 
-		ASSERT_EQ(EBUSY, errno);
+		if (saved_errno != EBUSY) {
+			/* Fatal-ish: anything other than EBUSY (EBADF, ENODEV, EINVAL,
+			 * ECONNABORTED, ...) is not going to recover on retry. Fail the
+			 * test but let RAII join the cleaner so the harness lives. */
+			ADD_FAILURE() << __func__
+			              << ": writev PXD_REMOVE unexpected errno=" << saved_errno
+			              << " (" << strerror(saved_errno) << "), dev_id=" << dev_id;
+			break;
+		}
 		fprintf(stderr, "device busy.. will retry after sleep\n");
-		iter++;
 		sleep(1);
+	}
+
+	if (!removed && iter == max_iter) {
+		ADD_FAILURE() << __func__ << ": device " << dev_id
+		              << " still EBUSY after " << max_iter << " retries";
 	}
 
 	fprintf(stderr, "%s: device %ld removed after %d secs\n", __func__, dev_id, iter);
 	fprintf(stderr, "prepping to stop background cleaner\n");
-	killed = true;
-	sleep(1);
-	cleaner.join();
-	killed = false;
+	/* CleanerJoiner runs here as the function returns: sets killed=true and
+	 * joins cleaner_thr. */
 
 	// Remove from added_ids to prevent double removal in TearDown
 	added_ids.erase(dev_id);
@@ -864,14 +908,36 @@ void PxdFastpathTest::cleaner()
 	fprintf(stderr, "cleaner thread active\n");
 	// Now read in the request from kernel
 	while (!killed) {
+		/* Defensive: if the enclosing test closed ctl_fd without reopening,
+		 * poll+read on -1 spins tight and can misinterpret EBADF as -EAGAIN.
+		 * Framework code should never hard-fail here; just idle out. */
+		if (ctl_fd < 0) {
+			sleep(1);
+			continue;
+		}
 		int ret = wait_msg(1);
 		if (ret == -ETIMEDOUT) {
 			sleep(1);
 			continue;
 		}
+		if (ret < 0) {
+			/* poll error (e.g. POLLNVAL because ctl_fd got closed under us).
+			 * Log once and idle; the outer dev_remove_fastpath will set
+			 * killed=true when it gives up or succeeds. */
+			fprintf(stderr, "cleaner: wait_msg failed ret=%d errno=%d(%s)\n",
+			        ret, errno, strerror(errno));
+			sleep(1);
+			continue;
+		}
 		ssize_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
 		if (read_bytes < 0) {
-			EXPECT_EQ(read_bytes, -EAGAIN);
+			if (errno == EAGAIN || errno == EINTR) {
+				continue;
+			}
+			fprintf(stderr, "cleaner: read errno=%d(%s); idling\n",
+			        errno, strerror(errno));
+			sleep(1);
+			continue;
 		} else if (read_bytes > 0) {
 			fprintf(stderr, "cleaner: processing I/O request, opcode=%d\n", rdwr.in.opcode);
 			// finish_io(&rdwr);
