@@ -1650,6 +1650,88 @@ TEST_P(PxdFastpathTest, force_failover_fallback_while_io_flows)
               << std::endl;
 }
 
+/*
+ * Build the "always fail all writes" dm-flakey table for a 100 MB device
+ * backed by `loop_path`:
+ *   0-16MB:   linear (healthy)
+ *   16-32MB:  flakey (always down, error_writes -> every write returns -EIO)
+ *   32-100MB: linear (healthy)
+ *
+ * dm-flakey per-target syntax is:
+ *   flakey <dev_path> <offset> <up_interval> <down_interval>
+ *          [<num_features> [<feature_args>]]
+ *
+ * To fail every write deterministically we need up=0, down=1 and the
+ * `error_writes` feature. Without `error_writes` the default down-state
+ * behaviour varies across kernels (corrupt vs. -EIO). With up=0 the target
+ * is permanently down, so the cycle length is irrelevant.
+ */
+static std::string build_flakey_table(const std::string &loop_path)
+{
+    const uint64_t s_16MB = (16ULL * 1024 * 1024) / 512;
+    const uint64_t s_32MB = (32ULL * 1024 * 1024) / 512;
+    const uint64_t s_68MB = (68ULL * 1024 * 1024) / 512;
+
+    std::string table;
+    /* linear 0..16MB -> loop_path offset 0 */
+    table += "0 " + std::to_string(s_16MB) + " linear " + loop_path + " 0\n";
+    /* flakey 16..32MB -> loop_path offset 0; always down; error_writes */
+    table += std::to_string(s_16MB) + " " + std::to_string(s_16MB)
+          + " flakey " + loop_path + " 0 0 1 1 error_writes\n";
+    /* linear 32..100MB -> loop_path offset (32MB in sectors) */
+    table += std::to_string(s_32MB) + " " + std::to_string(s_68MB)
+          + " linear " + loop_path + " " + std::to_string(s_32MB) + "\n";
+    return table;
+}
+
+/*
+ * Create a dm target `name` using the given table string.
+ * Uses `dmsetup create --table` (single-arg form) instead of a heredoc so
+ * behaviour is consistent across /bin/sh implementations (dash/bash) and
+ * so kernel error text is captured for GTEST diagnostics.
+ *
+ * Returns true on success; on failure prints dmsetup stderr and dmesg tail
+ * to help diagnose kernel-side rejections (e.g. bad target parameters).
+ */
+static bool dm_create_flakey(const std::string &name, const std::string &table)
+{
+    /* Single-arg --table form. dmsetup accepts newline-separated targets
+     * inside one string. Redirect stderr to stdout so GTEST captures it. */
+    std::string cmd = "dmsetup create " + name + " --table '" + table + "' 2>&1";
+    FILE *fp = popen(cmd.c_str(), "r");
+    if (!fp) {
+        std::cerr << "popen(dmsetup create) failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+    std::string out;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp)) {
+        out += buf;
+    }
+    int rc = pclose(fp);
+    if (rc != 0) {
+        std::cerr << "dmsetup create '" << name << "' failed (rc=" << rc
+                  << "):\n" << out
+                  << "table was:\n" << table << std::endl;
+        /* Best-effort dmesg tail for kernel-side detail. */
+        (void) system("dmesg | tail -n 5 >&2");
+        return false;
+    }
+    return true;
+}
+
+/* RAII cleanup wrapper for a dm target. --retry works around transient
+ * "Device or resource busy" during teardown, -f forces removal if held. */
+struct DMTargetCleanup {
+    std::string name;
+    ~DMTargetCleanup() {
+        if (!name.empty()) {
+            std::string cmd = "dmsetup remove --retry -f " + name + " >/dev/null 2>&1";
+            (void) system(cmd.c_str());
+        }
+    }
+};
+
 /**
  * CRITICAL TEST: Detach device while ioswitch is active (queue is frozen)
  *
@@ -1685,42 +1767,17 @@ TEST_P(PxdFastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
     std::string loop_path = loop_dev.path();
     std::cout << "Loop device created: " << loop_path << std::endl;
 
-    // Setup dm-flakey with a failing range
-    // dm-flakey parameters: <dev_path> <offset> <size> <behavior>
-    // For this test: failing_range at offset 16-32 MB (fail all IOs)
     std::string dm_name = "pxd_test_flakey";
-    std::string device_size_sectors = std::to_string((100 * 1024 * 1024) / 512);
-
-    // Create dm-flakey mapping:
-    // 0-16MB: direct to loop device
-    // 16-32MB: fail all IOs
-    // 32-100MB: direct to loop device
-    std::string dm_setup_cmd =
-        "dmsetup create " + dm_name + " <<EOF\n"
-        "0 " + std::to_string((16 * 1024 * 1024) / 512) + " linear " + loop_path + " 0\n"
-        + std::to_string((16 * 1024 * 1024) / 512) + " " + std::to_string((16 * 1024 * 1024) / 512) + " flakey " + loop_path + " 0 1\n"
-        + std::to_string((32 * 1024 * 1024) / 512) + " " + std::to_string((68 * 1024 * 1024) / 512) + " linear " + loop_path + " " + std::to_string((32 * 1024 * 1024) / 512) + "\n"
-        "EOF\n";
-
-    int ret = system(dm_setup_cmd.c_str());
-    if (ret != 0) {
-        std::cerr << "Warning: dm-flakey setup failed, test will be skipped" << std::endl;
+    std::string dm_table = build_flakey_table(loop_path);
+    if (!dm_create_flakey(dm_name, dm_table)) {
         GTEST_SKIP();
     }
 
     std::string dm_path = "/dev/mapper/" + dm_name;
     std::cout << "dm-flakey target created: " << dm_path << std::endl;
 
-    // Cleanup dm-flakey on exit
-    struct DMFlakey_Cleanup {
-        std::string name;
-        ~DMFlakey_Cleanup() {
-            if (!name.empty()) {
-                std::string cmd = "dmsetup remove " + name + " 2>/dev/null";
-                system(cmd.c_str());
-            }
-        }
-    } dm_cleanup{dm_name};
+    /* Auto-teardown of the dm target (uses dmsetup remove --retry -f). */
+    DMTargetCleanup dm_cleanup{dm_name};
 
     // Add fastpath device pointing to dm-flakey
     pxd_add_ext_out add_ext;
@@ -1832,25 +1889,13 @@ TEST_P(PxdFastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
     TempLoopDevice loop_dev(100);
     std::string loop_path = loop_dev.path();
     std::string dm_name = "pxd_test_flakey_close";
-
-    // Setup dm-flakey with failing range
-    std::string dm_setup_cmd =
-        "dmsetup create " + dm_name + " <<EOF\n"
-        "0 " + std::to_string((16 * 1024 * 1024) / 512) + " linear " + loop_path + " 0\n"
-        + std::to_string((16 * 1024 * 1024) / 512) + " " + std::to_string((16 * 1024 * 1024) / 512) + " flakey " + loop_path + " 0 1\n"
-        + std::to_string((32 * 1024 * 1024) / 512) + " " + std::to_string((68 * 1024 * 1024) / 512) + " linear " + loop_path + " " + std::to_string((32 * 1024 * 1024) / 512) + "\n"
-        "EOF\n";
-
-    int ret = system(dm_setup_cmd.c_str());
-    if (ret != 0) {
-        std::cerr << "Warning: dm-flakey setup failed, test skipped" << std::endl;
+    std::string dm_table = build_flakey_table(loop_path);
+    if (!dm_create_flakey(dm_name, dm_table)) {
         GTEST_SKIP();
     }
 
     std::string dm_path = "/dev/mapper/" + dm_name;
-    struct DMFlakey_Cleanup { std::string name; ~DMFlakey_Cleanup() {
-        if (!name.empty()) system(("dmsetup remove " + name + " 2>/dev/null").c_str()); }
-    } dm_cleanup{dm_name};
+    DMTargetCleanup dm_cleanup{dm_name};
 
     // Add fastpath device
     pxd_add_ext_out add_ext;
