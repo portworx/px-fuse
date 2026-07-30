@@ -604,10 +604,19 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 			break;
 		}
 
+		if (saved_errno == ENOENT) {
+			/* Device already removed by another path (e.g. a race test's
+			 * PXD_IOC_DETACH_DEVICE won before TearDown got here). Not
+			 * an error - the post-condition ("device is gone") is met. */
+			fprintf(stderr, "device %ld already gone (ENOENT); ok\n", dev_id);
+			removed = true;
+			break;
+		}
 		if (saved_errno != EBUSY) {
-			/* Fatal-ish: anything other than EBUSY (EBADF, ENODEV, EINVAL,
-			 * ECONNABORTED, ...) is not going to recover on retry. Fail the
-			 * test but let RAII join the cleaner so the harness lives. */
+			/* Fatal-ish: anything other than EBUSY / ENOENT (EBADF,
+			 * EINVAL, ECONNABORTED, ...) is not going to recover on
+			 * retry. Fail the test but let RAII join the cleaner so
+			 * the harness lives. */
 			ADD_FAILURE() << __func__
 			              << ": writev PXD_REMOVE unexpected errno=" << saved_errno
 			              << " (" << strerror(saved_errno) << "), dev_id=" << dev_id;
@@ -2247,24 +2256,27 @@ TEST_P(PxdFastpathTest, race_detach_and_ctrl_fd_close_using_dm_flakey)
         << "unexpected detach outcome rc=" << detach_rc
         << " errno=" << detach_errno;
 
-    /* Stop the failing IO stream. It will fail on the closed device or
-     * exit cleanly if the device was already removed. */
+    /* Stop the failing IO stream FIRST so io_thr closes its fd and
+     * drops the device's open_count to 0. Otherwise TearDown's
+     * PXD_REMOVE gets -EBUSY forever. */
     stop_io.store(true);
     io_thr.join();
 
-    /* Reopen ctl_fd for TearDown. If detach won, TearDown finds no
-     * matching id; we forget it below either way. */
+    /* Reopen ctl_fd for TearDown. */
     ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
     ASSERT_GT(ctl_fd, 0);
     pxd_ioctl_init_args init_args;
     ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
 
-    /* Prevent double-remove: the device was likely detached by the ioctl
-     * or by close+abort backstop. Drop it from added_ids so TearDown
-     * doesn't try again. If it wasn't actually removed, TearDown's
-     * dev_remove_fastpath will be idempotent (returns immediately when
-     * added_ids doesn't contain it - we're not adding it back). */
-    added_ids.erase(add_ext.dev_id);
+    /* Only forget the device if the detach ioctl actually removed it.
+     * On rc == 0 the driver's pxd_remove_dev succeeded and the device
+     * is gone. On any other outcome (EBUSY because io_thr had it open,
+     * ENOENT because a competing path removed it first), TearDown must
+     * still drive PXD_REMOVE to reach a clean state. Now that io_thr
+     * has closed its fd, that PXD_REMOVE will succeed. */
+    if (detach_rc.load() == 0) {
+        added_ids.erase(add_ext.dev_id);
+    }
 
     close(tool_fd);
 
