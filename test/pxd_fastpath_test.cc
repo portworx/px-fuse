@@ -642,9 +642,15 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 
 int PxdFastpathTest::write_pxd_timeout(int minor, int timeout_value)
 {
+    /* dev_add_fastpath returns the composite value the kernel packs
+     * into writev's return: pxd_dev->minor | (fastpath_active <<
+     * MINORBITS). But the sysfs directory (via dev_set_name in pxd.c)
+     * is named with just pxd_dev->minor - the low 20 bits. Mask so
+     * callers can pass either form and still hit the right path. */
+    int pure_minor = minor & MINORMASK;
     char sysfs_path[256];
     snprintf(sysfs_path, sizeof(sysfs_path),
-             "/sys/devices/pxd/%d/timeout", minor);
+             "/sys/devices/pxd/%d/timeout", pure_minor);
     FILE *fp = fopen(sysfs_path, "w");
     if (!fp) {
         std::cerr << "fopen(" << sysfs_path << ") failed: "
