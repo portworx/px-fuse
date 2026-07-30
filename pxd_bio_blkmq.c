@@ -563,31 +563,53 @@ static void pxd_io_failover(struct kthread_work *work) {
         struct fp_root_context *fproot =
             container_of(work, struct fp_root_context, work);
         struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+        bool cleanup = false;
+        bool reroute = false;
         int rc;
         unsigned long flags;
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
-        // Enqueue and call. pxd_initiate_failover handles the three cases
-        // internally: in-progress (no-op), orphan/native (splice+reissue
-        // locally, return 0), or leader (full failover round-trip).
         spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
-        list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+        if (!pxd_dev->fp.active_failover) {
+                if (pxd_dev->fp.fastpath) {
+                        pxd_dev->fp.active_failover = true;
+                        list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+                        cleanup = true;
+                } else {
+                        reroute = true;
+                }
+        } else {
+                list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+        }
         spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 
-        trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_IOFAILURE);
-        rc = pxd_initiate_failover(pxd_dev);
-        // Non-zero only on real failure (-ENODEV removing, -ENOMEM,
-        // -ENOTCONN). Orphan case returns 0 after local reissue.
-        if (rc) {
-                printk_ratelimited(
-                    KERN_ERR
-                    "%s: pxd%llu: failover failed %d, aborting IO\n",
-                    __func__, pxd_dev->dev_id, rc);
-                spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
-                __pxd_abortfailQ(pxd_dev);
-                spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+        if (cleanup) {
+                trace_pxd_initiate_failover(pxd_dev->dev_id, pxd_dev->minor, FAILOVER_REASON_IOFAILURE);
+                rc = pxd_initiate_failover(pxd_dev);
+                // If userspace cannot be informed of a failover event, force
+                // abort all IO.
+                if (rc) {
+                        printk_ratelimited(
+                            KERN_ERR
+                            "%s: pxd%llu: failover failed %d, aborting IO\n",
+                            __func__, pxd_dev->dev_id, rc);
+                        spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+                        __pxd_abortfailQ(pxd_dev);
+                        pxd_dev->fp.active_failover = false;
+                        spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+                }
+        } else if (reroute) {
+                printk_ratelimited(KERN_ERR
+                                   "%s: pxd%llu: resuming IO in native path.\n",
+                                   __func__, pxd_dev->dev_id);
+                atomic_inc(&pxd_dev->fp.nslowPath);
+                clone_cleanup(fproot);
+                trace_pxd_reroute_slowpath_transition(pxd_dev->dev_id, pxd_dev->minor, TRANSITION_PXD_IO_FAILOVER, rq_data_dir(fproot_to_request(fproot)), 
+                        req_op(fproot_to_request(fproot)), blk_rq_pos(fproot_to_request(fproot)) * SECTOR_SIZE, blk_rq_bytes(fproot_to_request(fproot)),
+                        fproot_to_request(fproot)->nr_phys_segments, fproot_to_request(fproot)->cmd_flags);
+                pxdmq_reroute_slowpath(fproot_to_fuse_request(fproot));
         }
 }
 
