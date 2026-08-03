@@ -102,10 +102,9 @@ int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev);
 
 // external request from userspace to control io path
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
-int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
 int pxd_request_resume(struct pxd_device *pxd_dev);
-int pxd_request_resume_internal(struct pxd_device *pxd_dev);
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
+int wait_for_sync(struct pxd_device *pxd_dev, bool skip_flush);
 
 // handle IO reroutes and switch events
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);

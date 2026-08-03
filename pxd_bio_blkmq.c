@@ -177,8 +177,14 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
 
 void pxd_resume_io(struct pxd_device *pxd_dev) {
         bool wakeup;
-        int curr = atomic_dec_return(&pxd_dev->fp.suspend);
         struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+        int curr = atomic_dec_if_positive(&fp->suspend);
+
+        if (curr < 0) {
+                printk(KERN_WARNING "pxd device %llu: resume with suspend count already 0; ignoring\n",
+                       pxd_dev->dev_id);
+                return;
+        }
 
         wakeup = (curr == 0);
         if (wakeup) {

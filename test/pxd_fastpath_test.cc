@@ -1380,6 +1380,369 @@ TEST_P(PxdFastpathTest, error_handling_fastpath)
 	std::cout << "=== Fastpath Error Handling Test completed with " << device_type_str << " ===" << std::endl;
 }
 
+/*
+ * Helpers for driving the per-device suspend/resume counter via the
+ * /sys/devices/pxd/<minor>/debug sysfs attribute. The store side accepts
+ * single-char verbs: 's' -> pxd_suspend_io, 'r' -> pxd_resume_io,
+ * 'S' -> pxd_request_suspend, 'R' -> pxd_request_resume. The show side
+ * emits "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d,app_suspend:%d\n".
+ */
+static int debug_write(int pure_minor, char verb)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/pxd/%d/debug", pure_minor);
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    int n = fputc(verb, fp);
+    fclose(fp);
+    return n == verb ? 0 : -1;
+}
+
+struct debug_state {
+    int nfd;
+    int suspend;
+    int fpenabled;
+    int fpactive;
+    int app_suspend;
+};
+
+static bool debug_read(int pure_minor, debug_state &s)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/pxd/%d/debug", pure_minor);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    int rc = fscanf(fp,
+                    "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d,app_suspend:%d",
+                    &s.nfd, &s.suspend, &s.fpenabled, &s.fpactive,
+                    &s.app_suspend);
+    fclose(fp);
+    return rc == 5;
+}
+
+static int read_suspend_count(int pure_minor)
+{
+    debug_state s{};
+    if (!debug_read(pure_minor, s)) return -1;
+    return s.suspend;
+}
+
+static int read_app_suspend(int pure_minor)
+{
+    debug_state s{};
+    if (!debug_read(pure_minor, s)) return -1;
+    return s.app_suspend;
+}
+
+/*
+ * Read /var/log/kern.log (or dmesg) tail to catch the underflow warning
+ * emitted by pxd_resume_io when the caller tries to drop the counter
+ * below 0. Returns true if the tag was seen since `since_offset`.
+ * Uses dmesg -c is destructive; we prefer a simple substring search
+ * against dmesg output.
+ */
+static bool dmesg_contains(const std::string &needle)
+{
+    FILE *p = popen("dmesg | tail -n 200", "r");
+    if (!p) return false;
+    char buf[4096];
+    bool found = false;
+    while (fgets(buf, sizeof(buf), p)) {
+        if (strstr(buf, needle.c_str())) { found = true; break; }
+    }
+    pclose(p);
+    return found;
+}
+
+/*
+ * Basic single suspend/resume cycle drives fp->suspend 0 -> 1 -> 0 via
+ * the low-level 's'/'r' verbs.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_basic)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 200;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    ASSERT_EQ(0, debug_write(pm, 's'));
+    ASSERT_EQ(1, read_suspend_count(pm));
+
+    ASSERT_EQ(0, debug_write(pm, 'r'));
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * Nested suspends increment the refcount; matching resumes bring it back
+ * to zero without the queue-unquiesce firing early.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_nested)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 201;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    const int depth = 5;
+    for (int i = 1; i <= depth; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 's'));
+        ASSERT_EQ(i, read_suspend_count(pm));
+    }
+    for (int i = depth - 1; i >= 0; --i) {
+        ASSERT_EQ(0, debug_write(pm, 'r'));
+        ASSERT_EQ(i, read_suspend_count(pm));
+    }
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * Extra resume when counter is already 0 must NOT drive it negative;
+ * pxd_resume_io emits a KERN_WARNING and no-ops. The counter stays at
+ * 0 across many spurious resumes, and a subsequent suspend/resume pair
+ * still works.
+ */
+TEST_P(PxdFastpathTest, resume_underflow_ignored)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 202;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 'r'));
+        ASSERT_EQ(0, read_suspend_count(pm))
+            << "spurious resume #" << i << " should not drive suspend below 0";
+    }
+
+    /* Guard message must be present in the kernel log. Use a substring
+     * of the exact print in pxd_resume_io to avoid false positives from
+     * unrelated devices. */
+    EXPECT_TRUE(dmesg_contains("resume with suspend count already 0"))
+        << "expected KERN_WARNING from pxd_resume_io underflow guard";
+
+    /* Counter is still usable after the underflow attempts. */
+    ASSERT_EQ(0, debug_write(pm, 's'));
+    ASSERT_EQ(1, read_suspend_count(pm));
+    ASSERT_EQ(0, debug_write(pm, 'r'));
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * More resumes than suspends: nested-then-over-drained. Final count
+ * clamps at 0; every extra resume is a no-op.
+ */
+TEST_P(PxdFastpathTest, resume_overdrain_clamps_at_zero)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 203;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+
+    const int depth = 3;
+    for (int i = 0; i < depth; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 's'));
+    }
+    ASSERT_EQ(depth, read_suspend_count(pm));
+
+    /* depth + 5 resumes: last 5 must be no-ops, count clamps at 0. */
+    for (int i = 0; i < depth + 5; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 'r'));
+    }
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * pxd_request_suspend / pxd_request_resume drive both the app_suspend
+ * flag and the fp->suspend refcount. A duplicate 'S' must be rejected by
+ * the cmpxchg gate on app_suspend, so the refcount only moves once even
+ * if the ioctl is called twice.
+ */
+TEST_P(PxdFastpathTest, app_suspend_resume_and_double_request)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 204;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    debug_state s{};
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+
+    ASSERT_EQ(0, debug_write(pm, 'S'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(1, s.suspend);
+    ASSERT_EQ(1, s.app_suspend);
+
+    /* Second request is refused by cmpxchg on app_suspend; refcount and
+     * flag stay put. sysfs write itself does not surface -EBUSY, so we
+     * validate by inspecting the resulting counters. */
+    ASSERT_EQ(0, debug_write(pm, 'S'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(1, s.suspend) << "duplicate app suspend must not re-increment refcount";
+    ASSERT_EQ(1, s.app_suspend);
+
+    ASSERT_EQ(0, debug_write(pm, 'R'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+
+    /* Second resume is a no-op via the app_suspend cmpxchg; refcount
+     * stays at 0 and does not go negative. */
+    ASSERT_EQ(0, debug_write(pm, 'R'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+}
+
+/*
+ * Mix low-level ('s'/'r') and app-level ('S'/'R') callers. The refcount
+ * must be the sum of active suspends across both sources; final drain
+ * lands at exactly 0.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_mixed_sources)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 205;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    debug_state s{};
+
+    ASSERT_EQ(0, debug_write(pm, 'S'));   /* app: suspend=1, app_suspend=1 */
+    ASSERT_EQ(0, debug_write(pm, 's'));   /* low: suspend=2                */
+    ASSERT_EQ(0, debug_write(pm, 's'));   /* low: suspend=3                */
+
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(3, s.suspend);
+    ASSERT_EQ(1, s.app_suspend);
+
+    ASSERT_EQ(0, debug_write(pm, 'r'));   /* low: suspend=2 */
+    ASSERT_EQ(0, debug_write(pm, 'R'));   /* app: suspend=1, app_suspend=0 */
+    ASSERT_EQ(0, debug_write(pm, 'r'));   /* low: suspend=0 */
+
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+}
+
+/*
+ * Concurrent balanced suspend/resume from many threads. Final refcount
+ * must land at exactly 0 regardless of interleaving; no thread should
+ * observe a spurious "already 0" warning because every 'r' is
+ * predecessed by an 's' from the same thread.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_concurrent_balanced)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 206;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    const int nthreads = 8;
+    const int iters = 50;
+    std::vector<std::thread> threads;
+    threads.reserve(nthreads);
+    for (int t = 0; t < nthreads; ++t) {
+        threads.emplace_back([pm, iters]() {
+            for (int i = 0; i < iters; ++i) {
+                debug_write(pm, 's');
+                debug_write(pm, 'r');
+            }
+        });
+    }
+    for (auto &th : threads) th.join();
+
+    ASSERT_EQ(0, read_suspend_count(pm))
+        << "balanced concurrent suspend/resume must drain to exactly 0";
+}
+
 // Instantiate the parameterized tests with both backing file and loop device configurations
 INSTANTIATE_TEST_SUITE_P(
     BackingDeviceTypes,

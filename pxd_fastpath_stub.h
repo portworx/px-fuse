@@ -19,21 +19,6 @@ struct workqueue_struct* fastpath_workqueue(void)
 	return NULL;
 }
 
-/// common failover/fallback code path
-static inline
-int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
-{
-	BUG_ON(!"unexpected");
-	return -EINVAL;
-}
-
-static inline
-int pxd_request_resume_internal(struct pxd_device *pxd_dev)
-{
-	BUG_ON(!"unexpected");
-	return -EINVAL;
-}
-
 /// ioctl calls from userspace
 static inline
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)

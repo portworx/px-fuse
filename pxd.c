@@ -704,7 +704,7 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 	}
 
-	pxd_request_resume_internal(pxd_dev);
+	pxd_resume_io(pxd_dev);
 
 	// status=0 -> reroute to slowpath; non-zero -> -EIO. No-op for FALLBACK.
 	pxd_reissuefailQ(pxd_dev, &ios, status);
@@ -785,18 +785,19 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return 0;
 	}
 
-	rc = pxd_request_suspend_internal(pxd_dev, false, true);
-	if (rc) {
-		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
-		return rc;
+	pxd_suspend_io(pxd_dev);
+	rc = wait_for_sync(pxd_dev, false);
+	if (unlikely(rc) && rc != -EINVAL && rc != -EIO) {
+		printk(KERN_ERR"device %llu sync failed %d, continuing with disable\n",
+				pxd_dev->dev_id, rc);
 	}
 
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
 	if (rc) {
-		// _internal pairs with pxd_request_suspend_internal above;
+		// _internal pairs with pxd_suspend_io above;
 		// pxd_request_resume() would no-op (app_suspend was never set)
 		// and leak the blk_mq_quiesce.
-		pxd_request_resume_internal(pxd_dev);
+		pxd_resume_io(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 		return rc;
 	}
@@ -835,15 +836,11 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 
 	trace_pxd_initiate_fallback(pxd_dev->dev_id, pxd_dev->minor);
 
-	rc = pxd_request_suspend_internal(pxd_dev, true, false);
-	if (rc) {
-		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
-		return rc;
-	}
+	pxd_suspend_io(pxd_dev);
 
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK_TO_KERNEL);
 	if (rc) {
-		pxd_request_resume_internal(pxd_dev);
+		pxd_resume_io(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
 	return rc;

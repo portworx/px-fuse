@@ -539,7 +539,7 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 }
 
 #define SYNC_TIMEOUT (60000)
-static int wait_for_sync(struct pxd_device *pxd_dev, bool skipsync)
+int wait_for_sync(struct pxd_device *pxd_dev, bool skipsync)
 {
         struct pxd_fastpath_extension *fp = &pxd_dev->fp;
         int i;
@@ -575,69 +575,23 @@ static int wait_for_sync(struct pxd_device *pxd_dev, bool skipsync)
         return 0;
 }
 
-// shall be called internally during iopath switching.
-int pxd_request_suspend_internal(struct pxd_device *pxd_dev,
-		bool skip_flush, bool coe)
-{
-	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
-	int rc;
-
-	if (!fastpath_enabled(pxd_dev)) {
-		return -EINVAL;
-	}
-
-	// check if previous sync instance is still active
-	if (!skip_flush && pxd_sync_work_pending(pxd_dev)) {
-		return -EBUSY;
-	}
-
-	pxd_suspend_io(pxd_dev);
-
-	if (skip_flush || !fp->fastpath) return 0;
-
-	rc = wait_for_sync(pxd_dev, skip_flush);
-	if (rc)
-		goto fail;
-	printk(KERN_NOTICE"device %llu suspended IO from userspace\n", pxd_dev->dev_id);
-	return 0;
-fail:
-	// It is possible replicas are down during failover
-	// ignore and continue
-	if (coe) {
-		printk(KERN_NOTICE"device %llu sync failed %d, continuing with suspend\n",
-				pxd_dev->dev_id, rc);
-		return 0;
-	}
-	pxd_resume_io(pxd_dev);
-	return rc;
-}
-
 // external request to suspend IO on fastpath device
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
 {
-	int rc = 0;
-
 	if (atomic_cmpxchg(&pxd_dev->fp.app_suspend, 0, 1) != 0) {
 		return -EBUSY;
 	}
 
-	rc = pxd_request_suspend_internal(pxd_dev, skip_flush, coe);
-	if (rc) {
-		// reset on failure
-		atomic_set(&pxd_dev->fp.app_suspend, 0);
+	pxd_suspend_io(pxd_dev);
+	if (fastpath_active(pxd_dev)) {
+		int rc = wait_for_sync(pxd_dev, false);
+		if (unlikely(rc) && rc != -EINVAL && rc != -EIO) {
+			printk(KERN_ERR"device %llu sync failed %d, continuing with disable\n",
+					pxd_dev->dev_id, rc);
+		}
 	}
 
-	return rc;
-}
-
-int pxd_request_resume_internal(struct pxd_device *pxd_dev)
-{
-	if (!fastpath_enabled(pxd_dev)) {
-		return -EINVAL;
-	}
-
-	pxd_resume_io(pxd_dev);
-	printk(KERN_NOTICE"device %llu resumed IO from userspace\n", pxd_dev->dev_id);
+	// don't fail
 	return 0;
 }
 
@@ -650,10 +604,8 @@ int pxd_request_resume(struct pxd_device *pxd_dev)
 		return -EINVAL;
 	}
 
-	rc = pxd_request_resume_internal(pxd_dev);
-	if (rc) {
-		atomic_set(&pxd_dev->fp.app_suspend, 1);
-	}
+	pxd_resume_io(pxd_dev);
+	printk(KERN_NOTICE"device %llu resumed IO from userspace\n", pxd_dev->dev_id);
 	return rc;
 }
 
@@ -984,6 +936,7 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool 
 		return;
 	}
 
+	pxd_suspend_io(pxd_dev);
 	disableFastPath(pxd_dev, skip_sync);
 
 	ioswitch_active = atomic_read(&fp->ioswitch_active);
