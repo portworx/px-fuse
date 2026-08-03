@@ -177,8 +177,14 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
 
 void pxd_resume_io(struct pxd_device *pxd_dev) {
         bool wakeup;
-        int curr = atomic_dec_return(&pxd_dev->fp.suspend);
         struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+        int curr = atomic_dec_if_positive(&fp->suspend);
+
+        if (curr < 0) {
+                printk(KERN_WARNING "pxd device %llu: resume with suspend count already 0; ignoring\n",
+                       pxd_dev->dev_id);
+                return;
+        }
 
         wakeup = (curr == 0);
         if (wakeup) {
@@ -559,16 +565,123 @@ err:
 }
 
 // failover handling
+//
+// Three-way branch + park-during-freeze:
+//  (park) ctx->fp_freeze == 1:
+//      a ctx-scoped teardown/reopen is in progress. Do not commit to a
+//      branch decision - the state we'd observe is transient. Park the
+//      fproot on this device's failQ (same list branch (c) uses).
+//      pxd_fp_freeze_end / pxdctx_reset_fastpath drain failQ with the
+//      correct mode (reissue-native for soft path, abort for hard path).
+//      We do NOT call pxd_initiate_failover from here.
+//  (a) pxd_dev->connected == false:
+//      abort_work already ran; userspace has been down past the timeout.
+//      Fail IO with -EIO.
+//  (b) ctx->fc.connected == 0 (userspace down, still within abort timer):
+//      switch this device to native slowpath locally without a coordinated
+//      failover request, and re-queue the IO through fuse (which holds it
+//      until userspace reconnects or allow_disconnected flips to 0).
+//  (c) otherwise: userspace is up; drive the standard coordinated failover
+//      via pxd_initiate_failover.
+//
+// Cross-CPU memory ordering:
+//   The freeze gate uses acquire/release semantics.
+//     Writer pxd_fp_freeze_start / pxd_fp_freeze_end: smp_store_release.
+//     Reader (this function): smp_load_acquire on the outer gate check.
+//   Because every state store to pxd_dev->connected, ctx->fc.connected,
+//   and pxd_dev->fp.fastpath (true->false) happens inside a freeze
+//   window, the acquire on the gate implicitly orders our subsequent
+//   plain READ_ONCE reads of those fields. Weak archs (arm64, ppc,
+//   riscv) require this pairing; plain WRITE_ONCE/READ_ONCE would let
+//   the CPU speculate the state loads before the gate load and observe
+//   a mid-transition combination. On x86 (TSO) acquire/release compile
+//   to the same instructions as READ_ONCE/WRITE_ONCE plus a compiler
+//   barrier.
+//
+//   The inner re-check under fp.fail_lock uses plain READ_ONCE:
+//   spin_lock is a full memory barrier on every Linux arch and
+//   subsumes acquire for this call site.
 static void pxd_io_failover(struct kthread_work *work) {
         struct fp_root_context *fproot =
             container_of(work, struct fp_root_context, work);
         struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+        struct pxd_context *ctx = pxd_dev->ctx;
         int rc;
         unsigned long flags;
+        bool dev_conn;
+        bool ctx_conn;
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+	/* Park during ctx freeze.
+	 *
+	 * smp_load_acquire pairs with smp_store_release in
+	 * pxd_fp_freeze_start/end. Two properties this pairing gives us:
+	 *   1. If we observe fp_freeze == 1, subsequent loads/stores on
+	 *      this CPU do not reorder before it - so our list_add under
+	 *      fail_lock cannot be speculated ahead of the gate check.
+	 *   2. If we observe fp_freeze == 0 (post-freeze_end), we also
+	 *      observe every state store the writer made before releasing
+	 *      the gate - specifically pxd_dev->connected and
+	 *      ctx->fc.connected. That is what makes the plain
+	 *      READ_ONCE'd reads below safe against mid-transition
+	 *      observation on weak archs (arm64, ppc, riscv).
+	 *
+	 * The inner re-check inside fp.fail_lock can use plain READ_ONCE:
+	 * spin_lock is a full barrier on all Linux archs, so any state
+	 * the writer published before its own fail_lock acquire in the
+	 * drain loop is visible to us here.
+	 */
+	if (smp_load_acquire(&ctx->fp_freeze)) {
+		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		if (READ_ONCE(ctx->fp_freeze)) {
+			list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+			spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+			return;
+		}
+		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+	}
+
+	/* Both loads are ordered after the smp_load_acquire above, so
+	 * they observe the writer's paired smp_store_release view of
+	 * these fields. No additional barrier needed here. */
+	dev_conn = READ_ONCE(pxd_dev->connected);
+	ctx_conn = READ_ONCE(ctx->fc.connected) != 0;
+
+	// (a) hard-fail: device disconnected past the abort timeout
+	if (!dev_conn) {
+		/* fail right away */
+		struct fuse_req* req = fproot_to_fuse_request(fproot);
+                clone_cleanup(fproot);
+#ifndef __PX_BLKMQ__
+                blk_end_request(req->rq, -EIO, blk_rq_bytes(req->rq));
+                fuse_request_free(req);
+#else
+                blk_mq_end_request(req->rq, BLK_STS_IOERR);
+#endif
+		return;
+	}
+
+	// (b) userspace not available now, switch io path to native locally
+	if (!ctx_conn) {
+		/* userspace down - can queue directly without failover request.
+		 *
+		 * skip_sync=true: we reach this branch because a fastpath IO
+		 * just errored (that is what queued pxd_io_failover). The
+		 * backing target is by construction unreliable at this moment,
+		 * so a vfs_fsync on it is meaningless. Rule (a) - broken
+		 * backing - not "userspace is gone". wait_for_sync() itself
+		 * does NOT go through userspace; it is driver-local. */
+		struct fuse_req* req = fproot_to_fuse_request(fproot);
+		disableFastPath(pxd_dev, true /* skip sync */);
+                atomic_inc(&pxd_dev->fp.nslowPath);
+                clone_cleanup(fproot);
+		pxdmq_reroute_slowpath(req);
+		return;
+	}
+
+	// (c) inform userspace about active io path failover
         // Enqueue and call. pxd_initiate_failover handles the three cases
         // internally: in-progress (no-op), orphan/native (splice+reissue
         // locally, return 0), or leader (full failover round-trip).

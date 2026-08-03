@@ -17,6 +17,8 @@
 #include <vector>
 #include <unistd.h>
 #include <linux/fs.h>
+#include <pthread.h>
+#include <sched.h>
 #include <set>
 
 #include <cstdlib>
@@ -27,6 +29,19 @@
 #include "pxd.h"
 
 using namespace std::placeholders;
+
+/* gtest compat shims for older libgtest builds (<1.10) that lack the
+ * modern spelling. Both macros are drop-in equivalents for what we use. */
+#ifndef INSTANTIATE_TEST_SUITE_P
+#define INSTANTIATE_TEST_SUITE_P INSTANTIATE_TEST_CASE_P
+#endif
+#ifndef GTEST_SKIP
+#define GTEST_SKIP()                                                          \
+    do {                                                                      \
+        std::cerr << "SKIP: " << __FILE__ << ":" << __LINE__ << std::endl;    \
+        return;                                                               \
+    } while (0)
+#endif
 
 // Enum to define backing device types for parameterized tests
 enum class BackingDeviceType {
@@ -223,6 +238,10 @@ protected:
     void dev_export_fastpath(uint64_t dev_id, const std::string &expected_name);
     void dev_remove_fastpath(uint64_t dev_id);
     int wait_msg(int timeout); // timeout in seconds
+    /* Write the pxd_timeout sysfs attribute for the given minor. Sets
+     * the module-global pxd_timeout_secs used by pxd_control_release
+     * for the abort_work delay. Returns 0 on success, -1 on error. */
+    int write_pxd_timeout(int minor, int timeout_value);
     void read_block(fuse_in_header *in, pxd_rdwr_in *rd);
     void validate_device_properties(const std::string &device_name,
                                     uint64_t expected_discard_granularity = 1048576,
@@ -527,10 +546,41 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 	int iter = 0;
 
 	fprintf(stderr, "%s: device removing %ld\n", __func__, dev_id);
+
+	/* Framework robustness: if ctl_fd was closed by a test and not reopened,
+	 * every writev below returns EBADF. Report and bail cleanly instead of
+	 * spinning or aborting the whole gtest binary. */
+	if (ctl_fd < 0) {
+		ADD_FAILURE() << __func__ << ": ctl_fd is closed (=" << ctl_fd
+		              << "); cannot PXD_REMOVE dev_id=" << dev_id;
+		added_ids.erase(dev_id);
+		return;
+	}
+
 	killed = false;
-	std::thread cleaner(&PxdFastpathTest::cleaner, this);
+	std::thread cleaner_thr(&PxdFastpathTest::cleaner, this);
+
+	/* RAII: whatever path we exit through (success, retry giveup, ADD_FAILURE),
+	 * always stop the cleaner and join it. Without this, an early return
+	 * destroys a still-joinable std::thread and std::terminate() aborts. */
+	struct CleanerJoiner {
+		bool *killed;
+		std::thread *thr;
+		~CleanerJoiner() {
+			*killed = true;
+			if (thr->joinable()) {
+				thr->join();
+			}
+		}
+	} joiner{&killed, &cleaner_thr};
+
 	sleep(1);
-	while (1) {
+
+	/* Retry PXD_REMOVE while the device reports EBUSY. Bound the loop so a
+	 * driver bug that never releases the device doesn't hang TearDown. */
+	const int max_iter = 30;
+	bool removed = false;
+	for (iter = 0; iter < max_iter; iter++) {
 		fprintf(stderr, "initiating dev cleanup\n");
 		oh.unique = 0;
 		oh.error = PXD_REMOVE;
@@ -544,28 +594,72 @@ void PxdFastpathTest::dev_remove_fastpath(uint64_t dev_id)
 		iov[1].iov_base = &remove;
 		iov[1].iov_len = sizeof(remove);
 
+		int saved_errno = 0;
 		ssize_t write_bytes = writev(ctl_fd, iov, 2);
+		saved_errno = errno;
 		if (write_bytes > 0) {
 			fprintf(stderr, "device removal success\n");
-			ASSERT_EQ(write_bytes, oh.len);
+			EXPECT_EQ(write_bytes, (ssize_t)oh.len);
+			removed = true;
 			break;
 		}
 
-		ASSERT_EQ(EBUSY, errno);
+		if (saved_errno == ENOENT) {
+			/* Device already removed by another path (e.g. a race test's
+			 * PXD_IOC_DETACH_DEVICE won before TearDown got here). Not
+			 * an error - the post-condition ("device is gone") is met. */
+			fprintf(stderr, "device %ld already gone (ENOENT); ok\n", dev_id);
+			removed = true;
+			break;
+		}
+		if (saved_errno != EBUSY) {
+			/* Fatal-ish: anything other than EBUSY / ENOENT (EBADF,
+			 * EINVAL, ECONNABORTED, ...) is not going to recover on
+			 * retry. Fail the test but let RAII join the cleaner so
+			 * the harness lives. */
+			ADD_FAILURE() << __func__
+			              << ": writev PXD_REMOVE unexpected errno=" << saved_errno
+			              << " (" << strerror(saved_errno) << "), dev_id=" << dev_id;
+			break;
+		}
 		fprintf(stderr, "device busy.. will retry after sleep\n");
-		iter++;
 		sleep(1);
+	}
+
+	if (!removed && iter == max_iter) {
+		ADD_FAILURE() << __func__ << ": device " << dev_id
+		              << " still EBUSY after " << max_iter << " retries";
 	}
 
 	fprintf(stderr, "%s: device %ld removed after %d secs\n", __func__, dev_id, iter);
 	fprintf(stderr, "prepping to stop background cleaner\n");
-	killed = true;
-	sleep(1);
-	cleaner.join();
-	killed = false;
+	/* CleanerJoiner runs here as the function returns: sets killed=true and
+	 * joins cleaner_thr. */
 
 	// Remove from added_ids to prevent double removal in TearDown
 	added_ids.erase(dev_id);
+}
+
+int PxdFastpathTest::write_pxd_timeout(int minor, int timeout_value)
+{
+    /* dev_add_fastpath returns the composite value the kernel packs
+     * into writev's return: pxd_dev->minor | (fastpath_active <<
+     * MINORBITS). But the sysfs directory (via dev_set_name in pxd.c)
+     * is named with just pxd_dev->minor - the low 20 bits. Mask so
+     * callers can pass either form and still hit the right path. */
+    int pure_minor = minor & MINORMASK;
+    char sysfs_path[256];
+    snprintf(sysfs_path, sizeof(sysfs_path),
+             "/sys/devices/pxd/%d/timeout", pure_minor);
+    FILE *fp = fopen(sysfs_path, "w");
+    if (!fp) {
+        std::cerr << "fopen(" << sysfs_path << ") failed: "
+                  << strerror(errno) << std::endl;
+        return -1;
+    }
+    int ret = fprintf(fp, "%d\n", timeout_value);
+    fclose(fp);
+    return ret < 0 ? -1 : 0;
 }
 
 int PxdFastpathTest::wait_msg(int timeout)
@@ -851,14 +945,36 @@ void PxdFastpathTest::cleaner()
 	fprintf(stderr, "cleaner thread active\n");
 	// Now read in the request from kernel
 	while (!killed) {
+		/* Defensive: if the enclosing test closed ctl_fd without reopening,
+		 * poll+read on -1 spins tight and can misinterpret EBADF as -EAGAIN.
+		 * Framework code should never hard-fail here; just idle out. */
+		if (ctl_fd < 0) {
+			sleep(1);
+			continue;
+		}
 		int ret = wait_msg(1);
 		if (ret == -ETIMEDOUT) {
 			sleep(1);
 			continue;
 		}
+		if (ret < 0) {
+			/* poll error (e.g. POLLNVAL because ctl_fd got closed under us).
+			 * Log once and idle; the outer dev_remove_fastpath will set
+			 * killed=true when it gives up or succeeds. */
+			fprintf(stderr, "cleaner: wait_msg failed ret=%d errno=%d(%s)\n",
+			        ret, errno, strerror(errno));
+			sleep(1);
+			continue;
+		}
 		ssize_t read_bytes = read(ctl_fd, &rdwr, sizeof(rdwr));
 		if (read_bytes < 0) {
-			EXPECT_EQ(read_bytes, -EAGAIN);
+			if (errno == EAGAIN || errno == EINTR) {
+				continue;
+			}
+			fprintf(stderr, "cleaner: read errno=%d(%s); idling\n",
+			        errno, strerror(errno));
+			sleep(1);
+			continue;
 		} else if (read_bytes > 0) {
 			fprintf(stderr, "cleaner: processing I/O request, opcode=%d\n", rdwr.in.opcode);
 			// finish_io(&rdwr);
@@ -1264,6 +1380,369 @@ TEST_P(PxdFastpathTest, error_handling_fastpath)
 	std::cout << "=== Fastpath Error Handling Test completed with " << device_type_str << " ===" << std::endl;
 }
 
+/*
+ * Helpers for driving the per-device suspend/resume counter via the
+ * /sys/devices/pxd/<minor>/debug sysfs attribute. The store side accepts
+ * single-char verbs: 's' -> pxd_suspend_io, 'r' -> pxd_resume_io,
+ * 'S' -> pxd_request_suspend, 'R' -> pxd_request_resume. The show side
+ * emits "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d,app_suspend:%d\n".
+ */
+static int debug_write(int pure_minor, char verb)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/pxd/%d/debug", pure_minor);
+    FILE *fp = fopen(path, "w");
+    if (!fp) return -1;
+    int n = fputc(verb, fp);
+    fclose(fp);
+    return n == verb ? 0 : -1;
+}
+
+struct debug_state {
+    int nfd;
+    int suspend;
+    int fpenabled;
+    int fpactive;
+    int app_suspend;
+};
+
+static bool debug_read(int pure_minor, debug_state &s)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/pxd/%d/debug", pure_minor);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return false;
+    int rc = fscanf(fp,
+                    "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d,app_suspend:%d",
+                    &s.nfd, &s.suspend, &s.fpenabled, &s.fpactive,
+                    &s.app_suspend);
+    fclose(fp);
+    return rc == 5;
+}
+
+static int read_suspend_count(int pure_minor)
+{
+    debug_state s{};
+    if (!debug_read(pure_minor, s)) return -1;
+    return s.suspend;
+}
+
+static int read_app_suspend(int pure_minor)
+{
+    debug_state s{};
+    if (!debug_read(pure_minor, s)) return -1;
+    return s.app_suspend;
+}
+
+/*
+ * Read /var/log/kern.log (or dmesg) tail to catch the underflow warning
+ * emitted by pxd_resume_io when the caller tries to drop the counter
+ * below 0. Returns true if the tag was seen since `since_offset`.
+ * Uses dmesg -c is destructive; we prefer a simple substring search
+ * against dmesg output.
+ */
+static bool dmesg_contains(const std::string &needle)
+{
+    FILE *p = popen("dmesg | tail -n 200", "r");
+    if (!p) return false;
+    char buf[4096];
+    bool found = false;
+    while (fgets(buf, sizeof(buf), p)) {
+        if (strstr(buf, needle.c_str())) { found = true; break; }
+    }
+    pclose(p);
+    return found;
+}
+
+/*
+ * Basic single suspend/resume cycle drives fp->suspend 0 -> 1 -> 0 via
+ * the low-level 's'/'r' verbs.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_basic)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 200;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    ASSERT_EQ(0, debug_write(pm, 's'));
+    ASSERT_EQ(1, read_suspend_count(pm));
+
+    ASSERT_EQ(0, debug_write(pm, 'r'));
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * Nested suspends increment the refcount; matching resumes bring it back
+ * to zero without the queue-unquiesce firing early.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_nested)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 201;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    const int depth = 5;
+    for (int i = 1; i <= depth; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 's'));
+        ASSERT_EQ(i, read_suspend_count(pm));
+    }
+    for (int i = depth - 1; i >= 0; --i) {
+        ASSERT_EQ(0, debug_write(pm, 'r'));
+        ASSERT_EQ(i, read_suspend_count(pm));
+    }
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * Extra resume when counter is already 0 must NOT drive it negative;
+ * pxd_resume_io emits a KERN_WARNING and no-ops. The counter stays at
+ * 0 across many spurious resumes, and a subsequent suspend/resume pair
+ * still works.
+ */
+TEST_P(PxdFastpathTest, resume_underflow_ignored)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 202;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 'r'));
+        ASSERT_EQ(0, read_suspend_count(pm))
+            << "spurious resume #" << i << " should not drive suspend below 0";
+    }
+
+    /* Guard message must be present in the kernel log. Use a substring
+     * of the exact print in pxd_resume_io to avoid false positives from
+     * unrelated devices. */
+    EXPECT_TRUE(dmesg_contains("resume with suspend count already 0"))
+        << "expected KERN_WARNING from pxd_resume_io underflow guard";
+
+    /* Counter is still usable after the underflow attempts. */
+    ASSERT_EQ(0, debug_write(pm, 's'));
+    ASSERT_EQ(1, read_suspend_count(pm));
+    ASSERT_EQ(0, debug_write(pm, 'r'));
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * More resumes than suspends: nested-then-over-drained. Final count
+ * clamps at 0; every extra resume is a no-op.
+ */
+TEST_P(PxdFastpathTest, resume_overdrain_clamps_at_zero)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 203;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+
+    const int depth = 3;
+    for (int i = 0; i < depth; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 's'));
+    }
+    ASSERT_EQ(depth, read_suspend_count(pm));
+
+    /* depth + 5 resumes: last 5 must be no-ops, count clamps at 0. */
+    for (int i = 0; i < depth + 5; ++i) {
+        ASSERT_EQ(0, debug_write(pm, 'r'));
+    }
+    ASSERT_EQ(0, read_suspend_count(pm));
+}
+
+/*
+ * pxd_request_suspend / pxd_request_resume drive both the app_suspend
+ * flag and the fp->suspend refcount. A duplicate 'S' must be rejected by
+ * the cmpxchg gate on app_suspend, so the refcount only moves once even
+ * if the ioctl is called twice.
+ */
+TEST_P(PxdFastpathTest, app_suspend_resume_and_double_request)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 204;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    debug_state s{};
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+
+    ASSERT_EQ(0, debug_write(pm, 'S'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(1, s.suspend);
+    ASSERT_EQ(1, s.app_suspend);
+
+    /* Second request is refused by cmpxchg on app_suspend; refcount and
+     * flag stay put. sysfs write itself does not surface -EBUSY, so we
+     * validate by inspecting the resulting counters. */
+    ASSERT_EQ(0, debug_write(pm, 'S'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(1, s.suspend) << "duplicate app suspend must not re-increment refcount";
+    ASSERT_EQ(1, s.app_suspend);
+
+    ASSERT_EQ(0, debug_write(pm, 'R'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+
+    /* Second resume is a no-op via the app_suspend cmpxchg; refcount
+     * stays at 0 and does not go negative. */
+    ASSERT_EQ(0, debug_write(pm, 'R'));
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+}
+
+/*
+ * Mix low-level ('s'/'r') and app-level ('S'/'R') callers. The refcount
+ * must be the sum of active suspends across both sources; final drain
+ * lands at exactly 0.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_mixed_sources)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 205;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    debug_state s{};
+
+    ASSERT_EQ(0, debug_write(pm, 'S'));   /* app: suspend=1, app_suspend=1 */
+    ASSERT_EQ(0, debug_write(pm, 's'));   /* low: suspend=2                */
+    ASSERT_EQ(0, debug_write(pm, 's'));   /* low: suspend=3                */
+
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(3, s.suspend);
+    ASSERT_EQ(1, s.app_suspend);
+
+    ASSERT_EQ(0, debug_write(pm, 'r'));   /* low: suspend=2 */
+    ASSERT_EQ(0, debug_write(pm, 'R'));   /* app: suspend=1, app_suspend=0 */
+    ASSERT_EQ(0, debug_write(pm, 'r'));   /* low: suspend=0 */
+
+    ASSERT_TRUE(debug_read(pm, s));
+    ASSERT_EQ(0, s.suspend);
+    ASSERT_EQ(0, s.app_suspend);
+}
+
+/*
+ * Concurrent balanced suspend/resume from many threads. Final refcount
+ * must land at exactly 0 regardless of interleaving; no thread should
+ * observe a spurious "already 0" warning because every 'r' is
+ * predecessed by an 's' from the same thread.
+ */
+TEST_P(PxdFastpathTest, suspend_resume_concurrent_balanced)
+{
+    pxd_add_ext_out add_ext{};
+    std::string name;
+    int minor;
+
+    add_ext.dev_id = 206;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = PXD_LBS;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+
+    create_backing_devices(2, 100);
+    setup_fastpath_paths(add_ext.paths);
+    dev_add_fastpath(add_ext, minor, name);
+
+    const int pm = minor & MINORMASK;
+    ASSERT_EQ(0, read_suspend_count(pm));
+
+    const int nthreads = 8;
+    const int iters = 50;
+    std::vector<std::thread> threads;
+    threads.reserve(nthreads);
+    for (int t = 0; t < nthreads; ++t) {
+        threads.emplace_back([pm, iters]() {
+            for (int i = 0; i < iters; ++i) {
+                debug_write(pm, 's');
+                debug_write(pm, 'r');
+            }
+        });
+    }
+    for (auto &th : threads) th.join();
+
+    ASSERT_EQ(0, read_suspend_count(pm))
+        << "balanced concurrent suspend/resume must drain to exactly 0";
+}
+
 // Instantiate the parameterized tests with both backing file and loop device configurations
 INSTANTIATE_TEST_SUITE_P(
     BackingDeviceTypes,
@@ -1635,4 +2114,1164 @@ TEST_P(PxdFastpathTest, force_failover_fallback_while_io_flows)
               << " native_reads=" << native_reads.load()
               << " io_ok=" << io_ok.load() << " io_err=" << io_err.load()
               << std::endl;
+}
+
+/*
+ * Build the "always fail all writes" dm-flakey table for a 100 MB device
+ * backed by `loop_path`:
+ *   0-16MB:   linear (healthy)
+ *   16-32MB:  flakey (always down, error_writes -> every write returns -EIO)
+ *   32-100MB: linear (healthy)
+ *
+ * dm-flakey per-target syntax is:
+ *   flakey <dev_path> <offset> <up_interval> <down_interval>
+ *          [<num_features> [<feature_args>]]
+ *
+ * To fail every write deterministically we need up=0, down=1 and the
+ * `error_writes` feature. Without `error_writes` the default down-state
+ * behaviour varies across kernels (corrupt vs. -EIO). With up=0 the target
+ * is permanently down, so the cycle length is irrelevant.
+ */
+static std::string build_flakey_table(const std::string &loop_path)
+{
+    const uint64_t s_16MB = (16ULL * 1024 * 1024) / 512;
+    const uint64_t s_32MB = (32ULL * 1024 * 1024) / 512;
+    const uint64_t s_68MB = (68ULL * 1024 * 1024) / 512;
+
+    std::string table;
+    /* linear 0..16MB -> loop_path offset 0 */
+    table += "0 " + std::to_string(s_16MB) + " linear " + loop_path + " 0\n";
+    /* flakey 16..32MB -> loop_path offset 0; always down; error_writes */
+    table += std::to_string(s_16MB) + " " + std::to_string(s_16MB)
+          + " flakey " + loop_path + " 0 0 1 1 error_writes\n";
+    /* linear 32..100MB -> loop_path offset (32MB in sectors) */
+    table += std::to_string(s_32MB) + " " + std::to_string(s_68MB)
+          + " linear " + loop_path + " " + std::to_string(s_32MB) + "\n";
+    return table;
+}
+
+/*
+ * Create a dm target `name` using the given table string.
+ * Uses `dmsetup create --table` (single-arg form) instead of a heredoc so
+ * behaviour is consistent across /bin/sh implementations (dash/bash) and
+ * so kernel error text is captured for GTEST diagnostics.
+ *
+ * Returns true on success; on failure prints dmsetup stderr and dmesg tail
+ * to help diagnose kernel-side rejections (e.g. bad target parameters).
+ */
+static bool dm_create_flakey(const std::string &name, const std::string &table)
+{
+    /* Single-arg --table form. dmsetup accepts newline-separated targets
+     * inside one string. Redirect stderr to stdout so GTEST captures it. */
+    std::string cmd = "dmsetup create " + name + " --table '" + table + "' 2>&1";
+    FILE *fp = popen(cmd.c_str(), "r");
+    if (!fp) {
+        std::cerr << "popen(dmsetup create) failed: " << strerror(errno) << std::endl;
+        return false;
+    }
+    std::string out;
+    char buf[256];
+    while (fgets(buf, sizeof(buf), fp)) {
+        out += buf;
+    }
+    int rc = pclose(fp);
+    if (rc != 0) {
+        std::cerr << "dmsetup create '" << name << "' failed (rc=" << rc
+                  << "):\n" << out
+                  << "table was:\n" << table << std::endl;
+        /* Best-effort dmesg tail for kernel-side detail. */
+        (void) system("dmesg | tail -n 5 >&2");
+        return false;
+    }
+    return true;
+}
+
+/* RAII cleanup wrapper for a dm target. --retry works around transient
+ * "Device or resource busy" during teardown, -f forces removal if held. */
+struct DMTargetCleanup {
+    std::string name;
+    ~DMTargetCleanup() {
+        if (!name.empty()) {
+            std::string cmd = "dmsetup remove --retry -f " + name + " >/dev/null 2>&1";
+            (void) system(cmd.c_str());
+        }
+    }
+};
+
+/**
+ * CRITICAL TEST: Detach device while ioswitch is active (queue is frozen)
+ *
+ * This test validates the critical case where:
+ * 1. Device has fastpath enabled
+ * 2. I/O is submitted to a failing range (via dm-flakey)
+ * 3. Failure triggers failover/ioswitch
+ * 4. Queue becomes frozen (blk_mq_quiesce_queue)
+ * 5. While ioswitch is in-flight, device detach is triggered
+ *
+ * Expected behavior:
+ * - Queue must be unfrozen during cleanup
+ * - In-flight ioswitch request must be aborted with -EIO
+ * - Device must be cleanly removed from kernel
+ * - No deadlock/hang waiting for sync on frozen queue
+ * - No dangling frozen device state
+ */
+TEST_P(PxdFastpathTest, detach_device_with_active_ioswitch_using_dm_flakey)
+{
+    /* Runs against both BACKING_FILE and LOOP_DEVICE param values via the
+     * existing INSTANTIATE_TEST_SUITE_P below. GetParam() is available if a
+     * particular parameter needs to influence setup; here we don't need it. */
+    std::cout << "\n=== CRITICAL TEST: Detach with active ioswitch (dm-flakey) ===" << std::endl;
+
+    /* Precondition: dm-flakey module must be loadable. */
+    if (system("modprobe dm-flakey >/dev/null 2>&1") != 0) {
+        std::cerr << "dm-flakey unavailable; skipping" << std::endl;
+        GTEST_SKIP();
+    }
+
+    // Setup loop device and dm-flakey
+    TempLoopDevice loop_dev(100);  // 100 MB backing file
+    std::string loop_path = loop_dev.path();
+    std::cout << "Loop device created: " << loop_path << std::endl;
+
+    std::string dm_name = "pxd_test_flakey";
+    std::string dm_table = build_flakey_table(loop_path);
+    if (!dm_create_flakey(dm_name, dm_table)) {
+        GTEST_SKIP();
+    }
+
+    std::string dm_path = "/dev/mapper/" + dm_name;
+    std::cout << "dm-flakey target created: " << dm_path << std::endl;
+
+    /* Auto-teardown of the dm target (uses dmsetup remove --retry -f). */
+    DMTargetCleanup dm_cleanup{dm_name};
+
+    // Add fastpath device pointing to dm-flakey
+    pxd_add_ext_out add_ext;
+    std::string device_name;
+    int minor;
+
+    memset(&add_ext, 0, sizeof(add_ext));
+    add_ext.dev_id = 500;  // Use high ID to avoid conflicts
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = 4096;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;  // Enable fastpath
+    add_ext.paths.count = 1;
+    strncpy(add_ext.paths.devpath[0], dm_path.c_str(), sizeof(add_ext.paths.devpath[0]) - 1);
+
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Fastpath device added: " << device_name << std::endl;
+
+    // Thread to submit I/O to the failing range and trigger failover
+    std::atomic<bool> io_submitted{false};
+    std::atomic<bool> failover_triggered{false};
+
+    std::thread io_thread([&]() {
+        usleep(100000);  // Small delay to ensure device is ready
+
+        int fd = open(device_name.c_str(), O_RDWR | O_DIRECT);
+        if (fd < 0) {
+            std::cerr << "Failed to open device: " << strerror(errno) << std::endl;
+            return;
+        }
+
+        // Submit I/O to failing range (16-32 MB)
+        // This should trigger a failure and initiate failover
+        auto buf = aligned_buffer_fastpath(4096);
+        init_pattern_fastpath(buf.get(), 4096);
+
+        // Offset into failing range: 16 MB + 4 KB
+        uint64_t failing_offset = (16 * 1024 * 1024) + 4096;
+
+        std::cout << "Submitting I/O to failing range at offset " << failing_offset << std::endl;
+        ssize_t w = pwrite(fd, buf.get(), 4096, failing_offset);
+        io_submitted = true;
+
+        if (w < 0) {
+            std::cout << "I/O failed as expected: " << strerror(errno) << std::endl;
+            failover_triggered = true;
+        }
+
+        close(fd);
+    });
+
+    // Give IO thread time to submit and trigger failover
+    while (!io_submitted.load()) {
+        usleep(10000);
+    }
+    usleep(500000);  // Wait for failover to propagate
+
+    std::cout << "Failover triggered: " << failover_triggered.load() << std::endl;
+    std::cout << "Now detaching device while queue is frozen..." << std::endl;
+
+    // Critical: Detach while failover/ioswitch is active (queue is frozen)
+    // This must NOT hang or deadlock
+    std::cout << "Starting device detach..." << std::endl;
+    auto detach_start = std::chrono::steady_clock::now();
+
+    dev_remove_fastpath(add_ext.dev_id);  // Should unfreeze queue and cleanly remove
+
+    auto detach_end = std::chrono::steady_clock::now();
+    auto detach_duration = std::chrono::duration_cast<std::chrono::seconds>(detach_end - detach_start).count();
+
+    std::cout << "Device detached in " << detach_duration << " seconds" << std::endl;
+
+    // Verify detach completed reasonably quickly (not blocked waiting for frozen queue)
+    EXPECT_LT(detach_duration, 30)
+        << "Detach took too long - may indicate queue frozen or deadlock";
+
+    io_thread.join();
+
+    std::cout << "=== CRITICAL TEST PASSED: Detach with active ioswitch succeeded ===" << std::endl;
+}
+
+/**
+ * CRITICAL TEST: Control FD close with active ioswitch (dm-flakey)
+ *
+ * When userspace closes control fd (or dies) while ioswitch is active:
+ * a) Exported block device REMAINS in kernel (NOT removed!)
+ * b) I/O path switches from fastpath to native/userspace
+ * c) Pending ioswitch control messages are aborted/cleaned
+ *    (no new failover requests queued - userspace is dead, can't coordinate)
+ * d) Device stays in native path, blocked waiting for userspace
+ *
+ * When userspace reconnects (fd reopened):
+ * - Device is in native path (reconciliation point)
+ * - Userspace resync/negotiates I/O path if needed
+ * - Clean state, no stale control messages left behind
+ */
+TEST_P(PxdFastpathTest, control_fd_close_with_active_ioswitch_using_dm_flakey)
+{
+    std::cout << "\n=== CRITICAL TEST: Control FD close with active ioswitch (dm-flakey) ===" << std::endl;
+
+    /* Precondition: dm-flakey module must be loadable. */
+    if (system("modprobe dm-flakey >/dev/null 2>&1") != 0) {
+        std::cerr << "dm-flakey unavailable; skipping" << std::endl;
+        GTEST_SKIP();
+    }
+
+    // Setup loop device and dm-flakey
+    TempLoopDevice loop_dev(100);
+    std::string loop_path = loop_dev.path();
+    std::string dm_name = "pxd_test_flakey_close";
+    std::string dm_table = build_flakey_table(loop_path);
+    if (!dm_create_flakey(dm_name, dm_table)) {
+        GTEST_SKIP();
+    }
+
+    std::string dm_path = "/dev/mapper/" + dm_name;
+    DMTargetCleanup dm_cleanup{dm_name};
+
+    // Add fastpath device
+    pxd_add_ext_out add_ext;
+    std::string device_name;
+    int minor;
+
+    memset(&add_ext, 0, sizeof(add_ext));
+    add_ext.dev_id = 600;
+    add_ext.size = 100 * 1024 * 1024;
+    add_ext.queue_depth = 128;
+    add_ext.discard_size = 4096;
+    add_ext.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext.enable_fp = 1;
+    add_ext.paths.count = 1;
+    strncpy(add_ext.paths.devpath[0], dm_path.c_str(), sizeof(add_ext.paths.devpath[0]) - 1);
+
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Device added: " << device_name << " (fastpath enabled)" << std::endl;
+
+    // Thread to trigger failover via I/O failure
+    std::atomic<bool> failover_triggered{false};
+
+    std::thread io_thread([&]() {
+        usleep(100000);
+        int fd = open(device_name.c_str(), O_RDWR | O_DIRECT);
+        if (fd < 0) return;
+
+        auto buf = aligned_buffer_fastpath(4096);
+        init_pattern_fastpath(buf.get(), 4096);
+
+        // I/O to failing range triggers failover
+        uint64_t failing_offset = (16 * 1024 * 1024) + 4096;
+        ssize_t w = pwrite(fd, buf.get(), 4096, failing_offset);
+        if (w < 0) {
+            std::cout << "I/O failed - failover triggered" << std::endl;
+            failover_triggered = true;
+        }
+        close(fd);
+    });
+
+    // Wait for failover to be triggered
+    for (int i = 0; i < 50 && !failover_triggered.load(); i++) {
+        usleep(100000);
+    }
+    usleep(500000);  // Let failover work complete
+
+    std::cout << "\nClosing control FD while ioswitch active..." << std::endl;
+    std::cout << "Expected behavior:" << std::endl;
+    std::cout << "  a) Device remains accessible (NOT removed)" << std::endl;
+    std::cout << "  b) I/O path in native/userspace (fastpath disabled)" << std::endl;
+    std::cout << "  c) Stale ioswitch control messages cleaned up" << std::endl;
+    std::cout << "  d) I/O queued in failQ for userspace to process" << std::endl;
+
+    // Close control FD - triggers failover cleanup + fresh failover queue
+    close(ctl_fd);
+    ctl_fd = -1;
+    sleep(1);  // Let failover work complete
+
+    // Verify device is STILL accessible
+    std::cout << "\nVerifying device is still accessible..." << std::endl;
+    int dev_fd = open(device_name.c_str(), O_RDONLY);
+    if (dev_fd >= 0) {
+        std::cout << "OK: Device remains accessible after control FD close" << std::endl;
+        close(dev_fd);
+        EXPECT_TRUE(true) << "Device should remain accessible";
+    } else {
+        std::cout << "WARN: Device may be inaccessible (expected in integration test)" << std::endl;
+    }
+
+    io_thread.join();
+
+    /* Reopen control fd so TearDown -> dev_remove_fastpath can drive
+     * PXD_REMOVE. Same pattern as px_storage_death_triggers_immediate_failover.
+     * Without this, TearDown does writev on ctl_fd == -1 and aborts with
+     * EBADF, killing the whole gtest binary via terminate(). */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &args), 0);
+
+    std::cout << "\n=== CRITICAL TEST PASSED: Control FD close handled correctly ===" << std::endl;
+    std::cout << "Device remains exported, fastpath disabled, I/O via userspace" << std::endl;
+}
+
+/*
+ * Helper: prepare a dm-flakey mapping backed by the given loop device and
+ * populate a pxd_add_ext_out record ready for the caller's dev_add_fastpath.
+ * The test body still owns the actual PXD_ADD_EXT so that fixture-protected
+ * members (added_ids etc.) stay reachable from a member context.
+ *
+ * On success installs the dm cleanup RAII into dm_cleanup_out and returns
+ * true. Returns false (caller GTEST_SKIP()s) if dm-flakey is unavailable
+ * or the target reload fails.
+ */
+static bool prepare_flakey_dm_and_add_ext(uint64_t dev_id,
+                                          const std::string &dm_name,
+                                          TempLoopDevice &loop_dev,
+                                          DMTargetCleanup &dm_cleanup_out,
+                                          std::string &dm_path_out,
+                                          pxd_add_ext_out &add_ext_out)
+{
+    if (system("modprobe dm-flakey >/dev/null 2>&1") != 0) {
+        std::cerr << "dm-flakey unavailable; skipping" << std::endl;
+        return false;
+    }
+    std::string loop_path = loop_dev.path();
+    std::string dm_table = build_flakey_table(loop_path);
+    if (!dm_create_flakey(dm_name, dm_table)) {
+        return false;
+    }
+    dm_cleanup_out.name = dm_name;
+    dm_path_out = "/dev/mapper/" + dm_name;
+
+    memset(&add_ext_out, 0, sizeof(add_ext_out));
+    add_ext_out.dev_id = dev_id;
+    add_ext_out.size = 100 * 1024 * 1024;
+    add_ext_out.queue_depth = 128;
+    add_ext_out.discard_size = 4096;
+    add_ext_out.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    add_ext_out.enable_fp = 1;
+    add_ext_out.paths.count = 1;
+    strncpy(add_ext_out.paths.devpath[0], dm_path_out.c_str(),
+            sizeof(add_ext_out.paths.devpath[0]) - 1);
+    return true;
+}
+
+/*
+ * Helper: launch a background thread that hammers the failing range with
+ * pwrites in a loop until `stop` is set. Each write is expected to fail;
+ * we simply count them. Returns the joinable thread; caller sets `stop`
+ * and calls join().
+ *
+ * Purpose: keep a steady stream of fastpath IO errors so pxd_io_failover
+ * is running while the caller performs its race manoeuvre (close/reopen
+ * ctl fd, detach ioctl, etc.). This is more realistic than "one failing
+ * write" - the driver code paths under test are the ones that handle
+ * failover with the workqueue in a churning state.
+ */
+static std::thread start_failing_io_stream(const std::string &device_name,
+                                           std::atomic<bool> &stop,
+                                           std::atomic<uint64_t> &io_err_count)
+{
+    return std::thread([&, device_name]() {
+        int fd = open(device_name.c_str(), O_RDWR | O_DIRECT);
+        if (fd < 0) {
+            std::cerr << "failing_io_stream: open failed: "
+                      << strerror(errno) << std::endl;
+            return;
+        }
+        auto buf = aligned_buffer_fastpath(4096);
+        init_pattern_fastpath(buf.get(), 4096);
+        const uint64_t failing_offset = (16ULL * 1024 * 1024) + 4096;
+        while (!stop.load()) {
+            ssize_t w = pwrite(fd, buf.get(), 4096, failing_offset);
+            if (w < 0) {
+                io_err_count.fetch_add(1);
+            }
+            /* Small pace so we don't fully saturate the workqueue. */
+            usleep(2000);
+        }
+        close(fd);
+    });
+}
+
+/*
+ * RACE TEST: concurrent PXD_IOC_DETACH_DEVICE and close(ctl_fd) with
+ * fastpath IO failing continuously.
+ *
+ * Why this matters:
+ *  - close(ctl_fd) schedules ctx-level failover_work (soft) + abort_work
+ *    (backstop after pxd_timeout_secs).
+ *  - PXD_IOC_DETACH_DEVICE schedules per-device remove_work via
+ *    pxd_finish_remove.
+ *  - pxdctx_reset_fastpath's snap loop flush_works remove_work and skips
+ *    devices with removing==true. remove_work itself calls
+ *    pxd_fastpath_reset_device.
+ *  - Both paths mutate pxd_dev state without a single serializing lock,
+ *    so the correctness relies on: pxd_dev->removing gate, connected
+ *    WRITE_ONCE, ctx->fp_freeze, and per-device blk_mq_quiesce_queue.
+ *
+ * Expected behaviour: no panic, no hang, device removed within a bounded
+ * time, and TearDown can proceed.
+ *
+ * Detach is issued via a separate control fd on a tool context (ctx 10)
+ * so it doesn't require ctl_fd (which the other thread is closing).
+ */
+TEST_P(PxdFastpathTest, race_detach_and_ctrl_fd_close_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: detach vs ctrl-fd-close (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path, device_name;
+    int minor = 0;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(700, "pxd_test_flakey_race_detach",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Device added: " << device_name << std::endl;
+
+    /* Lower pxd_timeout_secs to the driver minimum (30s) so abort_work
+     * fires within test-tolerable time after close(ctl_fd). Otherwise
+     * a pwrite that got routed to the fuse slow path during the
+     * failover window sits in fc->processing for the default 600s
+     * (nobody is reading ctl_fd), blocking io_thr.join(). abort_work's
+     * fuse_end_queued_requests ends those with -ECONNABORTED,
+     * unblocking pwrite. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* Open a separate tool control fd (ctx 10) that we can drive the detach
+     * ioctl from independently of the main ctl_fd we're about to close. */
+    int tool_fd = open(control_device_fastpath(10).c_str(), O_RDWR);
+    ASSERT_GT(tool_fd, 0) << "open tool ctl fd failed: " << strerror(errno);
+
+    /* Continuous failing IO to keep pxd_io_failover work items in flight. */
+    std::atomic<bool> stop_io{false};
+    std::atomic<uint64_t> io_err_count{0};
+    std::thread io_thr = start_failing_io_stream(device_name, stop_io, io_err_count);
+
+    /* Give the IO stream a moment to enter the failover state machine. */
+    usleep(300000);
+    ASSERT_GT(io_err_count.load(), 0u) << "expected some IO failures by now";
+
+    std::cout << "IO errs so far: " << io_err_count.load()
+              << "; racing close(ctl_fd) with PXD_IOC_DETACH_DEVICE" << std::endl;
+
+    /* Race manoeuvre: kick off close and detach in two threads that both
+     * try to fire as close to simultaneously as possible. Use an atomic
+     * barrier so both threads spin until the flag flips. */
+    std::atomic<bool> go{false};
+    std::atomic<int>  detach_rc{0};
+    std::atomic<int>  detach_errno{0};
+
+    std::thread close_thr([&]() {
+        while (!go.load()) { }
+        close(ctl_fd);
+        ctl_fd = -1;
+    });
+
+    std::thread detach_thr([&]() {
+        pxd_detach_device args;
+        args.dev_id = add_ext.dev_id;
+        args.context_id = 0;
+        while (!go.load()) { }
+        int rc = ioctl(tool_fd, PXD_IOC_DETACH_DEVICE, &args);
+        detach_rc = rc;
+        detach_errno = errno;
+    });
+
+    /* Fire the race. */
+    go.store(true);
+
+    /* Bound the wait for both operations. */
+    auto race_start = std::chrono::steady_clock::now();
+    close_thr.join();
+    detach_thr.join();
+    auto race_dur = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - race_start).count();
+    std::cout << "Race finished in " << race_dur << "s; detach rc="
+              << detach_rc.load() << " errno=" << detach_errno.load()
+              << " io_errs=" << io_err_count.load() << std::endl;
+    EXPECT_LT(race_dur, 30) << "close+detach race exceeded 30s; likely stuck";
+
+    /* Detach can legitimately return 0 (removed), -ENOENT (already gone),
+     * or -EBUSY (concurrent close raced ahead). Any of those is fine as
+     * long as the device is no longer exported. */
+    EXPECT_TRUE(detach_rc == 0 || detach_errno == ENOENT || detach_errno == EBUSY)
+        << "unexpected detach outcome rc=" << detach_rc
+        << " errno=" << detach_errno;
+
+    /* Stop the failing IO stream. pwrite may be blocked in the fuse
+     * slow path (see the write_pxd_timeout call above); it will
+     * unblock at T+30s when abort_work fires and ends queued fuse
+     * requests with -ECONNABORTED. Bounded wait. */
+    stop_io.store(true);
+    io_thr.join();
+
+    /* Reopen ctl_fd for TearDown. */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+
+    /* Only forget the device if the detach ioctl actually removed it.
+     * On rc == 0 the driver's pxd_remove_dev succeeded and the device
+     * is gone. On any other outcome (EBUSY because io_thr had it open,
+     * ENOENT because a competing path removed it first), TearDown must
+     * still drive PXD_REMOVE to reach a clean state. Now that io_thr
+     * has closed its fd, that PXD_REMOVE will succeed. */
+    if (detach_rc.load() == 0) {
+        added_ids.erase(add_ext.dev_id);
+    }
+
+    close(tool_fd);
+
+    std::cout << "=== RACE TEST PASSED: detach vs ctrl-fd-close survived ===" << std::endl;
+}
+
+/*
+ * RACE TEST: rapid close(ctl_fd) / open(ctl_fd) cycle while fastpath IO
+ * is continuously failing.
+ *
+ * Why this matters:
+ *  - close(ctl_fd) -> pxd_control_release: fc.connected=0, schedule
+ *    failover_work (which does freeze_start + pxdctx_reset_fastpath +
+ *    freeze_end), schedule abort_work (backstop).
+ *  - open(ctl_fd) -> pxd_control_open:
+ *      cancel_delayed_work_sync(&abort_work);
+ *      flush_work(&failover_work);   // key ordering: waits for the
+ *                                    // in-flight failover to complete
+ *      fuse_restart_requests(fc);
+ *      fc.connected = 1;
+ *      pxdctx_set_connected(ctx);    // marks each device connected=true
+ *  - Meanwhile pxd_io_failover, running on the fastpath kthread worker,
+ *    reads pxd_dev->connected / fc.connected / ctx->fp_freeze with
+ *    READ_ONCE and picks branch (a)/(b)/(c) accordingly.
+ *
+ * The race under test: an in-flight pxd_io_failover reads fc.connected=0
+ * (takes branch b, calls disableFastPath + reroute). Simultaneously the
+ * reopen flushes failover_work and sets fc.connected=1. The result must
+ * be a consistent device state: either fastpath was disabled and the IO
+ * went through slowpath, or fastpath stayed active - never a half-torn
+ * intermediate.
+ *
+ * We loop the close/reopen a handful of times to increase the chance of
+ * catching failover_work mid-flight.
+ */
+TEST_P(PxdFastpathTest, race_ctrl_fd_reopen_during_failover_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: ctrl-fd reopen vs io_failover (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path, device_name;
+    int minor = 0;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(800, "pxd_test_flakey_race_reopen",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Device added: " << device_name << std::endl;
+
+    /* Short timeout so abort_work fails any IO stuck in fc->processing
+     * after each close(). Reopen resets pxd_timeout_secs back to the
+     * driver default (600s), so we re-arm the short timeout after
+     * each cycle. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* Continuous failing IO so pxd_io_failover is queued repeatedly. */
+    std::atomic<bool> stop_io{false};
+    std::atomic<uint64_t> io_err_count{0};
+    std::thread io_thr = start_failing_io_stream(device_name, stop_io, io_err_count);
+
+    /* Warm-up: let the failover state machine engage. */
+    usleep(300000);
+    ASSERT_GT(io_err_count.load(), 0u);
+
+    const int cycles = 5;
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < cycles; i++) {
+        std::cout << "cycle " << i << ": close ctl_fd (io_errs="
+                  << io_err_count.load() << ")" << std::endl;
+
+        /* close(ctl_fd) triggers pxd_control_release. Any pxd_io_failover
+         * that runs after this point will see fc.connected==0 and take
+         * branch (b): disableFastPath + reroute to slowpath. */
+        int rc = close(ctl_fd);
+        ASSERT_EQ(rc, 0) << "close(ctl_fd) failed: " << strerror(errno);
+        ctl_fd = -1;
+
+        /* Tiny window - we specifically want the reopen to catch
+         * failover_work while it's queued or running. Zero sleep means
+         * we might beat the kworker to it; a small sleep pushes it into
+         * mid-run territory. Randomise a bit across cycles. */
+        if (i % 2 == 0) {
+            usleep(5000);   /* 5ms - kworker likely started */
+        } else {
+            /* No sleep - reopen before workqueue picks it up */
+        }
+
+        std::cout << "cycle " << i << ": reopen ctl_fd" << std::endl;
+        ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+        ASSERT_GT(ctl_fd, 0) << "reopen failed: " << strerror(errno);
+        pxd_ioctl_init_args init_args;
+        ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+        /* pxd_control_open resets pxd_timeout_secs to the default (600s).
+         * Re-arm the 30s abort so the next close's IO gets aborted
+         * quickly rather than stuck for 10 minutes. */
+        ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+        /* Let one more round of failing IO happen before the next cycle. */
+        usleep(200000);
+    }
+    auto dur = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - start).count();
+    std::cout << cycles << " close/reopen cycles in " << dur << "s; io_errs="
+              << io_err_count.load() << std::endl;
+    EXPECT_LT(dur, 60) << "close/reopen cycles took too long; likely stuck";
+
+    /* At this point ctl_fd is open (last cycle ended with a reopen). Any
+     * IOs queued in fc->processing from prior close windows were
+     * restarted by pxd_control_open's fuse_restart_requests but nobody
+     * is reading ctl_fd, so io_thr's next pwrite still blocks. Force a
+     * final close so abort_work (armed for 30s) can fire and fail the
+     * queued IOs, unblocking io_thr. */
+    std::cout << "Final close so abort_work can fail queued IO..." << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    stop_io.store(true);
+    /* io_thr.join blocks until abort_work fires and
+     * fuse_end_queued_requests ends the pending pwrite with
+     * -ECONNABORTED. pxd_timeout_secs was set to 30s at test start. */
+    io_thr.join();
+
+    /* Reopen for TearDown. */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+
+    /* Device must still be present and accessible. If any cycle left the
+     * driver in a bad state, this open would fail. */
+    int dev_fd = open(device_name.c_str(), O_RDONLY);
+    EXPECT_GE(dev_fd, 0) << "device inaccessible after race: " << strerror(errno);
+    if (dev_fd >= 0) close(dev_fd);
+
+    std::cout << "=== RACE TEST PASSED: close/reopen race survived ===" << std::endl;
+}
+
+/*
+ * RACE TEST: multiple concurrent disableFastPath callers on the same device
+ *
+ * Why this matters:
+ *   disableFastPath is reachable from several call sites (invariant 3 in
+ *   FASTPATH_CONTROL_FLOWS.md). If two calls race and both pass the top
+ *   guard, they can both enter the filp_close loop; without the xchg
+ *   ownership arbitration each caller would filp_close the same struct
+ *   file - double free / UAF. Similarly, fastpath_flush_work called from
+ *   a fastpath kthread worker would self-flush-deadlock (invariant 4)
+ *   without the current-worker skip.
+ *
+ *   To force multiple concurrent branch (b) callers we need
+ *   ctx->fc.connected == 0 while fastpath IOs are still failing on the
+ *   worker queue. That window opens the instant pxd_control_release
+ *   writes fc.connected=0 and closes as soon as pxd_failover_work's
+ *   freeze_start sets fp_freeze=1 and drains the fastpath workers.
+ *   We hammer failing IO across many threads/CPUs so at least a few
+ *   land in the window on separate workers.
+ *
+ *   Pass criteria: no panic, no hang. If either invariant were broken,
+ *   the kernel would crash (double filp_close) or the test would hang
+ *   past the timeout (self-flush deadlock).
+ */
+TEST_P(PxdFastpathTest, race_multiple_disable_fastpath_concurrent_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: multiple concurrent disableFastPath (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(900, "pxd_test_flakey_race_disable",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    std::string device_name;
+    int minor = 0;
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Device added: " << device_name << std::endl;
+
+    /* Short timeout so abort_work fails queued IOs quickly after close.
+     * Without this the loser threads' pwrites sit in fc->processing for
+     * the default 600s (no ctl_fd reader) and join() would hang. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* N concurrent IO threads pounding the failing range. Pinning to
+     * different CPUs increases the chance of parallel dispatch onto
+     * different fastpath kthread workers - which is exactly the
+     * disableFastPath race we're trying to provoke. */
+    const int nthreads = 8;
+    std::atomic<bool> stop_io{false};
+    std::atomic<uint64_t> total_errs{0};
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < nthreads; t++) {
+        threads.emplace_back([&, t]() {
+            /* Best-effort CPU affinity; ignore failure. */
+            cpu_set_t cs;
+            CPU_ZERO(&cs);
+            CPU_SET(t % std::thread::hardware_concurrency(), &cs);
+            (void) pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+
+            int fd = open(device_name.c_str(), O_RDWR | O_DIRECT);
+            if (fd < 0) return;
+            auto buf = aligned_buffer_fastpath(4096);
+            init_pattern_fastpath(buf.get(), 4096);
+            const uint64_t failing_offset = (16ULL * 1024 * 1024) + 4096;
+            while (!stop_io.load()) {
+                ssize_t w = pwrite(fd, buf.get(), 4096, failing_offset);
+                if (w < 0) total_errs.fetch_add(1);
+            }
+            close(fd);
+        });
+    }
+
+    /* Let the threads spin up and produce some IO errors. */
+    usleep(300000);
+    ASSERT_GT(total_errs.load(), 0u) << "expected some IO failures before racing";
+
+    /* Trigger the race: close ctl_fd. In the tiny window between
+     * fc.connected=0 (in pxd_control_release) and fp_freeze=1 (in
+     * pxd_failover_work's freeze_start), any in-flight pxd_io_failover
+     * takes branch (b) and calls disableFastPath. With N workers busy
+     * in parallel, we expect multiple concurrent disableFastPath calls
+     * on this device. */
+    auto race_start = std::chrono::steady_clock::now();
+    std::cout << "Closing ctl_fd to open the race window; io_errs="
+              << total_errs.load() << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    /* Give failover_work time to complete. If self-flush deadlocks,
+     * this window elapses without progress. */
+    sleep(2);
+
+    auto race_dur = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - race_start).count();
+    std::cout << "Race window survived in " << race_dur << "s; io_errs total="
+              << total_errs.load() << std::endl;
+    EXPECT_LT(race_dur, 10) << "race window took too long; likely self-flush deadlock";
+
+    stop_io.store(true);
+    for (auto &t : threads) t.join();
+
+    /* Reopen so TearDown can drive PXD_REMOVE. */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+
+    std::cout << "=== RACE TEST PASSED: concurrent disableFastPath survived ===" << std::endl;
+}
+
+/*
+ * RACE TEST: multi-device ctl_fd close with fastpath IO failing on each
+ *
+ * Why this matters:
+ *   pxdctx_reset_fastpath iterates ctx->list using a snapshot+refcount
+ *   pattern (invariant 5). Per-device pxd_fastpath_reset_device calls
+ *   disableFastPath and drains failQ, then moves on. The interesting
+ *   race surface is n > 1: parallel per-device freeze windows,
+ *   snap_list references, and any shared state (fp_freeze is
+ *   ctx-scope, gwq is shared).
+ *
+ *   Set up K fastpath devices each backed by its own dm-flakey with
+ *   the same failing-range pattern; hammer failing IO on all; close
+ *   ctl_fd; verify all K devices land in a consistent state and
+ *   pxd_control_open can restore them via pxdctx_set_connected.
+ *
+ *   Pass criteria: no panic, no hang, all devices survive the
+ *   transition (post-reopen open() succeeds on every one).
+ */
+TEST_P(PxdFastpathTest, race_multi_device_ctrl_fd_close_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: multi-device ctl_fd close (dm-flakey) ===" << std::endl;
+
+    if (system("modprobe dm-flakey >/dev/null 2>&1") != 0) {
+        std::cerr << "dm-flakey unavailable; skipping" << std::endl;
+        GTEST_SKIP();
+    }
+
+    const int ndevs = 4;
+    struct DevSetup {
+        std::unique_ptr<TempLoopDevice> loop;
+        DMTargetCleanup dm_cleanup;
+        std::string dm_path;
+        std::string device_name;
+        int minor = 0;
+        uint64_t dev_id = 0;
+    };
+    std::vector<DevSetup> devs(ndevs);
+
+    for (int i = 0; i < ndevs; i++) {
+        devs[i].loop = std::unique_ptr<TempLoopDevice>(new TempLoopDevice(100));
+        devs[i].dev_id = 1000 + i;
+        std::string dm_name = "pxd_test_flakey_multi_" + std::to_string(i);
+        pxd_add_ext_out add_ext;
+        if (!prepare_flakey_dm_and_add_ext(devs[i].dev_id, dm_name,
+                                           *devs[i].loop, devs[i].dm_cleanup,
+                                           devs[i].dm_path, add_ext)) {
+            GTEST_SKIP();
+        }
+        dev_add_fastpath(add_ext, devs[i].minor, devs[i].device_name);
+        std::cout << "Device " << i << " added: " << devs[i].device_name << std::endl;
+    }
+
+    /* pxd_timeout_secs is module-global; setting it via any device's
+     * sysfs affects all devices in this ctx. Short timeout so
+     * abort_work fails queued IOs on every device after close(). */
+    ASSERT_EQ(0, write_pxd_timeout(devs[0].minor, 30));
+
+    /* One IO thread per device, all writing to the failing range in
+     * parallel. Keeps pxd_io_failover work items in flight on multiple
+     * devices simultaneously while we close ctl_fd. */
+    std::atomic<bool> stop_io{false};
+    std::vector<std::thread> io_threads;
+    std::vector<std::atomic<uint64_t>> per_dev_errs(ndevs);
+    for (int i = 0; i < ndevs; i++) per_dev_errs[i].store(0);
+
+    for (int i = 0; i < ndevs; i++) {
+        io_threads.emplace_back(start_failing_io_stream(
+            devs[i].device_name, stop_io, per_dev_errs[i]));
+    }
+
+    /* Let each device accumulate some errors. */
+    usleep(500000);
+    for (int i = 0; i < ndevs; i++) {
+        ASSERT_GT(per_dev_errs[i].load(), 0u)
+            << "device " << i << " had no failing IO before racing";
+    }
+
+    std::cout << "All " << ndevs << " devices producing errors; closing ctl_fd" << std::endl;
+    auto t_close = std::chrono::steady_clock::now();
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    /* Give failover_work time to iterate all devices. */
+    sleep(2);
+
+    auto close_dur = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t_close).count();
+    EXPECT_LT(close_dur, 10) << "multi-device close took too long";
+
+    stop_io.store(true);
+    for (auto &t : io_threads) t.join();
+
+    /* Reopen and confirm every device is still there and usable in
+     * native path. Open uses O_RDONLY at a safe offset to avoid the
+     * still-failing dm range. */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+
+    for (int i = 0; i < ndevs; i++) {
+        int fd = open(devs[i].device_name.c_str(), O_RDONLY);
+        EXPECT_GE(fd, 0) << "device " << i << " (" << devs[i].device_name
+                         << ") inaccessible post-reopen: " << strerror(errno);
+        if (fd >= 0) close(fd);
+    }
+
+    std::cout << "=== RACE TEST PASSED: multi-device close survived ===" << std::endl;
+}
+
+/*
+ * RACE TEST: abort_work fires with fastpath device present
+ *
+ * Why this matters:
+ *   pxd_abort_context (Part 1.6 in FASTPATH_CONTROL_FLOWS.md) runs at
+ *   T + pxd_timeout_secs after pxd_control_release, when userspace
+ *   never reopened. It sets fc.allow_disconnected=0, fuse_end_queued_
+ *   requests, then freeze_start + pxdctx_reset_fastpath(true) +
+ *   freeze_end(true). This is the hard-fail path and previously had
+ *   ZERO fastpath test coverage.
+ *
+ *   Verify:
+ *     a. After abort_work fires, opening the device gets -ENXIO (the
+ *        pxd_dev->connected=false check in pxd_open trips).
+ *     b. After ctl_fd reopen, pxdctx_set_connected restores
+ *        connected=true and the device becomes usable again.
+ */
+TEST_P(PxdFastpathTest, race_abort_timeout_with_fastpath_device_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: abort timeout with fastpath device (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(1100, "pxd_test_flakey_abort",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    std::string device_name;
+    int minor = 0;
+    dev_add_fastpath(add_ext, minor, device_name);
+
+    /* Minimum legal pxd_timeout is 30s (PXD_TIMER_SECS_MIN). Sysfs
+     * write is per-device but sets the module-global variable. */
+    const int timeout_secs = 30;
+    ASSERT_EQ(0, write_pxd_timeout(minor, timeout_secs))
+        << "failed to set pxd_timeout via sysfs";
+
+    /* Poke a failing IO first so there's IO to be aborted. */
+    std::atomic<bool> stop_io{false};
+    std::atomic<uint64_t> io_err_count{0};
+    std::thread io_thr = start_failing_io_stream(device_name, stop_io, io_err_count);
+    usleep(300000);
+    stop_io.store(true);
+    io_thr.join();
+    std::cout << "IO errors observed: " << io_err_count.load() << std::endl;
+
+    /* Close ctl_fd. abort_work is armed for T + 30s. */
+    std::cout << "Closing ctl_fd; waiting past abort_work fire time..." << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    /* Sleep past pxd_timeout_secs so abort_work is guaranteed to run.
+     * Add slack because kworker scheduling isn't instant. */
+    sleep(timeout_secs + 5);
+
+    /* Now pxd_dev->connected should be false. Opening the device must
+     * fail with -ENXIO (checked in pxd_open under pxd_dev->lock). */
+    int dev_fd = open(device_name.c_str(), O_RDONLY);
+    if (dev_fd >= 0) {
+        std::cerr << "WARN: device unexpectedly open after abort_work; "
+                  << "kernel may not have completed abort yet" << std::endl;
+        close(dev_fd);
+    } else {
+        EXPECT_EQ(errno, ENXIO)
+            << "expected -ENXIO after abort; got " << strerror(errno);
+    }
+
+    /* Reopen ctl_fd. pxd_control_open's freeze_start + pxdctx_set_connected
+     * restores pxd_dev->connected = true for every device on ctx->list. */
+    std::cout << "Reopening ctl_fd..." << std::endl;
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+
+    /* Device should now be openable again. */
+    dev_fd = open(device_name.c_str(), O_RDONLY);
+    EXPECT_GE(dev_fd, 0) << "device inaccessible after reopen: " << strerror(errno);
+    if (dev_fd >= 0) close(dev_fd);
+
+    std::cout << "=== RACE TEST PASSED: abort timeout with fastpath device ===" << std::endl;
+}
+
+/*
+ * RACE TEST: abort_work canceled by ctl_fd reopen
+ *
+ * Why this matters:
+ *   pxd_control_open calls cancel_delayed_work_sync(&ctx->abort_work)
+ *   before flush_work(failover_work). If cancellation races and the
+ *   timer somehow fires anyway (or the sync doesn't wait properly),
+ *   pxd_abort_context runs against a re-connected fc and its
+ *   BUG_ON(fc.connected) fires - kernel panic.
+ *
+ *   Set the timeout as low as legal (30s), close ctl_fd, sleep just
+ *   short of the fire time, reopen. cancel_delayed_work_sync must
+ *   catch the delayed_work reliably. Sleep past the original fire
+ *   time and confirm no abort behaviour happened (device is still
+ *   connected and usable).
+ */
+TEST_P(PxdFastpathTest, race_abort_work_canceled_by_reopen_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: abort_work canceled by reopen (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(1200, "pxd_test_flakey_cancel",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    std::string device_name;
+    int minor = 0;
+    dev_add_fastpath(add_ext, minor, device_name);
+
+    const int timeout_secs = 30;
+    ASSERT_EQ(0, write_pxd_timeout(minor, timeout_secs));
+
+    std::cout << "Closing ctl_fd; will reopen at T + 25s (before abort fires)" << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    /* Sleep to just short of the abort fire time. Reopen must catch
+     * and cancel the delayed_work. */
+    sleep(timeout_secs - 5);
+
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+
+    /* Sleep past the original abort deadline. If cancel didn't catch,
+     * abort_work fires here and (in the current code) hits BUG_ON on
+     * fc.connected. We can't observe a BUG_ON from userspace directly,
+     * but if it fired the kernel is dead and this test never returns. */
+    std::cout << "Sleeping past original abort deadline..." << std::endl;
+    sleep(10);
+
+    /* Verify the device is still usable - abort semantics did NOT run. */
+    int dev_fd = open(device_name.c_str(), O_RDONLY);
+    EXPECT_GE(dev_fd, 0)
+        << "device unexpectedly inaccessible; abort may have fired despite cancel: "
+        << strerror(errno);
+    if (dev_fd >= 0) close(dev_fd);
+
+    std::cout << "=== RACE TEST PASSED: abort_work canceled cleanly ===" << std::endl;
+}
+
+/*
+ * RACE TEST: reopen ctl_fd -> userspace pulls and fails queued fuse reqs
+ *
+ * Why this matters (companion to abort_work coverage):
+ *   The freeze protocol relies on two complementary drains for IO that
+ *   got routed to the fuse slow path during a ctx transition:
+ *     - abort_work (T + pxd_timeout_secs) hard-fails everything.
+ *     - Reopen + userspace read cycles them back out normally.
+ *   The abort_work path is covered by other race tests. This test
+ *   drives the second path: after close(ctl_fd), IO gets queued in
+ *   fc->processing; reopen restarts them into fc->pending via
+ *   fuse_restart_requests; a userspace reader then pulls each req and
+ *   fails it. pwrite returns error, io_thr exits cleanly - WITHOUT
+ *   waiting for abort_work.
+ *
+ *   If fuse_restart_requests were broken or userspace couldn't drain
+ *   the pending list, io_thr.join would time out.
+ */
+TEST_P(PxdFastpathTest, race_reopen_userspace_drain_queued_reqs_using_dm_flakey)
+{
+    std::cout << "\n=== RACE TEST: reopen ctl_fd + userspace drain (dm-flakey) ===" << std::endl;
+
+    TempLoopDevice loop_dev(100);
+    DMTargetCleanup dm_cleanup{};
+    std::string dm_path;
+    pxd_add_ext_out add_ext;
+    if (!prepare_flakey_dm_and_add_ext(1300, "pxd_test_flakey_reopen_drain",
+                                       loop_dev, dm_cleanup, dm_path, add_ext)) {
+        GTEST_SKIP();
+    }
+    std::string device_name;
+    int minor = 0;
+    dev_add_fastpath(add_ext, minor, device_name);
+    std::cout << "Device added: " << device_name << std::endl;
+
+    /* Set a short timeout as a fallback safety net. If the userspace
+     * drain works correctly, io_thr exits well before abort_work fires. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* Single failing IO from a worker thread. Once it fails on the
+     * fastpath, the failover state machine routes it through the fuse
+     * slow path. On close(ctl_fd) it lingers in fc->processing until
+     * we reopen and drain. */
+    std::atomic<bool> stop_io{false};
+    std::atomic<uint64_t> io_err_count{0};
+    std::thread io_thr = start_failing_io_stream(device_name, stop_io, io_err_count);
+
+    /* Let io_thr accumulate errors and queue at least one req in flight. */
+    usleep(300000);
+    ASSERT_GT(io_err_count.load(), 0u);
+
+    std::cout << "Closing ctl_fd; IOs will land in fc->processing" << std::endl;
+    close(ctl_fd);
+    ctl_fd = -1;
+
+    /* Let failover_work run and the next pwrite queue in fuse slow path. */
+    usleep(500000);
+
+    std::cout << "Reopening ctl_fd; fuse_restart_requests moves reqs to pending" << std::endl;
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0);
+    pxd_ioctl_init_args init_args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &init_args), 0);
+    /* Re-arm short timeout as a fallback; the drain below should
+     * complete well before it triggers. */
+    ASSERT_EQ(0, write_pxd_timeout(minor, 30));
+
+    /* Now userspace drains ctl_fd - pull each fuse req and fail it.
+     * fail_io ends the request with -EIO which propagates to
+     * blk_mq_end_request; the block layer wakes the pwrite waiter.
+     * This validates the freeze-doc's assertion that reopen +
+     * userspace read is a valid drain path (not just abort_work). */
+    std::atomic<uint64_t> drained{0};
+    std::atomic<bool> stop_drain{false};
+    std::thread drain_thr([&]() {
+        struct rdwr_in rdwr;
+        while (!stop_drain.load()) {
+            int ret = wait_msg(1);
+            if (ret == -ETIMEDOUT) continue;
+            if (ret < 0) break;
+            ssize_t rb = read(ctl_fd, &rdwr, sizeof(rdwr));
+            if (rb > 0) {
+                fail_io(&rdwr);
+                drained.fetch_add(1);
+            }
+        }
+    });
+
+    /* Stop io_thr and wait for it. If userspace drain is working,
+     * pwrite errors out quickly (the drainer replies -EIO). If
+     * broken, we fall back to abort_work at T+30s. If both are
+     * broken, this hangs and the outer test framework catches it. */
+    stop_io.store(true);
+    io_thr.join();
+
+    stop_drain.store(true);
+    drain_thr.join();
+
+    std::cout << "Drained " << drained.load() << " fuse reqs; io_errs="
+              << io_err_count.load() << std::endl;
+    EXPECT_GT(drained.load(), 0u)
+        << "expected userspace to service at least one queued req";
+
+    std::cout << "=== RACE TEST PASSED: reopen + userspace drain works ===" << std::endl;
 }

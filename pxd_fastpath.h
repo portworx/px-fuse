@@ -102,10 +102,9 @@ int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev);
 
 // external request from userspace to control io path
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
-int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe);
 int pxd_request_resume(struct pxd_device *pxd_dev);
-int pxd_request_resume_internal(struct pxd_device *pxd_dev);
 int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code);
+int wait_for_sync(struct pxd_device *pxd_dev, bool skip_flush);
 
 // handle IO reroutes and switch events
 void pxd_reissuefailQ(struct pxd_device *pxd_dev, struct list_head *ios, int status);
@@ -113,7 +112,31 @@ void pxd_abortfailQ(struct pxd_device *pxd_dev);
 
 // reset device called during device cleanup actions from any internal state.
 // consider node wipe, device remove while suspended etc.
-void pxd_fastpath_reset_device(struct pxd_device *pxd_dev);
+// skip_sync: if false, wait for IO to sync before reset; if true, skip sync
+// fail_io: if true, all queued IO on device will be failed immediately
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io);
+
+// Ctx-scoped quiescent window for fastpath transitions.
+//
+// pxd_fp_freeze_start:
+//   Sets ctx->fp_freeze so pxd_io_failover work items entering the failover
+//   state machine park on their device's failQ (via fproot->wait) instead
+//   of taking a branch decision. Then drains all in-flight fastpath work
+//   (kthread workers + gwq) so any item that started before the gate went
+//   up completes with the pre-freeze state - correct, it committed before
+//   the freeze.
+//
+// pxd_fp_freeze_end:
+//   Clears the gate and drains any items that parked between
+//   pxdctx_reset_fastpath's initial failQ drain and the gate clear.
+//   fail_io=false: reissue parked IOs to native path (used by
+//                  pxd_failover_work; the transition target IS native).
+//   fail_io=true:  abort parked IOs with -EIO (used by pxd_abort_context;
+//                  connection is dead, drop them).
+//
+// Called in matched pairs.
+void pxd_fp_freeze_start(struct pxd_context *ctx);
+void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io);
 
 
 static inline
