@@ -177,8 +177,14 @@ void pxd_suspend_io(struct pxd_device *pxd_dev) {
 
 void pxd_resume_io(struct pxd_device *pxd_dev) {
         bool wakeup;
-        int curr = atomic_dec_return(&pxd_dev->fp.suspend);
         struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+        int curr = atomic_dec_if_positive(&fp->suspend);
+
+        if (curr < 0) {
+                printk(KERN_WARNING "pxd device %llu: resume with suspend count already 0; ignoring\n",
+                       pxd_dev->dev_id);
+                return;
+        }
 
         wakeup = (curr == 0);
         if (wakeup) {
@@ -559,16 +565,90 @@ err:
 }
 
 // failover handling
+//
+// Three-way branch + park-during-freeze:
+//  (park) ctx->fp_freeze == 1:
+//      a ctx-scoped teardown/reopen is in progress. Do not commit to a
+//      branch decision - the state we'd observe is transient. Park the
+//      fproot on this device's failQ (same list branch (c) uses).
+//      pxd_fp_freeze_end / pxdctx_reset_fastpath drain failQ with the
+//      correct mode (reissue-native for soft path, abort for hard path).
+//      We do NOT call pxd_initiate_failover from here.
+//  (a) pxd_dev->connected == false:
+//      abort_work already ran; userspace has been down past the timeout.
+//      Fail IO with -EIO.
+//  (b) ctx->fc.connected == 0 (userspace down, still within abort timer):
+//      switch this device to native slowpath locally without a coordinated
+//      failover request, and re-queue the IO through fuse (which holds it
+//      until userspace reconnects or allow_disconnected flips to 0).
+//  (c) otherwise: userspace is up; drive the standard coordinated failover
+//      via pxd_initiate_failover.
+//
+// All shared-flag reads use READ_ONCE. Writers (pxd_control_release,
+// _pxd_setup, pxd_fp_freeze_start/end) use WRITE_ONCE. This is a compiler
+// barrier only, matching the RCU protocol disableFastPath already uses on
+// fp.fastpath. On x86 aligned int/bool loads are atomic; on other archs
+// READ_ONCE/WRITE_ONCE prevent torn/fused accesses. Cross-CPU ordering
+// with respect to the freeze gate is provided by smp_wmb() in
+// pxd_fp_freeze_start/end and by the fastpath kthread flush that follows
+// the gate set.
 static void pxd_io_failover(struct kthread_work *work) {
         struct fp_root_context *fproot =
             container_of(work, struct fp_root_context, work);
         struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
+        struct pxd_context *ctx = pxd_dev->ctx;
         int rc;
         unsigned long flags;
+        bool dev_conn;
+        bool ctx_conn;
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
         BUG_ON(pxd_dev->magic != PXD_DEV_MAGIC);
 
+	/* Park during ctx freeze. Re-check the gate under fp.fail_lock so
+	 * pxd_fp_freeze_end can't clear the gate + drain failQ in between
+	 * our READ_ONCE and our list_add. If gate was cleared while we
+	 * were racing, we fall through and take a normal branch below. */
+	if (READ_ONCE(ctx->fp_freeze)) {
+		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		if (READ_ONCE(ctx->fp_freeze)) {
+			list_add_tail(&fproot->wait, &pxd_dev->fp.failQ);
+			spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+			return;
+		}
+		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+	}
+
+	dev_conn = READ_ONCE(pxd_dev->connected);
+	ctx_conn = READ_ONCE(ctx->fc.connected) != 0;
+
+	// (a) hard-fail: device disconnected past the abort timeout
+	if (!dev_conn) {
+		/* fail right away */
+		struct fuse_req* req = fproot_to_fuse_request(fproot);
+                clone_cleanup(fproot);
+#ifndef __PX_BLKMQ__
+                blk_end_request(req->rq, -EIO, blk_rq_bytes(req->rq));
+                fuse_request_free(req);
+#else
+                blk_mq_end_request(req->rq, BLK_STS_IOERR);
+#endif
+		return;
+	}
+
+	// (b) userspace not available now, switch io path to native locally
+	if (!ctx_conn) {
+		/* userspace down - can queue directly without failover request.
+		 * skip_sync=true: no userspace to sync through; avoid hanging. */
+		struct fuse_req* req = fproot_to_fuse_request(fproot);
+		disableFastPath(pxd_dev, true /* skip sync */);
+                atomic_inc(&pxd_dev->fp.nslowPath);
+                clone_cleanup(fproot);
+		pxdmq_reroute_slowpath(req);
+		return;
+	}
+
+	// (c) inform userspace about active io path failover
         // Enqueue and call. pxd_initiate_failover handles the three cases
         // internally: in-progress (no-op), orphan/native (splice+reissue
         // locally, return 0), or leader (full failover round-trip).
