@@ -237,9 +237,9 @@ inside a freeze window it parks.
 
 ### Invariant 2 - pxd_io_failover parks on failQ during freeze
 
-pxd_io_failover checks READ_ONCE(ctx->fp_freeze) at entry. If set, it
-takes fp.fail_lock, re-checks the gate, and list_add_tail's the fproot
-on pxd_dev->fp.failQ.
+pxd_io_failover checks the gate at entry with smp_load_acquire. If set,
+it takes fp.fail_lock, re-checks the gate under the lock, and
+list_add_tail's the fproot on pxd_dev->fp.failQ.
 
 Rationale: the reader must NOT commit to a branch decision while state
 is transient. Parking on failQ is preferable to hard-failing because
@@ -251,6 +251,26 @@ transition:
 
 Freeze_end has a second-pass drain to catch items parked between
 pxdctx_reset_fastpath's initial drain and the gate-clear.
+
+Memory ordering:
+  Writer side (pxd_fp_freeze_start / pxd_fp_freeze_end) uses
+  smp_store_release on the gate. All state stores performed inside the
+  freeze window are visible before the gate transition.
+
+  Reader side (pxd_io_failover) uses smp_load_acquire on the outer
+  gate check. If the reader observes gate=0, it also observes every
+  state store the writer released before the gate; the subsequent
+  plain READ_ONCE reads of pxd_dev->connected and ctx->fc.connected
+  cannot observe a mid-transition value. On x86 the acquire/release
+  compile to the same instructions as READ_ONCE/WRITE_ONCE; on arm64
+  they emit ldar/stlr; on ppc, lwsync-wrapped std/ld. Plain
+  WRITE_ONCE/READ_ONCE alone is insufficient on weak archs because
+  the CPU can reorder the subsequent state loads before the gate load.
+
+The inner re-check under fp.fail_lock uses plain READ_ONCE because
+spin_lock is a full barrier on all Linux archs; it provides an
+implicit acquire against anything the writer released before its own
+fail_lock acquire in the drain loop.
 
 Note fproot->wait linkage is shared with branch (c). A single fproot is
 either parked-during-freeze or on-failQ-via-branch-(c), never both,

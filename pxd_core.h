@@ -39,11 +39,27 @@ struct pxd_context {
 	 * after clearing the gate to catch items that parked between the
 	 * reset_fastpath drain and the gate clear.
 	 *
-	 * Read by pxd_io_failover with READ_ONCE, written by
-	 * pxd_fp_freeze_start/end with WRITE_ONCE. Compiler barrier only; on
-	 * x86 aligned int reads are atomic. Cross-CPU visibility ordering is
-	 * provided by smp_wmb() in freeze_start/end and by the fastpath
-	 * kthread flush that follows the gate set.
+	 * Memory ordering (weak-arch correctness):
+	 *   Writer (pxd_fp_freeze_start/end): smp_store_release. All state
+	 *     mutations performed inside the freeze window (pxd_dev->connected
+	 *     and ctx->fc.connected via _pxd_setup / pxdctx_set_connected,
+	 *     pxd_dev->fp.fastpath via disableFastPath) are published before
+	 *     the gate transition.
+	 *   Reader (pxd_io_failover): smp_load_acquire. If the reader
+	 *     observes gate=0 (post-freeze-end), it also observes every
+	 *     state mutation the writer made. This is what makes the
+	 *     subsequent plain READ_ONCE on pxd_dev->connected and
+	 *     ctx->fc.connected safe against mid-transition observation on
+	 *     arm64/ppc/riscv. On x86 (TSO) the acquire/release lower to
+	 *     the same instructions as WRITE_ONCE/READ_ONCE plus a
+	 *     compiler barrier.
+	 *
+	 * Not atomic_t: single-writer (only the ctx-transition callbacks
+	 * failover_work / abort_work / pxd_control_open write it, and those
+	 * do not overlap thanks to flush_work in pxd_control_open + delayed
+	 * scheduling of abort_work + serial invocation of failover_work).
+	 * atomic_t would be misleading - there is no read-modify-write on
+	 * this field.
 	 */
 	int fp_freeze;
 

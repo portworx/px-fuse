@@ -1462,8 +1462,16 @@ static void pxd_finish_remove(struct work_struct *work)
 	 * consumers (snap_list captures in a freeze window, sysfs opens,
 	 * in-flight IO). Those consumers make their own decisions based on
 	 * whatever ctx-level state exists at the time; the removal path
-	 * shouldn't second-guess them. */
-	pxd_fastpath_reset_device(pxd_dev, true /* skip sync */, true /* fail io */);
+	 * shouldn't second-guess them.
+	 *
+	 * skip_sync=false: PXD_REMOVE is the user-driven happy-path detach.
+	 * The backing fds we own may hold dirty page-cache pages / pending
+	 * writeback the user cared about (they issued IO that we accepted).
+	 * wait_for_sync() calls vfs_fsync() on each fp->file[i] directly -
+	 * it does NOT go through userspace or fc, so it is safe here.
+	 * We skip sync only for broken/error/decommission paths (see the
+	 * comment header on pxd_fastpath_reset_device). */
+	pxd_fastpath_reset_device(pxd_dev, false /* skip sync */, true /* fail io */);
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
@@ -1693,6 +1701,13 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 		spin_lock(&pxd_dev->lock);
 		WRITE_ONCE(pxd_dev->connected, false);
 		spin_unlock(&pxd_dev->lock);
+		/* Only reached from the hard-fail path (pxd_abort_context via
+		 * pxdctx_reset_fastpath fail_io=true). skip_sync=true because
+		 * we are aborting all in-flight IO with -EIO; persisting the
+		 * driver's backing-fd cache first is not the point of the
+		 * operation. This is rule (b) from disableFastPath's contract:
+		 * hard-fail teardown. It is NOT because userspace is gone -
+		 * wait_for_sync is driver-local and never talks to userspace. */
 		pxd_fastpath_reset_device(pxd_dev, true /* skip sync */, true /* fail io */);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
@@ -1719,11 +1734,14 @@ static void pxdctx_set_connected(struct pxd_context *ctx)
 //
 // Called from two places:
 //   1. failover_work (fail_io=false): control fd just closed. Switch each
-//      fastpath device to native path and reissue queued failQ IOs. Uses
-//      skip_sync=true because userspace is already gone and wait_for_sync
-//      would hang.
+//      fastpath device to native path and reissue queued failQ IOs.
+//      Uses skip_sync=false (see the skip_sync policy comment inside
+//      this function): backing store is healthy, its writes must be
+//      flushed before the fd is closed.
 //   2. abort_work   (fail_io=true):  abort timer expired. Hard-fail every
-//      IO on every device (connected := false; abortfailQ).
+//      IO on every device (connected := false; abortfailQ). Uses
+//      skip_sync=true: hard-fail teardown, syncing before aborting is
+//      pointless.
 //
 // Snapshot+refcount pattern: pxd_fastpath_reset_device may sleep
 // (blk_mq_quiesce_queue via pxd_suspend_io), so ctx->lock must be dropped
@@ -1735,9 +1753,32 @@ static void pxdctx_reset_fastpath(struct pxd_context *ctx, bool fail_io)
 	struct pxd_device *pxd_dev;
 	size_t i = 0;
 	size_t j;
-	/* Sync-and-fail semantics: failover_work path must not wait for sync
-	 * (userspace is gone). Abort path can (and should) skip sync too. */
-	const bool skip_sync = true;
+	/* skip_sync policy inside pxdctx_reset_fastpath:
+	 *
+	 * skip_sync controls whether disableFastPath does a vfs_fsync() on
+	 * each backing fd (fp->file[i]) before closing it. The sync is
+	 * DRIVER-LOCAL - it goes through the vfs directly on files the
+	 * driver owns; it does NOT depend on ctx->fc.connected or userspace
+	 * being alive. Whether it can hang depends only on the backing
+	 * filesystem/device servicing the fsync.
+	 *
+	 * Rule: skip sync only when the sync would be meaningless -
+	 *   (a) backing storage is broken (fastpath IO already errored out)
+	 *   (b) hard-fail teardown - we are aborting every in-flight IO
+	 *       with -EIO, so persisting the driver's private cache first
+	 *       is not the point of the operation
+	 *   (c) whole-node decommission (pxd_nodewipe_cleanup)
+	 * In every other case we must sync so writes that userspace already
+	 * confirmed as accepted are durable on the backing store before we
+	 * drop our reference to it.
+	 *
+	 * Inside this function:
+	 *   fail_io=true  (from abort_work): rule (b). skip_sync=true.
+	 *   fail_io=false (from failover_work): soft mode switch from
+	 *     fastpath to native; backing store is still healthy and its
+	 *     writes must survive the switch. skip_sync=false.
+	 */
+	const bool skip_sync = fail_io;
 
 	// _pxd_setup with enable=false would call pxd_fastpath_reset_device which would
 	// call blk_mq_quiesce_queue as part of pxd_suspend_io. but blk_mq_quiesce_queue could

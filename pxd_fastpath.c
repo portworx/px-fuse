@@ -342,13 +342,19 @@ struct workqueue_struct* fastpath_workqueue(void)
  */
 void pxd_fp_freeze_start(struct pxd_context *ctx)
 {
-	WRITE_ONCE(ctx->fp_freeze, 1);
-	/* Order gate-set ahead of the flush; readers of fp_freeze in
-	 * pxd_io_failover use READ_ONCE and pair with this. */
-	smp_wmb();
+	/* smp_store_release: any prior store on this CPU is visible before
+	 * the gate=1 store. Reader on another CPU that observes gate=1 via
+	 * smp_load_acquire sees all those prior stores too. Not strictly
+	 * necessary at freeze_start (there are no interesting prior stores
+	 * to publish), but matches the release/acquire pairing readers use
+	 * and is idiomatic. */
+	smp_store_release(&ctx->fp_freeze, 1);
 	/* Drain: any pxd_io_failover kthread work already running gets to
 	 * complete with pre-freeze state. New pxd_io_failover work queued
-	 * after this write observes fp_freeze=1 and parks. */
+	 * after this write observes fp_freeze=1 and parks. Both flushes
+	 * take spinlocks internally, so they also provide the full memory
+	 * barrier that guarantees the gate=1 store is globally visible
+	 * before we start touching device state. */
 	fastpath_flush_work();
 	if (gwq != NULL) {
 		flush_workqueue(gwq);
@@ -365,15 +371,24 @@ void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io)
 	unsigned long flags;
 	struct list_head ios;
 
-	/* Clear the gate. New pxd_io_failover items entering after this
-	 * observe fp_freeze=0 and take the normal (a)/(b)/(c) branches.
-	 * They do NOT touch failQ under the park path.
+	/* Clear the gate.
 	 *
-	 * Ordering: smp_wmb before the write so writers who set device
-	 * state during the freeze window are visible to readers who see
-	 * fp_freeze=0. */
-	smp_wmb();
-	WRITE_ONCE(ctx->fp_freeze, 0);
+	 * smp_store_release: publishes every state mutation performed
+	 * between pxd_fp_freeze_start and this call (pxd_dev->connected,
+	 * pxd_dev->fp.fastpath transitions, ctx->fc.connected changes)
+	 * atomically w.r.t. the gate. A reader on another CPU that
+	 * observes fp_freeze=0 via smp_load_acquire is guaranteed to see
+	 * all of those writes. This is what makes the reader in
+	 * pxd_io_failover safe to read pxd_dev->connected and
+	 * ctx->fc.connected with plain READ_ONCE right after the gate
+	 * check - the acquire on the gate carries the ordering for the
+	 * subsequent loads.
+	 *
+	 * On x86 (TSO) this is equivalent to WRITE_ONCE. On arm64 it
+	 * emits stlr; on ppc, lwsync + std. Without the release, weak
+	 * archs can let the reader observe fp_freeze=0 while still
+	 * seeing pre-freeze pxd_dev->connected. */
+	smp_store_release(&ctx->fp_freeze, 0);
 
 	/* Drain any items that parked between pxdctx_reset_fastpath's
 	 * per-device failQ drain and the gate-clear above. Because we're
@@ -735,6 +750,14 @@ int pxd_fastpath_vol_cleanup(struct pxd_device *pxd_dev)
  *   (x86 XCHG, arm64 SWP/LL-SC, ppc/riscv LL-SC, s390 CS). It works
  *   on any word-sized lvalue including plain struct pointer fields;
  *   the fp->file[i] slot qualifies.
+ *
+ * @skipsync: controls whether wait_for_sync() -> vfs_fsync() runs on
+ *   each backing fd before it is closed. The sync is driver-local
+ *   (vfs_fsync on files we own); it is not dependent on userspace or
+ *   ctx state. Callers should set skipsync=true only when the sync
+ *   would be meaningless: fastpath already broken, hard-fail teardown,
+ *   or whole-node decommission. In every other case, sync so writes
+ *   the driver accepted reach durable backing storage before close.
  */
 void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 {
@@ -910,8 +933,24 @@ out_file_failed:
 // the abort_work backstop (pxd_abort_context) via pxdctx_reset_fastpath()
 // at T+pxd_timeout_secs when PX never reopened the control fd.
 //
-// All below is true when @fail_io is true, otherwise, IOs are held within failQ waiting for either abort timer to fail them
-// or px-storage to come online and process them.
+// @skip_sync: controls whether disableFastPath calls wait_for_sync() ->
+//   vfs_fsync() on each backing fd before closing it. This is a
+//   DRIVER-LOCAL sync on files the driver owns; it does NOT go through
+//   userspace or ctx->fc. Latency depends only on the backing fs/device.
+//   Skip only when the sync would be meaningless:
+//     (a) fastpath / backing storage is already broken (IO errored out)
+//     (b) hard-fail teardown - every in-flight IO is being aborted with
+//         -EIO, so persisting driver-side cache first is not the point
+//     (c) whole-node decommission
+//   In every other case (soft failover, ordinary PXD_REMOVE) skip_sync
+//   must be false so writes userspace has already had acknowledged reach
+//   durable storage before we drop the backing fd.
+//
+// @fail_io: if true, all queued IO on device will be failed immediately.
+//   Below is true only when fail_io is true; otherwise IOs are held
+//   within failQ waiting for either the abort timer to fail them or
+//   px-storage to come online and process them.
+//
 // Important: this function never requeues IO. Any IO that hasn't already
 // completed must be failed here. Requeueing to native path is unsafe in
 // the node-wipe / device-remove case because:
