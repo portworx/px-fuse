@@ -21,6 +21,47 @@ struct pxd_context {
 	int id;
 	struct miscdevice miscdev;
 	struct delayed_work abort_work;
+	struct work_struct failover_work;
+
+	/* Ctx-scoped fastpath freeze gate.
+	 *
+	 * When set, a pxd_io_failover work item entering the failover state
+	 * machine does NOT pick branch (a)/(b)/(c). Instead it parks the
+	 * fproot on that device's existing pxd_dev->fp.failQ (using
+	 * fproot->wait, same linkage branch (c) uses) and returns without
+	 * calling pxd_initiate_failover. It does NOT hard-fail and does NOT
+	 * block the kthread worker.
+	 *
+	 * The ctx-teardown code (pxdctx_reset_fastpath called from
+	 * pxd_failover_work / pxd_abort_context) drains each device's failQ
+	 * with the appropriate mode (reissue-to-native for the soft path,
+	 * abort for the hard path). pxd_fp_freeze_end also drains once more
+	 * after clearing the gate to catch items that parked between the
+	 * reset_fastpath drain and the gate clear.
+	 *
+	 * Memory ordering (weak-arch correctness):
+	 *   Writer (pxd_fp_freeze_start/end): smp_store_release. All state
+	 *     mutations performed inside the freeze window (pxd_dev->connected
+	 *     and ctx->fc.connected via _pxd_setup / pxdctx_set_connected,
+	 *     pxd_dev->fp.fastpath via disableFastPath) are published before
+	 *     the gate transition.
+	 *   Reader (pxd_io_failover): smp_load_acquire. If the reader
+	 *     observes gate=0 (post-freeze-end), it also observes every
+	 *     state mutation the writer made. This is what makes the
+	 *     subsequent plain READ_ONCE on pxd_dev->connected and
+	 *     ctx->fc.connected safe against mid-transition observation on
+	 *     arm64/ppc/riscv. On x86 (TSO) the acquire/release lower to
+	 *     the same instructions as WRITE_ONCE/READ_ONCE plus a
+	 *     compiler barrier.
+	 *
+	 * Not atomic_t: single-writer (only the ctx-transition callbacks
+	 * failover_work / abort_work / pxd_control_open write it, and those
+	 * do not overlap thanks to flush_work in pxd_control_open + delayed
+	 * scheduling of abort_work + serial invocation of failover_work).
+	 * atomic_t would be misleading - there is no read-modify-write on
+	 * this field.
+	 */
+	int fp_freeze;
 
 	uint64_t open_seq;
 };

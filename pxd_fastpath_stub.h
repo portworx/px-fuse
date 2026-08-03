@@ -19,21 +19,6 @@ struct workqueue_struct* fastpath_workqueue(void)
 	return NULL;
 }
 
-/// common failover/fallback code path
-static inline
-int pxd_request_suspend_internal(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
-{
-	BUG_ON(!"unexpected");
-	return -EINVAL;
-}
-
-static inline
-int pxd_request_resume_internal(struct pxd_device *pxd_dev)
-{
-	BUG_ON(!"unexpected");
-	return -EINVAL;
-}
-
 /// ioctl calls from userspace
 static inline
 int pxd_request_suspend(struct pxd_device *pxd_dev, bool skip_flush, bool coe)
@@ -85,7 +70,13 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 }
 
 static inline
-void pxd_fastpath_reset_device(struct pxd_device *pxd_dev) {}
+void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io) {}
+
+struct pxd_context;
+static inline
+void pxd_fp_freeze_start(struct pxd_context *ctx) {}
+static inline
+void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io) {}
 
 /// debug routines
 static inline
