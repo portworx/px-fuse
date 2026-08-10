@@ -1008,11 +1008,16 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 			rcu_read_unlock();
 			return BLK_STS_OK;
 		}
-		// blkmq: cannot process IO from this thread, would recursively
-		// submit to backing devices and deadlock.
-		fastpath_queue_work(&fproot->work, false);
-		rcu_read_unlock();
-		return BLK_STS_OK;
+		/* Pin backing files while still inside rcu_read_lock (see
+		 * fproot_pin_files). On failure the device is mid-teardown -
+		 * fall through to native. */
+		if (fproot_pin_files(fproot, pxd_dev)) {
+			/* Cannot submit to backing device from this thread -
+			 * would recurse and deadlock. Hand off to pxfp. */
+			fastpath_queue_work(&fproot->work, false);
+			rcu_read_unlock();
+			return BLK_STS_OK;
+		}
 	}
 	rcu_read_unlock();
 }
@@ -2199,7 +2204,12 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 {
 	// format: path,path,path
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	struct pxd_update_path_out update_out;
+	/* Zero the whole struct: memcpy(devpath[i], trimtoken, len) below only
+	 * writes `len` bytes; strncpy in __pxd_update_path then reads up to
+	 * MAX_PXD_DEVPATH_LEN and would carry stack garbage into fp.device_path[i]
+	 * for any path shorter than 127 chars. filp_open on that garbled path
+	 * returns -ENOENT. */
+	struct pxd_update_path_out update_out = {0};
 	const char delim = ',';
 	char *token;
 	char *saveptr = NULL;

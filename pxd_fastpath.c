@@ -473,30 +473,40 @@ void pxd_abortfailQ(struct pxd_device *pxd_dev)
 	spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 }
 
-// background pxd syncer work function
+/*
+ * Can outlive wait_for_sync (the SYNC_TIMEOUT path returns without joining
+ * us). ws->file and the pxd_dev refcount were both taken at queue time so
+ * vfs_fsync has a valid file and fp->sync_complete has a valid pxd_dev to
+ * signal.
+ */
 static void __pxd_syncer(struct work_struct *wi)
 {
 	struct pxd_sync_ws *ws = (struct pxd_sync_ws*) wi;
 	struct pxd_device *pxd_dev = ws->pxd_dev;
-	struct pxd_fastpath_extension *fp = &ws->pxd_dev->fp;
-	int nfd = fp->nfd;
+	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
 	int i = ws->index;
 
 	ws->rc = 0; // early complete
-	if (i >= nfd || fp->file[i] == NULL) {
+	if (ws->file == NULL) {
 		goto out;
 	}
 
-	ws->rc = vfs_fsync(fp->file[i], 0);
+	ws->rc = vfs_fsync(ws->file, 0);
 	if (unlikely(ws->rc)) {
 		printk(KERN_ERR"device %llu fsync[%d] failed with %d\n", pxd_dev->dev_id, i, ws->rc);
 	}
+
+	fput(ws->file);
+	ws->file = NULL;
 
 out:
 	BUG_ON(!atomic_read(&fp->sync_done));
 	if (atomic_dec_and_test(&fp->sync_done)) {
 		complete(&fp->sync_complete);
 	}
+	/* Must be the last touch of pxd_dev - the device may be freed as
+	 * soon as this ref is dropped. */
+	put_device(&pxd_dev->dev);
 }
 
 static
@@ -553,7 +563,12 @@ int pxd_request_ioswitch(struct pxd_device *pxd_dev, int code)
 	}
 }
 
-#define SYNC_TIMEOUT (60000)
+/* Latency bound on wait_for_sync, not a correctness one - the -EBUSY
+ * return is advisory and callers proceed with teardown regardless.
+ * Sits inline in the failover path (pxd_initiate_failover blocks here
+ * before sending the userspace marker), so it is also a floor on
+ * failover latency when the backing store is unresponsive. */
+#define SYNC_TIMEOUT (10000)
 int wait_for_sync(struct pxd_device *pxd_dev, bool skipsync)
 {
         struct pxd_fastpath_extension *fp = &pxd_dev->fp;
@@ -573,7 +588,29 @@ int wait_for_sync(struct pxd_device *pxd_dev, bool skipsync)
         atomic_set(&fp->sync_done, MAX_PXD_BACKING_DEVS);
         reinit_completion(&fp->sync_complete);
         for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
-                queue_work(fastpath_workqueue(), &fp->syncwi[i].ws);
+                struct pxd_sync_ws *ws = &fp->syncwi[i];
+
+                /* Pin file + device for the worker: SYNC_TIMEOUT can
+                 * return without joining, after which fp->file[i] may
+                 * be closed and pxd_dev freed. Worker uses ws->file. */
+                ws->file = (i < fp->nfd) ? fp->file[i] : NULL;
+                if (ws->file) {
+                        get_file(ws->file);
+                }
+                get_device(&pxd_dev->dev);
+
+                if (!queue_work(fastpath_workqueue(), &ws->ws)) {
+                        /* Already pending - no worker will consume our
+                         * pins and no completion will arrive. Undo. */
+                        if (ws->file) {
+                                fput(ws->file);
+                                ws->file = NULL;
+                        }
+                        put_device(&pxd_dev->dev);
+                        if (atomic_dec_and_test(&fp->sync_done)) {
+                                complete(&fp->sync_complete);
+                        }
+                }
         }
 
         if (!wait_for_completion_timeout(&fp->sync_complete,
@@ -783,18 +820,16 @@ void disableFastPath(struct pxd_device *pxd_dev, bool skipsync)
 		return;
 	}
 
-	/* pxd_suspend_io freezes the blk_mq queue and waits for in-flight
-	 * requests to drop their refs. Combined with the WRITE_ONCE above
-	 * (via xchg) and the RCU grace period below, no new fastpath IO
-	 * can be dispatched and no in-flight fastpath IO is still running
-	 * by the time we get past synchronize_rcu(). */
 	pxd_suspend_io(pxd_dev);
-	/* in pxd_queue_rq, if there are existing readers in the RCU read
-	 * side critical section synchronize_rcu will wait for them to end
-	 * (queue to fastpath kthread). */
+	/* Pairs with the rcu_read_lock in pxd_queue_rq. Once past this,
+	 * every submitter that saw fastpath==true has completed
+	 * fproot_pin_files, so filp_close below cannot drop the last ref
+	 * from under an in-flight request. Handlers on pxfp workers use
+	 * only the pinned snapshot in fproot; nothing left to drain, so
+	 * no fastpath_flush_work here - it would mutual-deadlock two pxfp
+	 * workers that both entered disableFastPath via pxd_io_failover
+	 * (branches b/c). See invariant 4 in FASTPATH_CONTROL_FLOWS.md. */
 	synchronize_rcu();
-	/* at this point, all readers would see fp->fastpath = false */
-	fastpath_flush_work();
 
 	if (PXD_ACTIVE(pxd_dev)) {
 		printk(KERN_WARNING"%s: pxd device %llu fastpath disabled with active IO (%d)\n",
@@ -851,6 +886,7 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 		fp->syncwi[i].index = i;
 		fp->syncwi[i].pxd_dev = pxd_dev;
 		fp->syncwi[i].rc = 0;
+		fp->syncwi[i].file = NULL;
 	}
 
 	// failover init
