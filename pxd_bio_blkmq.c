@@ -350,6 +350,44 @@ static int prep_root_bio(struct fp_root_context *fproot) {
         return 0;
 }
 
+bool fproot_pin_files(struct fp_root_context *fproot,
+                      struct pxd_device *pxd_dev) {
+        struct pxd_fastpath_extension *fp = &pxd_dev->fp;
+        int nfd = READ_ONCE(fp->nfd);
+        int i;
+
+        if (nfd <= 0 || nfd > MAX_PXD_BACKING_DEVS) {
+                return false;
+        }
+
+        for (i = 0; i < nfd; i++) {
+                struct file *f = READ_ONCE(fp->file[i]);
+
+                if (!f) {
+                        /* Slot cleared by teardown - release partial pins. */
+                        fproot_release_files(fproot);
+                        return false;
+                }
+                fproot->file[i] = get_file(f);
+        }
+        fproot->nfd = nfd;
+        return true;
+}
+
+void fproot_release_files(struct fp_root_context *fproot) {
+        int i;
+
+        for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+                struct file *f = fproot->file[i];
+
+                if (f) {
+                        fproot->file[i] = NULL;
+                        fput(f);
+                }
+        }
+        fproot->nfd = 0;
+}
+
 static void clone_cleanup(struct fp_root_context *fproot) {
         struct fp_clone_context *cc, *next;
         struct request *rq = fproot_to_request(fproot);
@@ -373,6 +411,11 @@ static void clone_cleanup(struct fp_root_context *fproot) {
         }
 
         fproot->bio = NULL;
+
+        /* Single release site for the fproot pins - clone_cleanup is
+         * terminal on every disposal path. */
+        fproot_release_files(fproot);
+
         fproot->magic = ~FP_ROOT_MAGIC;
 }
 
@@ -380,11 +423,13 @@ static struct bio *clone_root(struct fp_root_context *fproot, int i) {
         struct bio *clone_bio;
         struct fp_clone_context *cc;
         struct request *rq = fproot_to_request(fproot); // orig request
-        struct pxd_device *pxd_dev = fproot_to_pxd(fproot);
-        struct file *fileh = pxd_dev->fp.file[i];
-        struct block_device *bdev = get_bdev(fileh);
+        /* Use the pinned snapshot; fp->file[i] may already be NULL by now. */
+        struct file *fileh = fproot->file[i];
+        struct block_device *bdev;
 
         BUG_ON(fproot->magic != FP_ROOT_MAGIC);
+        BUG_ON(!fileh);
+        bdev = get_bdev(fileh);
 
         if (!fproot->bio) { // can only be flush request
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0) || (LINUX_VERSION_CODE == KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(BLKDEV_DISCARD_SECURE)) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__SUSE_HAS_NO_PART_SCAN__))
@@ -509,8 +554,8 @@ clone_and_map(struct fp_root_context *fproot) {
                 goto err;
         }
 
-        // prepare clone contexts
-        for (i = 0; i < pxd_dev->fp.nfd; i++) {
+        // prepare clone contexts - iterate the pinned snapshot, not pxd_dev->fp.nfd
+        for (i = 0; i < fproot->nfd; i++) {
                 clone = clone_root(fproot, i);
                 if (!clone) {
 #ifndef __PX_BLKMQ__

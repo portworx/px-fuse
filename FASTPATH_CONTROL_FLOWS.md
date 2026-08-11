@@ -192,8 +192,8 @@ Flow (pxd_fastpath.c disableFastPath):
         in-flight requests to drain.
      b. synchronize_rcu() - waits for existing rcu_read_lock readers of
         fp->fastpath (from pxd_queue_rq) to finish.
-     c. fastpath_flush_work() - drains fastpath kthread workers
-        excluding the current one (see invariant 4).
+     c. (no worker flush - see invariant 4; the RCU grace period in
+        step b is what makes the file close in step e safe.)
      d. Optional wait_for_sync.
      e. For each slot i in [0, MAX_PXD_BACKING_DEVS):
           f = xchg(&fp->file[i], NULL);
@@ -310,24 +310,49 @@ Linux supports via asm/cmpxchg.h). It works on any word-sized lvalue
 including plain struct pointer fields.
 
 
-### Invariant 4 - fastpath_flush_work never self-flushes
+### Invariant 4 - backing files are pinned by the submitter, not
+### drained by a worker flush
 
-fastpath_flush_work iterates every pxfp kthread_worker and calls
-kthread_flush_worker on each. If invoked from within a work item
-running on one of those very workers, self-flush would deadlock:
-kthread_flush_worker enqueues a barrier and wait_for_completion's on
-it; the barrier can only run after the current work returns; the
-current work can only return after the completion fires.
+disableFastPath does NOT flush the pxfp kthread workers. Backing-file
+lifetime across the fastpath -> native transition is guaranteed by
+reference counting plus the RCU grace period instead:
 
-Fix: skip the worker whose ->task == current. This surfaces on the
-branch (b) path (pxd_io_failover -> disableFastPath ->
-fastpath_flush_work) but the fix is universal.
+  pxd_queue_rq, inside one rcu_read_lock() section:
+      observes fp->fastpath == true
+      fproot_pin_files() -> get_file() on each fp->file[i],
+                            snapshots nfd into fproot
+      fastpath_queue_work(fp_handle_io)
 
-Consequence: work items queued on the current worker AFTER the current
-one are not drained by this flush. That's acceptable because
-kthread_worker is single-threaded per worker - those items don't run
-until we return, by which time all file slots have been xchg'd to
-NULL and any dereferencer must handle NULL.
+  disableFastPath:
+      xchg(&fp->fastpath, false)
+      synchronize_rcu()          <-- cannot return until every
+                                     submitter that saw true has
+                                     finished taking its references
+      xchg(&fp->file[i], NULL); filp_close(f)
+
+Handlers on pxfp workers (clone_root, clone_and_map, and everything
+downstream) read only fproot->file[]/fproot->nfd. They never touch
+pxd_dev->fp.file[] or ->fp.nfd, so filp_close cannot pull a file out
+from under a running handler and there is nothing to drain.
+fproot_release_files() drops the references from clone_cleanup(), which
+every disposal path funnels through.
+
+Why not flush: disableFastPath is reachable FROM a pxfp worker
+(pxd_io_failover branch (b) directly, branch (c) via
+pxd_initiate_failover). Two workers doing so concurrently flush each
+other - each queues a barrier behind the other's currently-running work
+item and waits on it uninterruptibly. Skipping the worker whose
+->task == current prevents the 1-worker self-flush but NOT this
+mutual case; it was observed in the field as two pxfp kthreads wedged
+permanently in:
+
+    kthread_flush_worker <- fastpath_flush_work <- disableFastPath
+      <- pxd_initiate_failover <- pxd_io_failover <- kthread_worker_fn
+
+fastpath_flush_work still exists and is still called from
+pxd_fp_freeze_start, which runs in process context (failover_work /
+abort_work / pxd_control_open) and never on a pxfp worker, so it cannot
+participate in that cycle.
 
 
 ### Invariant 5 - list iteration snapshots devices with get_device
@@ -560,22 +585,24 @@ Implication:
   is itself trying to enter disableFastPath.
 
 
-### 4.4 Self-flush contract for fastpath_flush_work
+### 4.4 Calling contract for fastpath_flush_work
 
 Contract:
-  fastpath_flush_work is safe to call from any context, including
-  from within a fastpath kthread_worker's work function. When called
-  from a fastpath worker, that worker is not itself flushed; only
-  peer workers are drained.
+  fastpath_flush_work must only be called from process context that is
+  NOT a pxfp kthread worker. Today that means exactly one caller:
+  pxd_fp_freeze_start.
+
+  Calling it from a pxfp worker deadlocks as soon as a second worker
+  does the same, because the two flush each other (see invariant 4).
+  The ->task == current skip inside it only covers the single-worker
+  self-flush case and must not be mistaken for general safety.
 
 Implication:
-  Any code path that reaches fastpath_flush_work (directly or via
-  disableFastPath) can be reached from a fastpath work item without
-  causing self-deadlock. The follow-up work queued after the current
-  work item on the same worker is not drained by this call, but the
-  code that follows fastpath_flush_work (e.g. the file-close loop in
-  disableFastPath) must be robust against that follow-up work
-  observing NULL file slots after the xchg clears them.
+  disableFastPath must not call it, and neither may anything
+  disableFastPath can reach, because disableFastPath itself runs on a
+  pxfp worker on the pxd_io_failover branch (b)/(c) paths. Backing-file
+  lifetime there is handled by fproot_pin_files/fproot_release_files
+  plus synchronize_rcu, not by draining workers.
 
 
 ### 4.5 Iteration contract for ctx->list
