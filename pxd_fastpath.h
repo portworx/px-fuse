@@ -24,6 +24,10 @@ struct pxd_sync_ws {
 	struct pxd_device *pxd_dev;
 	int index; // file index
 	int rc; // result
+	// Pinned by wait_for_sync (get_file), released by __pxd_syncer (fput).
+	// Worker must not re-read fp->file[index] - the SYNC_TIMEOUT path can
+	// let disableFastPath close it while we are still running.
+	struct file *file;
 };
 
 struct pxd_fastpath_extension {
