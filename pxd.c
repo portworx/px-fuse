@@ -1156,6 +1156,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	} else {
 		blk_queue_max_write_zeroes_sectors(q, 0);
 	}
+#else
+
 #endif
 #elif !(LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)))
 	// Non-RHEL kernels that don't use queue_limits API
@@ -1604,7 +1606,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
 	#endif
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+#else
 	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
 	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);

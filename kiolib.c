@@ -249,6 +249,8 @@ int __do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio,
         case REQ_OP_DISCARD:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
         case REQ_OP_WRITE_ZEROES:
+#else
+        // no-op
 #endif
                 ret = _pxd_bio_discard(pxd_dev, file, bio, pos);
                 goto out;
