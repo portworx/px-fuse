@@ -1119,6 +1119,8 @@ static int pxd_init_disk(struct pxd_device *pxd_dev, unsigned int *blk_mq_queue_
 	} else {
 		blk_queue_max_write_zeroes_sectors(q, 0);
 	}
+#else
+
 #endif
 #elif !(LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__)))
 	// Non-RHEL kernels that don't use queue_limits API
@@ -1427,12 +1429,16 @@ static void pxd_finish_remove(struct work_struct *work)
 		mutex_unlock(&pxd_dev->disk->queue->sysfs_lock);
 #else
 	blk_freeze_queue_start(pxd_dev->disk->queue);
-	pxd_mark_device_dead(pxd_dev);
-	// kernel bug here, disk deletion code, fsync IO, checking for disk dead while queue is marked dying,
-	// which will never happen, and the disk deletion code is stuck in deadlock.
-	// in this case, allow IOs to go to the queue and let px-storage handle IO
-	// on the device, so fsync can pass, and del_gendisk can proceed
-	// to safely delete the device.
+ 	pxd_mark_device_dead(pxd_dev);
+	// pxd_mark_device_dead is per-kernel: it calls blk_mark_disk_dead
+	// where available, otherwise blk_set_queue_dying (see pxd_core.h).
+	// Both are required paired with the blk_freeze_queue_start above:
+	// del_gendisk issues an implicit fsync via fsync_bdev, whose flush
+	// bio enters blk_queue_enter and parks on q->mq_freeze_wq because
+	// mq_freeze_depth is now non-zero. Setting DEAD/DYING is what wakes
+	// that wait queue and lets the flush return -ENODEV so del_gendisk
+	// can proceed. Any kernel that falls through both branches of
+	// pxd_mark_device_dead without setting DEAD/DYING will hang here.
 #endif
 	}
 
@@ -1567,7 +1573,7 @@ ssize_t pxd_ioc_update_size(struct fuse_conn *fc, struct pxd_update_size *update
 	err = revalidate_disk(pxd_dev->disk);
 	BUG_ON(err);
 	#endif
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5,11,0)
+#else
 	pxd_dev->size = update_size->size;
 	spin_unlock(&pxd_dev->lock);
 	set_capacity_and_notify(pxd_dev->disk, update_size->size / SECTOR_SIZE);

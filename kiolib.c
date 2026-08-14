@@ -242,7 +242,6 @@ int __do_bio_filebacked(struct pxd_device *pxd_dev, struct bio *bio,
 
                 ret = 0;
                 goto out;
-
         case REQ_OP_FLUSH:
                 ret = _pxd_flush(pxd_dev, file);
                 goto out;
