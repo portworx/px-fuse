@@ -23,6 +23,34 @@ struct pxd_context {
 	struct delayed_work abort_work;
 	struct work_struct failover_work;
 
+	/* One transition at a time. Held across each freeze bracket below.
+	 *
+	 * Why the freeze gate is not enough on its own: fp_freeze is an on/off
+	 * flag, not a counter. If two transitions overlap, both set it to 1,
+	 * and whichever finishes first sets it back to 0. The second one then
+	 * keeps going with the gate already down, so IO stops parking while
+	 * that transition is still changing state - exactly what the gate is
+	 * there to prevent. Making fp_freeze a counter would fix the nesting
+	 * but not the real problem: two transitions rewriting the same device
+	 * state at once is wrong no matter what the gate says. So they must
+	 * not overlap at all, and this lock is what guarantees it.
+	 *
+	 * Wait for failover_work/abort_work BEFORE taking this, never while
+	 * holding it. */
+	struct mutex transition_lock;
+
+	/* Set once a release has torn everything down (or found nothing to tear
+	 * down), cleared when px reconnects. Writers hold transition_lock.
+	 *
+	 * Why one flag is enough: a release only runs while fc.connected == 0,
+	 * and nothing can create new fastpath work while px is gone - enabling
+	 * fastpath, adding a device and starting an ioswitch all need the
+	 * control fd, and IO can only park behind a live fastpath or an open
+	 * freeze window. So the "nothing to release" answer stays true until
+	 * pxd_control_open clears it, and repeat writes are a single flag read
+	 * instead of a walk of every device. */
+	bool fp_released;
+
 	/* Ctx-scoped fastpath freeze gate.
 	 *
 	 * When set, a pxd_io_failover work item entering the failover state
@@ -33,11 +61,11 @@ struct pxd_context {
 	 * block the kthread worker.
 	 *
 	 * The ctx-teardown code (pxdctx_reset_fastpath called from
-	 * pxd_failover_work / pxd_abort_context) drains each device's failQ
-	 * with the appropriate mode (reissue-to-native for the soft path,
-	 * abort for the hard path). pxd_fp_freeze_end also drains once more
-	 * after clearing the gate to catch items that parked between the
-	 * reset_fastpath drain and the gate clear.
+	 * pxd_failover_work / pxd_abort_context / pxdctx_release_fastpath) drains
+	 * each device's failQ with the appropriate mode (reissue-to-native for
+	 * the soft paths, abort for the hard path). pxd_fp_freeze_end also
+	 * drains once more after clearing the gate to catch items that parked
+	 * between the reset_fastpath drain and the gate clear.
 	 *
 	 * Memory ordering (weak-arch correctness):
 	 *   Writer (pxd_fp_freeze_start/end): smp_store_release. All state
@@ -54,12 +82,9 @@ struct pxd_context {
 	 *     the same instructions as WRITE_ONCE/READ_ONCE plus a
 	 *     compiler barrier.
 	 *
-	 * Not atomic_t: single-writer (only the ctx-transition callbacks
-	 * failover_work / abort_work / pxd_control_open write it, and those
-	 * do not overlap thanks to flush_work in pxd_control_open + delayed
-	 * scheduling of abort_work + serial invocation of failover_work).
-	 * atomic_t would be misleading - there is no read-modify-write on
-	 * this field.
+	 * Not atomic_t: single-writer. The writers (failover_work, abort_work,
+	 * pxd_control_open, pxdctx_release_fastpath) are kept from overlapping by
+	 * ctx->transition_lock, not by atomicity on this field.
 	 */
 	int fp_freeze;
 

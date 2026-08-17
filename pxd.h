@@ -218,12 +218,21 @@ struct pxd_detach_device {
 };
 
 /**
+ * Release/cleanup intent. Carried in pxd_fastpath_out.cleanup, and as an
+ * optional trailing value on a `release` sysfs write ("<magic> <intent>").
+ * Absent or unparseable intent reads as LEGACY_INTENT.
+ */
+#define LEGACY_INTENT		(1)	/* no intent given; same as graceful */
+#define FORCE_CLEANUP		(2)	/* node decommission: fail queued IO */
+#define GRACEFUL_CLEANUP	(4)	/* maintenance: reissue queued IO */
+
+/**
  * PXD_SET_FASTPATH request from user space
  */
 struct pxd_fastpath_out {
 	uint64_t dev_id;
 	int enable;
-	int cleanup; // only meaningful while disabling
+	int cleanup; // intent bitmap above; only meaningful while disabling
 	int context_id;
 };
 
