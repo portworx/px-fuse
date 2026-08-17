@@ -78,15 +78,29 @@ struct pxd_device {
 static inline void pxd_mark_device_dead(struct pxd_device *pxd_dev)
 {
 	#if (((LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) && LINUX_VERSION_CODE <  KERNEL_VERSION(5,16,0))) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,11))) || \
-			(LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_HAS_NO_PART_SCAN__)))
+			(LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || \
+			(defined(__SUSE_HAS_NO_PART_SCAN__)) || \
+			(defined(__ORACLE_UEK__) && LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0))
+
 		// del_gendisk will try to fsync device
 		// so freeze queue and then *mark queue dead* to ensure no new reqs
 		// gets accepted.
 		blk_mark_disk_dead(pxd_dev->disk);
-	#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
-		// del_gendisk will not submit any new IO.
-		// so freeze queue and then queue dying, to ensure no new reqs
-		// gets accepted.
+	#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0) || \
+			(defined(CONFIG_SUSE_VERSION) && !defined(__SUSE_HAS_NO_PART_SCAN__))
+		// Two cases share this branch:
+		//   1) LINUX < 5.13.0 : blk_mark_disk_dead does not exist yet;
+		//      del_gendisk won't submit new IO on its own but we still
+		//      set DYING to fail any late submitters.
+		//   2) SUSE 5.14 kernels that predate the GENHD_FL_NO_PART_SCAN
+		//      retirement (SLES 15 SP4, and SP5 minor < 22). On these,
+		//      del_gendisk DOES issue an fsync (via fsync_bdev), and
+		//      blk_freeze_queue_start above has already parked new
+		//      submissions in blk_queue_enter. Without setting DYING,
+		//      blk_queue_enter waits forever on q->mq_freeze_wq and
+		//      del_gendisk deadlocks. blk_set_queue_dying wakes that
+		//      wait queue and makes blk_queue_enter return -ENODEV,
+		//      letting the flush fail out and del_gendisk proceed.
 		blk_set_queue_dying(pxd_dev->disk->queue);
 	#endif
 }
