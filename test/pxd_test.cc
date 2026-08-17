@@ -1189,6 +1189,79 @@ TEST_F(PxdTest, write_zeroes_custom_discard_granularity)
  * - See pxd_fastpath_test.cc for implementation
  */
 
+/**
+ * Test: pxd_mark_device_dead() correctly tears down the block device
+ *
+ * pxd_mark_device_dead() is a static inline in pxd_core.h invoked by
+ * pxd_finish_remove() during device removal. It cannot be called from
+ * user space directly, so this test exercises it indirectly by removing
+ * a device and asserting the observable post-conditions:
+ *   - /dev/pxd/pxdN disappears
+ *   - /sys/block/pxd!pxdN disappears
+ *   - subsequent open() on the device path fails
+ */
+TEST_F(PxdTest, mark_device_dead)
+{
+	std::cout << "=== Test: pxd_mark_device_dead device teardown ===" << std::endl;
+
+	struct pxd_add_out add;
+	std::string name;
+	int minor = 0;
+
+	// Attach a kernel block device (/dev/pxd/pxd1)
+	add.dev_id = 1;
+	add.size = 1024 * 1024;
+	add.queue_depth = 128;
+	add.discard_size = PXD_LBS;
+	dev_add(add, minor, name);
+
+	// Pre-condition: device file exists and is openable.
+	ASSERT_EQ(0, access(name.c_str(), F_OK)) << "device file missing before removal";
+	int fd = open(name.c_str(), O_RDWR);
+	ASSERT_GT(fd, 0) << "failed to open device before removal";
+	close(fd);
+
+	// Pre-condition: sysfs entry exists.
+	// /dev/pxd/pxd1 -> /sys/block/pxd!pxd1
+	std::string sysfs_name = name;
+	if (sysfs_name.find("/dev/pxd/") == 0) {
+		sysfs_name = sysfs_name.substr(9);
+		sysfs_name = "pxd!" + sysfs_name;
+	}
+	std::string sysfs_dir = "/sys/block/" + sysfs_name;
+	ASSERT_EQ(0, access(sysfs_dir.c_str(), F_OK))
+	    << "sysfs entry missing before removal: " << sysfs_dir;
+
+	// Remove the device. This drives pxd_finish_remove(), which on the
+	// non-BLKMQ path marks the queue dying (the observable effect of
+	// pxd_mark_device_dead()) before del_gendisk / device_unregister.
+	dev_remove(add.dev_id);
+
+	// Post-condition: device file must be gone (allow brief settle).
+	bool devfile_gone = false;
+	for (int i = 0; i < 10; i++) {
+		if (access(name.c_str(), F_OK) != 0) {
+			devfile_gone = true;
+			break;
+		}
+		sleep(1);
+	}
+	EXPECT_TRUE(devfile_gone)
+	    << "device file still present after removal: " << name;
+
+	// Post-condition: sysfs entry must be gone.
+	EXPECT_NE(0, access(sysfs_dir.c_str(), F_OK))
+	    << "sysfs entry still present after removal: " << sysfs_dir;
+
+	// Post-condition: subsequent open() must fail — queue is dying and
+	// the disk has been deleted.
+	fd = open(name.c_str(), O_RDWR);
+	EXPECT_EQ(-1, fd) << "open() unexpectedly succeeded after mark-dead + remove";
+	if (fd >= 0) close(fd);
+
+	std::cout << "=== Test PASSED: pxd_mark_device_dead device teardown ===" << std::endl;
+}
+
 int main(int argc, char **argv)
 {
 	::testing::InitGoogleTest(&argc, argv);

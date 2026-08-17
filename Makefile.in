@@ -269,12 +269,23 @@ insert: all
 
 clean:
 	make -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) clean
+	@/bin/rm -f test/compat_else_check
 
 install:
 	make V=1 -C $(KERNELPATH) $(KERNELOTHEROPT) M=$(CURDIR) modules_install
 
 test_clean:
-	@/bin/rm -f test/pxd_test
+	@/bin/rm -f test/pxd_test test/compat_else_check
+
+# Static check: every preprocessor conditional must have a default #else, so no
+# kernel silently compiles to nothing.  Needs no kernel headers, just a compiler.
+COMPAT_ELSE_CHECK = test/compat_else_check
+
+$(COMPAT_ELSE_CHECK): test/compat_else_check.c
+	@gcc -Wall -Wextra -std=c99 -O2 -o $@ $<
+
+compat-check: $(COMPAT_ELSE_CHECK)
+	@./$(COMPAT_ELSE_CHECK)
 
 pxd_test: test/pxd_test.cc test/pxd_fastpath_test.cc
 	@echo "Building Tests ..."
@@ -303,4 +314,4 @@ px_version.c:
 
 distclean: clean
 	@/bin/rm -f  config.* Makefile
-	@/bin/rm -f test/pxd_test
+	@/bin/rm -f test/pxd_test test/compat_else_check

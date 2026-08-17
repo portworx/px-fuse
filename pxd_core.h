@@ -77,13 +77,15 @@ struct pxd_device {
 
 static inline void pxd_mark_device_dead(struct pxd_device *pxd_dev)
 {
-	#if (((LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) && LINUX_VERSION_CODE <  KERNEL_VERSION(5,16,0))) || (LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,11))) || \
-			(LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && ((defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || defined(__SUSE_HAS_NO_PART_SCAN__)))
+	#if ((LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,25) && LINUX_VERSION_CODE <  KERNEL_VERSION(5,16,0)) || LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,11)) || \
+			(LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && defined(__EL8__) && !defined(QUEUE_FLAG_DEAD)) || \
+			(defined(__SUSE_HAS_NO_PART_SCAN__)) || \
+			(defined(__ORACLE_UEK__) && LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0))
 		// del_gendisk will try to fsync device
 		// so freeze queue and then *mark queue dead* to ensure no new reqs
 		// gets accepted.
 		blk_mark_disk_dead(pxd_dev->disk);
-	#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,13,0)
+	#else
 		// del_gendisk will not submit any new IO.
 		// so freeze queue and then queue dying, to ensure no new reqs
 		// gets accepted.
