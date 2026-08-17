@@ -1179,16 +1179,6 @@ TEST_F(PxdTest, write_zeroes_custom_discard_granularity)
 	std::cout << "=== Test PASSED: WriteZero with custom granularity ===" << std::endl;
 }
 
-/*
- * NOTE: Fastpath WriteZero tests should be added to pxd_fastpath_test.cc
- * since they require backing devices infrastructure.
- *
- * Test case for fastpath:
- * - WriteZero should be DISABLED for fastpath devices regardless of capabilities
- * - Even if PXD_DEV_CAP_WRITE_ZEROES is set, fastpath (LVM) doesn't support discard
- * - See pxd_fastpath_test.cc for implementation
- */
-
 int main(int argc, char **argv)
 {
 	::testing::InitGoogleTest(&argc, argv);
