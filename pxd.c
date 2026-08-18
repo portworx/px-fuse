@@ -2184,7 +2184,7 @@ static ssize_t pxd_release_store(struct device *dev,
 	struct pxd_context *ctx;
 
 	if (!strncmp(wipemagic, buf, sizeof(wipemagic))) {
-		printk("pxd kernel node wipe action initiated\n");
+		printk("releasing pxd references\n");
 		for (i = 0; i < pxd_num_contexts; ++i) {
 			ctx = &pxd_contexts[i];
 			if (READ_ONCE(ctx->fc.connected)) {
