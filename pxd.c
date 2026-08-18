@@ -2557,6 +2557,17 @@ static ssize_t pxd_release_store(struct device *dev,
 	if (*rest && *rest != ' ' && *rest != '\n') {
 		return count;
 	}
+	if (!strncmp(wipemagic, buf, sizeof(wipemagic))) {
+		printk("releasing pxd references\n");
+		for (i = 0; i < pxd_num_contexts; ++i) {
+			ctx = &pxd_contexts[i];
+			if (READ_ONCE(ctx->fc.connected)) {
+				printk("%s px is still connected... cannot release\n", __func__);
+				break;
+			}
+			if (ctx->num_devices == 0) {
+				continue;
+			}
 
 	intent = pxd_release_intent(rest);
 	mode = (intent & FORCE_CLEANUP) ? PXDCTX_RESET_RELEASE_FORCE
