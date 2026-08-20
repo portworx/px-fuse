@@ -356,9 +356,15 @@ void pxd_fp_freeze_start(struct pxd_context *ctx)
 	 * barrier that guarantees the gate=1 store is globally visible
 	 * before we start touching device state. */
 	fastpath_flush_work();
-	if (gwq != NULL) {
-		flush_workqueue(gwq);
-	}
+	/* Deliberately NOT flushing gwq. Its only producer is wait_for_sync,
+	 * so it carries backing-store fsyncs - which take no branch decision
+	 * and read none of the gate-protected state. They are also designed to
+	 * outlive their waiter (SYNC_TIMEOUT returns without joining, pinning
+	 * file+device for the orphaned worker), so flushing them made every ctx
+	 * transition wait on an unbounded fsync. That is what wedged
+	 * pxd_control_open for minutes on a severed backing device: a sync
+	 * abandoned at T+10s was still running, and px's control-fd open
+	 * blocked here until the NVMe layer gave up. */
 }
 
 void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io)
@@ -440,6 +446,10 @@ void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io)
 		INIT_LIST_HEAD(&ios);
 		spin_lock_irqsave(&dev->fp.fail_lock, flags);
 		list_splice_init(&dev->fp.failQ, &ios);
+		/* Cleared even when nothing was parked: reaching here means the
+		 * transition is over, so any gate still up refers to a failover
+		 * that is no longer going to complete. */
+		smp_store_release(&dev->fp.active_failover, false);
 		spin_unlock_irqrestore(&dev->fp.fail_lock, flags);
 
 		if (list_empty(&ios)) {
@@ -454,7 +464,6 @@ void pxd_fp_freeze_end(struct pxd_context *ctx, bool fail_io)
 			spin_lock_irqsave(&dev->fp.fail_lock, flags);
 			list_splice(&ios, &dev->fp.failQ);
 			__pxd_abortfailQ(dev);
-			dev->fp.active_failover = false;
 			spin_unlock_irqrestore(&dev->fp.fail_lock, flags);
 		} else {
 			/* Soft path: reissue to native (status=0). */
@@ -743,7 +752,12 @@ out_file_failed:
 	memset(fp->device_path, 0, sizeof(fp->device_path));
 
 	pxd_dev->fp.fastpath = false;
-	/// volume still remains suspended waiting for CLEANUP request to reopen IO.
+	/* Release the suspend taken at entry. This function must leave the
+	 * count as it found it on every exit, or a failed setup strands the
+	 * queue quiesced: nothing sends the CLEANUP request the old comment
+	 * here waited for, and the device is on the native path with no
+	 * backing fds, so there is nothing left to hold IO back for. */
+	pxd_resume_io(pxd_dev);
 	printk(KERN_INFO"%s: Device %llu no backing volume setup, will take slow path\n",
 		__func__, pxd_dev->dev_id);
 }
@@ -1029,7 +1043,13 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool 
 			req->out.h.error = -EIO; // force failure status
 			request_end(fc, req, true /* should lock */);
 		} else {
+			/* Request already gone, so the completer will never run
+			 * and never clear the gate. Clear both here or every
+			 * later IO parks on failQ with no completion pending. */
 			pxd_dev->fp.switch_uid = 0;
+			spin_lock_irqsave(&fp->fail_lock, flags);
+			smp_store_release(&fp->active_failover, false);
+			spin_unlock_irqrestore(&fp->fail_lock, flags);
 			atomic_set(&fp->ioswitch_active, 0);
 		}
 	} else {
@@ -1048,14 +1068,23 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool 
 				pxd_dev->dev_id,
 				ioswitch_active ? "leftover" : "non-empty");
 			__pxd_abortfailQ(pxd_dev);
-			fp->active_failover = false;
 		}
+		/* Unconditional: the gate must be down before the tail resumes
+		 * IO, whether or not anything was parked. Nesting this in the
+		 * !list_empty check left it up whenever failQ happened to be
+		 * empty, and with ioswitch_active already 0 no completion could
+		 * ever clear it. */
+		smp_store_release(&fp->active_failover, false);
 		spin_unlock_irqrestore(&fp->fail_lock, flags);
 	} else {
-		// reissue IOs to native path
+		/* Reissue to native. Clear the gate with the splice, not after
+		 * it: this is an abandonment of the failover just as much as the
+		 * fail_io path is, and a late add landing between splice and
+		 * clear would strand. */
                 INIT_LIST_HEAD(&ios);
                 spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
                 list_splice_init(&pxd_dev->fp.failQ, &ios);
+                smp_store_release(&fp->active_failover, false);
                 spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
                 pxd_reissuefailQ(pxd_dev, &ios, 0);
 	}
