@@ -739,6 +739,25 @@ static void pxd_io_failover(struct kthread_work *work) {
         // Non-zero only on real failure (-ENODEV removing, -ENOMEM,
         // -ENOTCONN). Orphan case returns 0 after local reissue.
         if (rc) {
+                /* -ENOTCONN (userspace went away between the ctx_conn check
+                 * above and here) and -ENODEV (device being removed) both
+                 * already have a drainer scheduled: pxd_control_release queues
+                 * failover_work + abort_work, and removal runs
+                 * pxd_fastpath_reset_device. So leave the IO parked on failQ
+                 * for them to route - reissued to native if px returns, failed
+                 * with -EIO by the abort timer if it does not. A bounded wait
+                 * is recoverable for a mounted filesystem; an -EIO here is not.
+                 *
+                 * Anything else is a local failure (-ENOMEM) with no pending
+                 * transition to own the queue, so it still has to fail here -
+                 * parking with no drainer is what strands IO forever. */
+                if (rc == -ENOTCONN || rc == -ENODEV) {
+                        printk_ratelimited(
+                            KERN_WARNING
+                            "%s: pxd%llu: failover deferred (%d), IO parked\n",
+                            __func__, pxd_dev->dev_id, rc);
+                        return;
+                }
                 printk_ratelimited(
                     KERN_ERR
                     "%s: pxd%llu: failover failed %d, aborting IO\n",

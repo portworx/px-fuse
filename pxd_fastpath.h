@@ -125,10 +125,11 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool 
 // pxd_fp_freeze_start:
 //   Sets ctx->fp_freeze so pxd_io_failover work items entering the failover
 //   state machine park on their device's failQ (via fproot->wait) instead
-//   of taking a branch decision. Then drains all in-flight fastpath work
-//   (kthread workers + gwq) so any item that started before the gate went
-//   up completes with the pre-freeze state - correct, it committed before
-//   the freeze.
+//   of taking a branch decision. Then drains the fastpath kthread workers so
+//   any item that started before the gate went up completes with the
+//   pre-freeze state - correct, it committed before the freeze. gwq is not
+//   drained: it carries only wait_for_sync's fsyncs, which take no branch
+//   decision and are unbounded on a broken backing device.
 //
 // pxd_fp_freeze_end:
 //   Clears the gate and drains any items that parked between
