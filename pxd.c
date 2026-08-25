@@ -769,13 +769,12 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return 0;
 	}
 
-	// Device already in native (orphan case from pxd_io_failover, or a
-	// State B caller). Splice any pending failQ entries and reissue
-	// them on the slowpath locally - no marker round-trip needed since
-	// the device is already in the target state. Return 0 (idempotent
-	// success) rather than -EINVAL so PX-storage and pxd_io_failover
-	// see "already converged" without treating it as an error.
-	if (!fastpath_active(pxd_dev)) {
+	// Already native with no switch pending: reissue locally, no marker
+	// round-trip needed. The ioswitch gate is required - fp.fastpath is
+	// cleared up front by disableFastPath(), so a pending switch reads
+	// native here while userspace has not switched its iopath yet.
+	if (!fastpath_active(pxd_dev) &&
+	    atomic_read(&pxd_dev->fp.ioswitch_active) == 0) {
 		struct list_head ios;
 		unsigned long flags;
 		INIT_LIST_HEAD(&ios);
