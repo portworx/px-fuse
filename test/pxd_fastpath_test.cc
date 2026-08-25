@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <gtest/gtest.h>
 #include <stdlib.h>
 #include <string>
@@ -6390,4 +6391,130 @@ TEST_P(PxdFastpathTest, fastpath_setup_failure_balances_io_suspend)
         << (wb < 0 ? strerror(werr) : "short write")
         << " - the queue is not accepting IO. debug=" << read_pxd_debug(minor);
     std::cout << "drainer served " << served.load() << " native reqs" << std::endl;
+}
+
+/*
+ * A pending ioswitch must gate the reissue-native path.
+ *
+ * disableFastPath() clears fp.fastpath up front, so while a marker is
+ * outstanding the device reads native although userspace has not switched
+ * yet. Reissuing failed fastpath IO in that window hands it up with no
+ * handshake.
+ *
+ * Contract: no device IO on ctl_fd until the marker is acked.
+ */
+TEST_P(PxdFastpathTest, no_reissue_while_ioswitch_pending_using_dm_flakey_delay)
+{
+    const uint64_t DELAY_WRITE_MS = 4000;
+    const uint64_t failing_offset = (16ULL * 1024 * 1024) + 4096;
+
+    TempLoopDevice loop_dev(100);
+    DMStackCleanup dm_stack{};
+    std::string dm_path, delay_name, flakey_path, device_name;
+    int minor = 0;
+    pxd_add_ext_out add_ext;
+
+    if (!prepare_flakey_delay_dm_and_add_ext(
+            1702, "pxd_test_switch_gate", loop_dev, dm_stack, dm_path,
+            delay_name, flakey_path, add_ext,
+            true /* flakey_errors: erroring window 16-32MB */,
+            0 /* read_ms */, DELAY_WRITE_MS /* write_ms */, 0 /* flush_ms */)) {
+        GTEST_SKIP();
+    }
+    dev_add_fastpath(add_ext, minor, device_name);
+
+    PxdDebugState st;
+    ASSERT_TRUE(parse_pxd_debug(minor, &st));
+    ASSERT_EQ(st.fpactive, 1) << "not in fastpath. debug=" << read_pxd_debug(minor);
+
+    /* Drain ctl_fd, recording order. The marker is held unacked until the
+     * failing IO has had time to reach the reissue decision. */
+    std::atomic<bool> stop_drain{false};
+    std::atomic<bool> hold_marker{true};
+    std::atomic<int> markers{0}, acked{0}, io_reqs{0}, io_before_ack{0};
+    std::vector<uint64_t> pending;
+    std::mutex pending_lock;
+
+    std::thread drainer([&]() {
+        while (!stop_drain.load()) {
+            struct rdwr_in rdwr;
+            if (wait_msg(1) == -ETIMEDOUT) continue;
+            if (read(ctl_fd, &rdwr, sizeof(rdwr)) <= 0) continue;
+
+            if (rdwr.in.opcode == PXD_FAILOVER_TO_USERSPACE) {
+                markers.fetch_add(1);
+                if (hold_marker.load()) {
+                    std::lock_guard<std::mutex> g(pending_lock);
+                    pending.push_back(rdwr.in.unique);
+                } else {
+                    ack_marker_req(ctl_fd, rdwr.in.unique);
+                    acked.fetch_add(1);
+                }
+                continue;
+            }
+            if (rdwr.in.opcode == PXD_READ || rdwr.in.opcode == PXD_WRITE ||
+                rdwr.in.opcode == PXD_DISCARD) {
+                io_reqs.fetch_add(1);
+                if (acked.load() == 0) {
+                    io_before_ack.fetch_add(1);
+                    std::cout << "  IO opc=" << rdwr.in.opcode << " off="
+                              << rdwr.rdwr.offset << " with marker UNACKED"
+                              << std::endl;
+                }
+            }
+            finish_io(&rdwr, rdwr.in.opcode == PXD_READ);
+        }
+    });
+
+    std::atomic<ssize_t> write_rc{0};
+    std::thread writer([&]() {
+        int fd = open(device_name.c_str(), O_RDWR | O_DIRECT);
+        if (fd < 0) return;
+        auto buf = aligned_buffer_fastpath(4096);
+        init_pattern_fastpath(buf.get(), 4096);
+        write_rc.store(pwrite(fd, buf.get(), 4096, failing_offset));
+        close(fd);
+    });
+
+    /* Pin the write in dm-delay, then start the failover. */
+    usleep(500000);
+    ASSERT_GT(send_ioswitch_notify(ctl_fd, add_ext.dev_id,
+                                   PXD_FAILOVER_TO_USERSPACE), 0);
+
+    /* Marker outstanding: fp.fastpath clear, userspace not switched yet.
+     * The write fails here and must NOT be reissued. */
+    sleep(6);
+    ASSERT_TRUE(parse_pxd_debug(minor, &st));
+    std::cout << "with marker held: " << read_pxd_debug(minor) << std::endl;
+    EXPECT_EQ(io_before_ack.load(), 0)
+        << io_before_ack.load() << " request(s) reached ctl_fd while the "
+           "PXD_FAILOVER_TO_USERSPACE marker was unacked (markers seen="
+        << markers.load() << ", debug=" << read_pxd_debug(minor) << ")";
+
+    /* Release the marker; failQ must drain and the write retire. */
+    hold_marker.store(false);
+    {
+        std::lock_guard<std::mutex> g(pending_lock);
+        for (auto u : pending) {
+            ack_marker_req(ctl_fd, u);
+            acked.fetch_add(1);
+        }
+        pending.clear();
+    }
+
+    writer.join();
+    sleep(2);
+    stop_drain.store(true);
+    drainer.join();
+
+    std::cout << "markers=" << markers.load() << " acked=" << acked.load()
+              << " io_reqs=" << io_reqs.load()
+              << " io_before_ack=" << io_before_ack.load()
+              << " write_rc=" << write_rc.load() << std::endl;
+
+    EXPECT_GT(markers.load(), 0) << "no failover marker surfaced";
+    EXPECT_GT(io_reqs.load(), 0)
+        << "failQ never drained after the ack. debug=" << read_pxd_debug(minor);
+
+    dev_remove_fastpath(add_ext.dev_id);
 }
