@@ -34,3 +34,5 @@ there are no changes to driver behaviour relative to v3.6.0.
 - 9685402 Trigger a fastpath failover when a backing device returns -ENOLINK
 - e9588ef Read the fastpath flag under RCU so disabling fastpath cannot race with IO submission
 - 5b887e3 Correct active IO accounting on remote fastpath so retried IOs are not counted twice
+- d54d0881 compatibility: pass suse 5.15.x-15sp4 through blk_set_queue_dying()
+- 9e160e70 PWX-57597: log line fix for releasing fastpath devices
