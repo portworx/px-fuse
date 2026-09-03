@@ -1267,13 +1267,16 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_v2_out *add)
 	int new_minor;
 	int err;
 
-	err = -ENOMEM;
-	if (ctx->num_devices >= PXD_MAX_DEVICES) {
-		printk(KERN_ERR "Too many devices attached..\n");
-		goto out_module;
-	}
-
-	// if device already exists, then return it
+	// if device already exists, then return it.
+	//
+	// this has to be answered before the PXD_MAX_DEVICES guard below: an
+	// already registered device owns its slot and this add consumes no new
+	// one, it only refreshes the io path. attach retries and fastpath
+	// promotion both arrive here - promotion is not a separate opcode,
+	// PXD_FALLBACK_TO_KERNEL installs replica paths by re-issuing PXD_ADD*
+	// with enable_fp set - so gating them on capacity wedged a node sitting
+	// at exactly PXD_MAX_DEVICES: every re-attach and every promotion
+	// failed and the node could not recover without rmmod.
 	pxd_dev = find_pxd_device(ctx, add->dev_id);
 	if (pxd_dev) {
 		if (add->enable_fp && add->paths.count > 0) {
@@ -1283,6 +1286,13 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_v2_out *add)
 		}
 
 		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
+	}
+
+	// only creating a new device consumes a slot
+	err = -ENOMEM;
+	if (ctx->num_devices >= PXD_MAX_DEVICES) {
+		printk(KERN_ERR "Too many devices attached..\n");
+		goto out_module;
 	}
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
