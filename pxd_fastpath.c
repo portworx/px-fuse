@@ -13,6 +13,11 @@
 #include <linux/genhd.h>
 #endif
 #include <linux/workqueue.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7,2,0)
+// ELRepo 7.2 / mainline dropped the transitive <linux/string.h> chain,
+// so strncpy() below needs the header pulled in explicitly.
+#include <linux/string.h>
+#endif
 
 #include "pxd_bio.h"
 #include "pxd.h"
@@ -544,16 +549,22 @@ void enableFastPath(struct pxd_device *pxd_dev, bool force)
 		fp->file[i] = f;
 
 		inode = file_inode(f);
-		printk(KERN_INFO"device %lld:%d, inode %lu mode %#x\n", pxd_dev->dev_id, i, inode->i_ino, mode);
+		// struct inode::i_ino was widened from unsigned long to u64
+		// (ELRepo 7.1 / mainline late-6.x carries the change). Print as
+		// %llu with an unsigned-long-long cast so the format matches on
+		// both the old and new type without a version guard.
+		printk(KERN_INFO"device %lld:%d, inode %llu mode %#x\n",
+			pxd_dev->dev_id, i, (unsigned long long)inode->i_ino, mode);
 		if (S_ISREG(inode->i_mode)) {
-			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %lu\n",
-					pxd_dev->dev_id, i, inode->i_ino);
+			printk(KERN_INFO"device[%lld:%d] is a regular file - inode %llu\n",
+					pxd_dev->dev_id, i, (unsigned long long)inode->i_ino);
 		} else if (S_ISBLK(inode->i_mode)) {
-			printk(KERN_INFO"device[%lld:%d] is a block device - inode %lu\n",
-				pxd_dev->dev_id, i, inode->i_ino);
+			printk(KERN_INFO"device[%lld:%d] is a block device - inode %llu\n",
+				pxd_dev->dev_id, i, (unsigned long long)inode->i_ino);
 		} else {
-			printk(KERN_INFO"device[%lld:%d] inode %lu unknown device %#x\n",
-				pxd_dev->dev_id, i, inode->i_ino, inode->i_mode);
+			printk(KERN_INFO"device[%lld:%d] inode %llu unknown device %#x\n",
+				pxd_dev->dev_id, i, (unsigned long long)inode->i_ino,
+				inode->i_mode);
 			goto out_file_failed;
 		}
 	}
