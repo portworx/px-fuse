@@ -270,11 +270,14 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 #define PXD_FEATURE_DISCARD_CONTROL (0x4)
 // supports WriteZero->Discard optimization (PXD_ADD_EXT_V2 opcode)
 #define PXD_FEATURE_WRITE_ZEROES (0x8)
+// supports fast failover of remote fastpath (NVMe-TCP) volumes
+#define PXD_FEATURE_FAST_FAILOVER (0x10)
 
 static inline
 int pxd_supported_features(void)
 {
-    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL | PXD_FEATURE_WRITE_ZEROES;
+    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL |
+                   PXD_FEATURE_WRITE_ZEROES | PXD_FEATURE_FAST_FAILOVER;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif
