@@ -245,6 +245,17 @@ ccflags-y += -Wno-error=attributes
 endif
 endif
 
+# Ubuntu 6.17+/6.19+/7.1+/7.2+ kernels are built with a very recent gcc that
+# emits -fmin-function-alignment=<n> into KBUILD_CFLAGS. Older gcc used to
+# build out-of-tree modules does not recognise the flag and the module build
+# fails with:
+#   gcc: error: unrecognized command-line option '-fmin-function-alignment=16'
+# Drop the flag from the compile line unconditionally via ccflags-remove-y
+# (respected by scripts/Makefile.build); the '%' wildcard strips it whatever
+# numeric value the kernel chose. The module build does not depend on the
+# alignment setting, so removing it on toolchains that support it is a no-op.
+ccflags-remove-y += -fmin-function-alignment=%
+
 # EL8-9 Specific kernel checks - this check also exists above - JAR?
 ifeq ($(shell echo "$(CHK_KVER)" | grep -Eq '.*\.el[8-9].*\.x86_64'; echo $$?),0)
 PXDEFINES += -D__PX_BLKMQ__ -D__EL8__
