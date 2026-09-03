@@ -1,6 +1,11 @@
 Release-wise supported kernel metrics: https://docs.portworx.com/portworx-enterprise/support-matrix/supported-kernels
 
 
+# v3.8.0
+
+- Filter -fmin-function-alignment=<n> from the compile line on Ubuntu 6.17, 6.19, 7.1 and 7.2 kernels when the module's gcc is older than the one that built the kernel (PWX-58784)
+
+
 # v3.7.0
 
 This release is kernel and distribution compatibility work;
