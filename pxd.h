@@ -45,6 +45,26 @@
 #define PXD_IOC_IO_FLUSHER		_IO(PXD_IOCTL_MAGIC, 10)	/* 0x50580a */
 #define PXD_IOC_DETACH_DEVICE		_IO(PXD_IOCTL_MAGIC, 11)	/* 0x50580b */
 
+/* io_uring transport ioctls, issued on /dev/pxd/pxd-io.
+ * Stale uring branch used 11..15; release already uses 11 for DETACH_DEVICE,
+ * so the uring set is shifted to 12..16. */
+#define PXD_IOC_INIT_IO			_IO(PXD_IOCTL_MAGIC, 12)	/* 0x50580c */
+#define PXD_IOC_WAKE_UP_SQO		_IO(PXD_IOCTL_MAGIC, 13)	/* 0x50580d */
+#define PXD_IOC_REGISTER_BUFFERS	_IO(PXD_IOCTL_MAGIC, 14)	/* 0x50580e */
+#define PXD_IOC_UNREGISTER_BUFFERS	_IO(PXD_IOCTL_MAGIC, 15)	/* 0x50580f */
+#define PXD_IOC_REGISTER_REGION		_IO(PXD_IOCTL_MAGIC, 16)	/* 0x505810 */
+
+struct pxd_ioc_register_buffers {
+	void *base;
+	size_t len;
+	uint32_t buf_index;
+};
+
+struct pxd_ioc_register_region {
+	void *base;
+	size_t len;
+};
+
 #define PXD_MAX_DEVICES	1024		/**< maximum number of devices supported */
 #define PXD_MAX_IO		(1024*1024)	/**< maximum io size in bytes */
 #define PXD_MAX_QDEPTH  256			/**< maximum device queue depth */
@@ -162,7 +182,7 @@ struct pxd_add_ext_out {
 };
 
 /* Device capability flags */
-#define PXD_DEV_CAP_WRITE_ZEROES    (1 << 0)  /* WriteZero→Discard optimization */
+#define PXD_DEV_CAP_WRITE_ZEROES    (1 << 0)  /* WriteZero to Discard optimization */
 /* Reserved for future use: bits 1-31 */
 
 /**

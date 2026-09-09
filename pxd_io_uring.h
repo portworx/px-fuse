@@ -65,6 +65,11 @@ struct io_uring_sqe {
 #define IORING_OP_SYNCFS_FIXED  12
 #define IORING_OP_READ_BIO  13
 #define IORING_OP_WRITE_BIO 14
+#define IORING_OP_POLL_SERVER       15
+#define IORING_OP_POLL_CONNECTION   16
+#define IORING_OP_SOCKET_POLl_REMOVE 17
+#define IORING_OP_SEND              18
+#define IORING_OP_RECV              19
 
 /*
  * sqe->fsync_flags
@@ -135,6 +140,8 @@ struct io_uring_params {
 	__u32 resv[5];
 	struct io_sqring_offsets sq_off;
 	struct io_cqring_offsets cq_off;
+
+	__u32 work_queue_num_active;	/* number of active items in work queue */
 };
 
 /*

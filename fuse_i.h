@@ -155,51 +155,78 @@ struct ____cacheline_aligned fuse_per_cpu_ids {
 /** size of request ring buffer */
 #define FUSE_REQUEST_QUEUE_SIZE (2 * FUSE_DEFAULT_MAX_BACKGROUND)
 
-#ifdef __KERNEL__
+/*
+ * Shared-memory queue control blocks.
+ *
+ * Layout is shared verbatim between kernel and userspace via the mmap'd queue.
+ * Cursor and signaling slots are typed; the per-side lock is held in an
+ * opaque 32-byte region (lock_storage) at offset 32 of each half. Each side
+ * placement-initialises its own native lock type over that region at queue
+ * init time -- spinlock_t on the kernel side (dev.c:fuse_queue_init_cb),
+ * pthread_spinlock_t (or px::spinlock) on the userspace side. This keeps
+ * the cross-build header free of pthread.h and free of any userspace lock
+ * library, and gives LOCKDEP/DEBUG_SPINLOCK headroom on the kernel side.
+ *
+ * Field validity by channel (see netdoc 19 sec 11.2):
+ *   - sequence:      load-bearing on fuse_conn_queues.user_requests_cb.w
+ *                    (kernel-assigned monotonic ID counter consumed via
+ *                    request_find_in_ctx for zero-copy READ_BIO/WRITE_BIO).
+ *                    Reserved on io_ring_ctx.requests_cb.w and responses_cb.w.
+ *   - need_wake_up:  load-bearing only on io_ring_ctx.requests_cb.w
+ *                    (SQPOLL wake mailbox kernel -> userspace).
+ *   - committed_:    load-bearing only on io_ring_ctx.requests_cb.w from
+ *                    userspace (sync-mode batched-commit cursor); kernel
+ *                    never touches it.
+ *   - in_runq:       load-bearing only on io_ring_ctx.requests_cb.w from
+ *                    userspace (sync-mode drain-dedupe flag); kernel never
+ *                    touches it.
+ *   - lock_storage:  always live on every channel.
+ *
+ * Reader-half cursors are accessed via smp_load_acquire / smp_store_release
+ * on the kernel side and via std::atomic on the userspace side; both reduce
+ * to the same plain uint32_t storage so the wire layout matches byte-for-byte.
+ */
+
 /** writer control block */
 struct ____cacheline_aligned fuse_queue_writer {
-	uint32_t write;         /** cached write index */
-	uint32_t read;		/** cached read index */
-	spinlock_t lock;	/** writer lock */
-	uint32_t pad_0;
-	uint64_t sequence;        /** next request sequence number */
-	uint64_t pad[5];
+	uint32_t write;            /** offset  0: producer cursor */
+	uint32_t read;             /** offset  4: producer-cached consumer cursor */
+	uint64_t sequence;         /** offset  8: kernel-assigned ID counter
+				    *             (user_requests_cb channel only) */
+	uint32_t need_wake_up;     /** offset 16: SQPOLL wake mailbox
+				    *             (io_ring requests_cb only) */
+	uint32_t committed_;       /** offset 20: userspace batched-commit cursor
+				    *             (io_ring requests_cb only) */
+	uint8_t  in_runq;          /** offset 24: userspace drain-dedupe flag
+				    *             (io_ring requests_cb only) */
+	uint8_t  __pad1[7];        /** offset 25..31 */
+	uint8_t  lock_storage[32]; /** offset 32: opaque slot, each side placement-
+				    *             inits its own native lock here */
 };
 
 /** reader control block */
 struct ____cacheline_aligned fuse_queue_reader {
-	uint32_t read;          /** read index updated by reader */
-	uint32_t write;		/** write index updated by writer */
-	uint32_t need_wake_up;	/** if true reader needs wake up call */
-	uint32_t pad;
-	uint64_t pad_2[6];
+	uint32_t read;             /** offset  0: consumer cursor (shared) */
+	uint32_t write;            /** offset  4: producer cursor (shared) */
+	uint8_t  __pad1[24];       /** offset  8..31 */
+	uint8_t  lock_storage[32]; /** offset 32: opaque slot */
 };
 
-#else
+#ifdef __KERNEL__
+/*
+ * Helpers: reinterpret lock_storage as the kernel's native spinlock_t. The
+ * sizing and offset invariants are enforced by BUILD_BUG_ON in dev.c at
+ * fuse_queue_init_cb time, so callers can assume both halves are valid.
+ */
+static inline spinlock_t *fuse_qw_lock(struct fuse_queue_writer *w)
+{
+	return (spinlock_t *)w->lock_storage;
+}
 
-#include <pthread.h>
-#include <atomic>
-#include "spin_lock.h"
-
-/** writer control block */
-struct alignas(64) fuse_queue_writer {
-	uint32_t write;         	/** cached write index */
-	uint32_t read;			/** cached read index */
-	pthread_spinlock_t lock;	/** writer lock */
-	bool in_runq;			/** a thread is processing the queue */
-	char pad_1[3];
-	uint64_t sequence;        	/** next request sequence number */
-	uint64_t pad[5];
-};
-
-/** reader control block */
-struct alignas(64) fuse_queue_reader {
-	std::atomic<uint32_t> read;	/** read index updated by reader */
-	std::atomic<uint32_t> write;	/** write index updated by writer */
-	px::spinlock lock;
-	uint64_t pad_2[6];
-};
-
+static inline spinlock_t *fuse_qr_lock(struct fuse_queue_reader *r)
+{
+	return (spinlock_t *)r->lock_storage;
+}
 #endif
 
 /** opcodes for fuse_user_request */
@@ -288,6 +315,12 @@ struct fuse_conn {
 
 	/** Called on final put */
 	void (*release)(struct fuse_conn *);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
+	/** Shared-memory request/response queues used by the io_uring transport.
+	 *  Allocated and freed via pxd_uring_init_conn() / pxd_uring_free_conn(). */
+	struct fuse_conn_queues *queue;
+#endif
 };
 
 /** Device operations */
@@ -367,6 +400,11 @@ void fuse_req_init_context(struct fuse_req *req);
 
 void request_end(struct fuse_conn *fc, struct fuse_req *req, bool lock);
 struct fuse_req *request_find(struct fuse_conn *fc, u64 unique);
+
+/* Generic queue control-block init. Defined in dev.c. The body also calls
+ * pxd_uring_init_cb() (declared in io.h) when uring is compiled in, so any
+ * uring-specific per-CB setup lives in io.c, not here. */
+void fuse_queue_init_cb(struct fuse_queue_cb *cb);
 
 #endif
 #endif /* _FS_FUSE_I_H */
