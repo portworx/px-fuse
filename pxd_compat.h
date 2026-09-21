@@ -17,6 +17,28 @@
 #endif
 #include <linux/bio.h>
 #include <linux/blk_types.h>
+#include <linux/string.h>
+
+/*
+ * strncpy() was removed from the kernel in mainline 7.2 (merge
+ * 1a3746ccbb0a, June 2026): the declaration in <linux/string.h>, the
+ * lib/string.c body, and every per-arch implementation went away
+ * together. Route through strscpy() from 7.0.0 onward across all
+ * distros; strscpy() has existed since 4.3 (commit 30035e45753b), so
+ * the pre-7.0 branch always compiles.
+ *
+ * Pass the destination BUFFER SIZE as `len`. Both branches guarantee
+ * the result is null-terminated within `len` bytes, so callers do not
+ * need to append their own '\0'.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7,0,0)
+#define pxd_strncpy(dst, src, len) strscpy((dst), (src), (len))
+#else
+#define pxd_strncpy(dst, src, len) do {          \
+	strncpy((dst), (src), (len));            \
+	(dst)[(len) - 1] = '\0';                 \
+} while (0)
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,14,0)
 #define HAVE_BVEC_ITER

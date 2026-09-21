@@ -720,8 +720,8 @@ int pxd_init_fastpath_target(struct pxd_device *pxd_dev, struct pxd_update_path_
 	for (i = 0; i < update_path->count; i++) {
 		pxd_printk("Fastpath %d(%d): %s, current %s, %px\n", i, pxd_dev->fp.nfd,
 			update_path->devpath[i], pxd_dev->fp.device_path[i], pxd_dev->fp.file[i]);
-		strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i], MAX_PXD_DEVPATH_LEN);
-		pxd_dev->fp.device_path[i][MAX_PXD_DEVPATH_LEN] = '\0';
+		pxd_strncpy(pxd_dev->fp.device_path[i], update_path->devpath[i],
+			sizeof(pxd_dev->fp.device_path[i]));
 		pxd_printk("dev %llu: successfully installed fastpath %s\n",
 			pxd_dev->dev_id, pxd_dev->fp.device_path[i]);
 	}
