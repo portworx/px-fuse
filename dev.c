@@ -1098,9 +1098,9 @@ static void fuse_conn_free_allocs(struct fuse_conn *fc)
 	if (fc->per_cpu_ids)
 		free_percpu(fc->per_cpu_ids);
 	if (fc->free_ids)
-		kfree(fc->free_ids);
+		pxd_kvfree(fc->free_ids);
 	if (fc->request_map)
-		kfree(fc->request_map);
+		pxd_kvfree(fc->request_map);
 }
 
 int fuse_conn_init(struct fuse_conn *fc)
@@ -1115,18 +1115,19 @@ int fuse_conn_init(struct fuse_conn *fc)
 	INIT_LIST_HEAD(&fc->pending);
 	INIT_LIST_HEAD(&fc->processing);
 	INIT_LIST_HEAD(&fc->entry);
-	fc->request_map = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*),
-		GFP_KERNEL);
+
+	/* request ids are mapped to request_map slots by masking */
+	BUILD_BUG_ON(FUSE_MAX_REQUEST_IDS & (FUSE_MAX_REQUEST_IDS - 1));
+
+	fc->request_map = pxd_kvcalloc(FUSE_MAX_REQUEST_IDS, sizeof(struct fuse_req*));
 
 	rc = -ENOMEM;
 	if (!fc->request_map) {
 		printk(KERN_ERR "failed to allocate request map");
 		goto err_out;
 	}
-	memset(fc->request_map, 0,
-		FUSE_MAX_REQUEST_IDS * sizeof(struct fuse_req*));
 
-	fc->free_ids = kmalloc(FUSE_MAX_REQUEST_IDS * sizeof(u64), GFP_KERNEL);
+	fc->free_ids = pxd_kvcalloc(FUSE_MAX_REQUEST_IDS, sizeof(u64));
 	if (!fc->free_ids) {
 		printk(KERN_ERR "failed to allocate free requests");
 		goto err_out;
