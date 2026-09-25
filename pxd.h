@@ -218,12 +218,21 @@ struct pxd_detach_device {
 };
 
 /**
+ * Release/cleanup intent. Carried in pxd_fastpath_out.cleanup, and as an
+ * optional trailing value on a `release` sysfs write ("<magic> <intent>").
+ * Absent or unparseable intent reads as LEGACY_INTENT.
+ */
+#define LEGACY_INTENT		(1)	/* no intent given; same as graceful */
+#define FORCE_CLEANUP		(2)	/* node decommission: fail queued IO */
+#define GRACEFUL_CLEANUP	(4)	/* maintenance: reissue queued IO */
+
+/**
  * PXD_SET_FASTPATH request from user space
  */
 struct pxd_fastpath_out {
 	uint64_t dev_id;
 	int enable;
-	int cleanup; // only meaningful while disabling
+	int cleanup; // intent bitmap above; only meaningful while disabling
 	int context_id;
 };
 
@@ -261,11 +270,14 @@ struct pxd_device* find_pxd_device(struct pxd_context *ctx, uint64_t dev_id);
 #define PXD_FEATURE_DISCARD_CONTROL (0x4)
 // supports WriteZero->Discard optimization (PXD_ADD_EXT_V2 opcode)
 #define PXD_FEATURE_WRITE_ZEROES (0x8)
+// supports fast failover of remote fastpath (NVMe-TCP) volumes
+#define PXD_FEATURE_FAST_FAILOVER (0x10)
 
 static inline
 int pxd_supported_features(void)
 {
-    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL | PXD_FEATURE_WRITE_ZEROES;
+    int features = PXD_FEATURE_ATTACH_OPTIMIZED | PXD_FEATURE_DISCARD_CONTROL |
+                   PXD_FEATURE_WRITE_ZEROES | PXD_FEATURE_FAST_FAILOVER;
 #ifdef __PX_FASTPATH__
     features |= PXD_FEATURE_FASTPATH;
 #endif

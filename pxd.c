@@ -88,8 +88,20 @@ module_param(pxd_num_contexts, uint, 0644);
 module_param(pxd_detect_zero_writes, uint, 0644);
 module_param(pxd_num_fpthreads, uint, 0644);
 
+/* Teardown flavor for pxdctx_reset_fastpath. See the comment on that
+ * function for what each mode does and which skip_sync rule it takes. */
+enum pxdctx_reset_mode {
+	PXDCTX_RESET_FAILOVER,		/* control fd closed - switch to native path */
+	PXDCTX_RESET_ABORT,		/* abort timer fired - hard-fail everything */
+	PXDCTX_RESET_RELEASE,		/* `release` sysfs, legacy/graceful - reissue */
+	PXDCTX_RESET_RELEASE_FORCE,	/* `release` sysfs, node decommission - fail IO */
+};
+
 static void pxd_abort_context(struct work_struct *work);
-static int pxd_nodewipe_cleanup(struct pxd_context *ctx);
+static void pxd_finish_remove(struct work_struct *work);
+static int pxdctx_release_fastpath(struct pxd_context *ctx,
+				struct pxd_device *self,
+				enum pxdctx_reset_mode mode);
 static int pxd_bus_add_dev(struct pxd_device *pxd_dev);
 static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force);
 
@@ -704,7 +716,7 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
 	}
 
-	pxd_request_resume_internal(pxd_dev);
+	pxd_resume_io(pxd_dev);
 
 	// status=0 -> reroute to slowpath; non-zero -> -EIO. No-op for FALLBACK.
 	pxd_reissuefailQ(pxd_dev, &ios, status);
@@ -758,13 +770,12 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return 0;
 	}
 
-	// Device already in native (orphan case from pxd_io_failover, or a
-	// State B caller). Splice any pending failQ entries and reissue
-	// them on the slowpath locally - no marker round-trip needed since
-	// the device is already in the target state. Return 0 (idempotent
-	// success) rather than -EINVAL so PX-storage and pxd_io_failover
-	// see "already converged" without treating it as an error.
-	if (!fastpath_active(pxd_dev)) {
+	// Already native with no switch pending: reissue locally, no marker
+	// round-trip needed. The ioswitch gate is required - fp.fastpath is
+	// cleared up front by disableFastPath(), so a pending switch reads
+	// native here while userspace has not switched its iopath yet.
+	if (!fastpath_active(pxd_dev) &&
+	    atomic_read(&pxd_dev->fp.ioswitch_active) == 0) {
 		struct list_head ios;
 		unsigned long flags;
 		INIT_LIST_HEAD(&ios);
@@ -785,18 +796,19 @@ int pxd_initiate_failover(struct pxd_device *pxd_dev)
 		return 0;
 	}
 
-	rc = pxd_request_suspend_internal(pxd_dev, false, true);
-	if (rc) {
-		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
-		return rc;
+	pxd_suspend_io(pxd_dev);
+	rc = wait_for_sync(pxd_dev, false);
+	if (unlikely(rc) && rc != -EINVAL && rc != -EIO) {
+		printk(KERN_ERR"device %llu sync failed %d, continuing with disable\n",
+				pxd_dev->dev_id, rc);
 	}
 
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FAILOVER_TO_USERSPACE);
 	if (rc) {
-		// _internal pairs with pxd_request_suspend_internal above;
+		// _internal pairs with pxd_suspend_io above;
 		// pxd_request_resume() would no-op (app_suspend was never set)
 		// and leak the blk_mq_quiesce.
-		pxd_request_resume_internal(pxd_dev);
+		pxd_resume_io(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 		return rc;
 	}
@@ -835,15 +847,11 @@ int pxd_initiate_fallback(struct pxd_device *pxd_dev)
 
 	trace_pxd_initiate_fallback(pxd_dev->dev_id, pxd_dev->minor);
 
-	rc = pxd_request_suspend_internal(pxd_dev, true, false);
-	if (rc) {
-		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
-		return rc;
-	}
+	pxd_suspend_io(pxd_dev);
 
 	rc = pxd_initiate_ioswitch(pxd_dev, PXD_FALLBACK_TO_KERNEL);
 	if (rc) {
-		pxd_request_resume_internal(pxd_dev);
+		pxd_resume_io(pxd_dev);
 		atomic_set(&pxd_dev->fp.ioswitch_active, 0);
 	}
 	return rc;
@@ -1011,11 +1019,16 @@ static blk_status_t pxd_queue_rq(struct blk_mq_hw_ctx *hctx,
 			rcu_read_unlock();
 			return BLK_STS_OK;
 		}
-		// blkmq: cannot process IO from this thread, would recursively
-		// submit to backing devices and deadlock.
-		fastpath_queue_work(&fproot->work, false);
-		rcu_read_unlock();
-		return BLK_STS_OK;
+		/* Pin backing files while still inside rcu_read_lock (see
+		 * fproot_pin_files). On failure the device is mid-teardown -
+		 * fall through to native. */
+		if (fproot_pin_files(fproot, pxd_dev)) {
+			/* Cannot submit to backing device from this thread -
+			 * would recurse and deadlock. Hand off to pxfp. */
+			fastpath_queue_work(&fproot->work, false);
+			rcu_read_unlock();
+			return BLK_STS_OK;
+		}
 	}
 	rcu_read_unlock();
 }
@@ -1255,13 +1268,16 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_v2_out *add)
 	int new_minor;
 	int err;
 
-	err = -ENOMEM;
-	if (ctx->num_devices >= PXD_MAX_DEVICES) {
-		printk(KERN_ERR "Too many devices attached..\n");
-		goto out_module;
-	}
-
-	// if device already exists, then return it
+	// if device already exists, then return it.
+	//
+	// this has to be answered before the PXD_MAX_DEVICES guard below: an
+	// already registered device owns its slot and this add consumes no new
+	// one, it only refreshes the io path. attach retries and fastpath
+	// promotion both arrive here - promotion is not a separate opcode,
+	// PXD_FALLBACK_TO_KERNEL installs replica paths by re-issuing PXD_ADD*
+	// with enable_fp set - so gating them on capacity wedged a node sitting
+	// at exactly PXD_MAX_DEVICES: every re-attach and every promotion
+	// failed and the node could not recover without rmmod.
 	pxd_dev = find_pxd_device(ctx, add->dev_id);
 	if (pxd_dev) {
 		if (add->enable_fp && add->paths.count > 0) {
@@ -1271,6 +1287,13 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_v2_out *add)
 		}
 
 		return pxd_dev->minor | (fastpath_active(pxd_dev) << MINORBITS);
+	}
+
+	// only creating a new device consumes a slot
+	err = -ENOMEM;
+	if (ctx->num_devices >= PXD_MAX_DEVICES) {
+		printk(KERN_ERR "Too many devices attached..\n");
+		goto out_module;
 	}
 
 	pxd_dev = kzalloc(sizeof(*pxd_dev), GFP_KERNEL);
@@ -1299,6 +1322,11 @@ ssize_t pxd_add(struct fuse_conn *fc, struct pxd_add_v2_out *add)
 	pxd_dev->size = add->size;
 	pxd_dev->mode = add->open_mode;
 	pxd_dev->fastpath = add->enable_fp;
+	/* Initialize remove_work up-front so pxdctx_reset_fastpath can safely
+	 * call flush_work() on any device in the list, whether or not remove
+	 * has ever been scheduled. Zero-initialised work_struct is UB with
+	 * flush_work on lockdep-enabled kernels. */
+	INIT_WORK(&pxd_dev->remove_work, pxd_finish_remove);
 
 	// congestion init
 	init_waitqueue_head(&pxd_dev->suspend_wq);
@@ -1453,7 +1481,23 @@ static void pxd_finish_remove(struct work_struct *work)
 	struct pxd_device *pxd_dev = container_of(work, struct pxd_device, remove_work);
 	pr_info("%s: dev %llu\n", __func__, pxd_dev->dev_id);
 
-	pxd_fastpath_reset_device(pxd_dev);
+	/* Do NOT touch pxd_dev->connected here. That flag is a ctx-scope
+	 * connectivity signal (owned by _pxd_setup / freeze windows). At this
+	 * point the device is being unregistered from the kernel; pxd_dev is
+	 * kept alive only by outstanding get_device() refs from concurrent
+	 * consumers (snap_list captures in a freeze window, sysfs opens,
+	 * in-flight IO). Those consumers make their own decisions based on
+	 * whatever ctx-level state exists at the time; the removal path
+	 * shouldn't second-guess them.
+	 *
+	 * skip_sync=false: PXD_REMOVE is the user-driven happy-path detach.
+	 * The backing fds we own may hold dirty page-cache pages / pending
+	 * writeback the user cared about (they issued IO that we accepted).
+	 * wait_for_sync() calls vfs_fsync() on each fp->file[i] directly -
+	 * it does NOT go through userspace or fc, so it is safe here.
+	 * We skip sync only for broken/error/decommission paths (see the
+	 * comment header on pxd_fastpath_reset_device). */
+	pxd_fastpath_reset_device(pxd_dev, false /* skip sync */, true /* fail io */);
 
 	/* Make sure the req_fn isn't called anymore even if the device hangs around */
 	if (pxd_dev->disk && pxd_dev->disk->queue){
@@ -1526,13 +1570,11 @@ static ssize_t pxd_remove_dev(struct fuse_conn *fc, uint64_t dev_id, bool force)
 	}
 
 	if (!pxd_dev->removing) {
-		if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) != 0) {
-			printk(KERN_ERR "device %llu detach: failed to acquire ioswitch_active\n", pxd_dev->dev_id);
-			err = -EBUSY;
-			goto out_lock;
-		}
-		pxd_dev->removing = true;
-		INIT_WORK(&pxd_dev->remove_work, pxd_finish_remove);
+		/* removing is written under pxd_dev->lock (held here) and read
+		 * lock-free elsewhere; use WRITE_ONCE to match those readers. */
+		WRITE_ONCE(pxd_dev->removing, true);
+		/* remove_work is INIT_WORK'd once in pxd_add so pxdctx_reset_fastpath
+		 * can safely flush_work it before removal is ever scheduled. */
 		schedule_work(&pxd_dev->remove_work);
 	}
 	get_device(&pxd_dev->dev);
@@ -1687,36 +1729,95 @@ static void _pxd_setup(struct pxd_device *pxd_dev, bool enable)
 	if (!enable) {
 		printk(KERN_NOTICE "device %llu called to disable IO\n", pxd_dev->dev_id);
 		spin_lock(&pxd_dev->lock);
-		pxd_dev->connected = false;
+		WRITE_ONCE(pxd_dev->connected, false);
 		spin_unlock(&pxd_dev->lock);
-		pxd_fastpath_reset_device(pxd_dev);
+		/* Only reached from the hard-fail path (pxd_abort_context via
+		 * pxdctx_reset_fastpath fail_io=true). skip_sync=true because
+		 * we are aborting all in-flight IO with -EIO; persisting the
+		 * driver's backing-fd cache first is not the point of the
+		 * operation. This is rule (b) from disableFastPath's contract:
+		 * hard-fail teardown. It is NOT because userspace is gone -
+		 * wait_for_sync is driver-local and never talks to userspace. */
+		pxd_fastpath_reset_device(pxd_dev, true /* skip sync */, true /* fail io */);
 	} else {
 		printk(KERN_NOTICE "device %llu called to enable IO\n", pxd_dev->dev_id);
 		spin_lock(&pxd_dev->lock);
-		pxd_dev->connected = true;
+		WRITE_ONCE(pxd_dev->connected, true);
 		spin_unlock(&pxd_dev->lock);
 	}
 }
 
-static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
+static void pxdctx_set_connected(struct pxd_context *ctx)
 {
 	struct list_head *cur;
+
+	spin_lock(&ctx->lock);
+	list_for_each(cur, &ctx->list) {
+		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
+
+		_pxd_setup(pxd_dev, true);
+	}
+	spin_unlock(&ctx->lock);
+}
+
+// pxdctx_reset_fastpath - tear down fastpath per device.
+//
+// Called from three places, one per mode:
+//   1. failover_work (PXDCTX_RESET_FAILOVER): control fd just closed. Switch
+//      each fastpath device to native path and reissue queued failQ IOs.
+//      Uses skip_sync=false (see the skip_sync policy comment inside
+//      this function): backing store is healthy, its writes must be
+//      flushed before the fd is closed.
+//   2. abort_work   (PXDCTX_RESET_ABORT):  abort timer expired. Hard-fail
+//      every IO on every device (connected := false; abortfailQ). Uses
+//      skip_sync=true: hard-fail teardown, syncing before aborting is
+//      pointless.
+//   3. pxdctx_release_fastpath (PXDCTX_RESET_RELEASE / _RELEASE_FORCE): `release`
+//      sysfs write. RELEASE reissues, _FORCE fails IO; both skip_sync=true.
+//
+// Snapshot+refcount pattern: pxd_fastpath_reset_device may sleep
+// (blk_mq_quiesce_queue via pxd_suspend_io), so ctx->lock must be dropped
+// per device. See in-line comments below for the exact steps and races.
+//
+// @no_flush: device whose sysfs store we are inside, or NULL. Flushing its
+// remove_work would deadlock - device_unregister waits for that store.
+static void pxdctx_reset_fastpath(struct pxd_context *ctx,
+				  enum pxdctx_reset_mode mode,
+				  struct pxd_device *no_flush)
+{
 	size_t ndevs;
 	struct pxd_device **snap_list;
 	struct pxd_device *pxd_dev;
 	size_t i = 0;
 	size_t j;
-
-	if (enable) {
-		spin_lock(&ctx->lock);
-		list_for_each(cur, &ctx->list) {
-			struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
-
-			_pxd_setup(pxd_dev, enable);
-		}
-		spin_unlock(&ctx->lock);
-		return;
-	}
+	/* skip_sync policy inside pxdctx_reset_fastpath:
+	 *
+	 * skip_sync controls whether disableFastPath does a vfs_fsync() on
+	 * each backing fd (fp->file[i]) before closing it. The sync is
+	 * DRIVER-LOCAL - it goes through the vfs directly on files the
+	 * driver owns; it does NOT depend on ctx->fc.connected or userspace
+	 * being alive. Whether it can hang depends only on the backing
+	 * filesystem/device servicing the fsync.
+	 *
+	 * Rule: skip sync only when the sync would be meaningless -
+	 *   (a) backing storage is broken (fastpath IO already errored out)
+	 *   (b) hard-fail teardown - we are aborting every in-flight IO
+	 *       with -EIO, so persisting the driver's private cache first
+	 *       is not the point of the operation
+	 *   (c) fastpath release / whole-node decommission (pxdctx_release_fastpath)
+	 * In every other case we must sync so writes that userspace already
+	 * confirmed as accepted are durable on the backing store before we
+	 * drop our reference to it.
+	 *
+	 * Inside this function:
+	 *   PXDCTX_RESET_ABORT   (from abort_work): rule (b). skip_sync=true.
+	 *   PXDCTX_RESET_RELEASE / _RELEASE_FORCE (from pxdctx_release_fastpath):
+	 *     rule (c).
+	 *   PXDCTX_RESET_FAILOVER (from failover_work): soft mode switch from
+	 *     fastpath to native; backing store is still healthy and its
+	 *     writes must survive the switch. skip_sync=false.
+	 */
+	const bool skip_sync = (mode != PXDCTX_RESET_FAILOVER);
 
 	// _pxd_setup with enable=false would call pxd_fastpath_reset_device which would
 	// call blk_mq_quiesce_queue as part of pxd_suspend_io. but blk_mq_quiesce_queue could
@@ -1725,7 +1826,7 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	// 1. with ctx->lock held, get the number of entries in ctx->list
 	// 2. without ctx->lock held, allocate memory for the snapshot list
 	// 3. with ctx->lock held, copy the entries from ctx->list to the snapshot list and increment their refcount
-	// 4. without ctx->lock held, call _pxd_setup with enable=false for each entry in the snapshot list 
+	// 4. without ctx->lock held, call _pxd_setup with enable=false for each entry in the snapshot list
 	//    and then decrement their refcount
 	// 5. without ctx->lock held, free the memory allocated in step 2.
 	//
@@ -1750,7 +1851,13 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 	snap_list = kcalloc(ndevs, sizeof(*snap_list), GFP_KERNEL);
 
 	if (snap_list) {
-		// step 3
+		// step 3: snapshot devices under ctx->lock. Order of the three
+		// checks matters:
+		//   a) bounds check FIRST - if ctx->list grew, we skip without
+		//      taking a ref (previous code leaked here).
+		//   b) removing check under ctx->lock but before get_device so
+		//      we don't briefly own a ref for a device we won't touch.
+		//   c) get_device last, exactly matched by put_device in step 4.
 		spin_lock(&ctx->lock);
 		list_for_each_entry(pxd_dev, &ctx->list, node) {
 			if (i >= ndevs) {
@@ -1758,7 +1865,9 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 					pxd_dev->dev_id, pxd_dev->minor);
 				break;
 			}
-			// increment the refcount because of the possibility of parallel pxd_finish_remove
+			if (READ_ONCE(pxd_dev->removing)) {
+				continue;
+			}
 			get_device(&pxd_dev->dev);
 			snap_list[i++] = pxd_dev;
 		}
@@ -1766,10 +1875,53 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 
 		// step 4
 		for (j = 0; j < i; j++) {
-			_pxd_setup(snap_list[j], false);
-			put_device(&snap_list[j]->dev);
-		}
+			struct pxd_device *snap = snap_list[j];
+			/* remove_work is INIT_WORK'd in pxd_add so this is always
+			 * safe, even for devices that never entered removal. If
+			 * removal is in flight, we wait for it here. Skipped for
+			 * no_flush - see the @no_flush note in the header. The
+			 * removing re-check below still applies to it, and
+			 * pxd_finish_remove cannot get past device_unregister
+			 * while our caller's store holds that device's kernfs
+			 * active reference. */
+			if (snap != no_flush) {
+				flush_work(&snap->remove_work);
+			}
 
+			if (READ_ONCE(snap->removing)) {
+				put_device(&snap->dev);
+				continue;
+			}
+
+			if (mode == PXDCTX_RESET_ABORT) {
+				/* abort_work path - fail all ios */
+				_pxd_setup(snap, false);
+			} else if (mode == PXDCTX_RESET_RELEASE ||
+				   mode == PXDCTX_RESET_RELEASE_FORCE) {
+				/* Only a forced release fails queued IO; graceful reissues.
+				 * Ungated - an inactive device can still hold a failQ. */
+				pxd_fastpath_reset_device(snap, skip_sync,
+					mode == PXDCTX_RESET_RELEASE_FORCE /* fail io */);
+			} else if (fastpath_active(snap) ||
+				   atomic_read(&snap->fp.ioswitch_active)) {
+				/* failover_work path - route io to native.
+				 *
+				 * ioswitch_active matters as much as
+				 * fastpath_active: pxd_initiate_failover holds
+				 * a pxd_suspend_io across the marker round-trip
+				 * and then calls disableFastPath, so a device
+				 * whose failover was initiated but never acked
+				 * sits with fastpath_active false and a held
+				 * suspend. Gating on fastpath_active alone
+				 * skipped exactly those, and reset_device's
+				 * tail is the only thing that drains the
+				 * suspend - leaving the queue quiesced until
+				 * abort_work fired, or forever if a reconnect
+				 * cancelled it first. */
+				pxd_fastpath_reset_device(snap, skip_sync, false /* fail io */);
+			}
+			put_device(&snap->dev);
+		}
 		// step 5
 		kfree(snap_list);
 		return;
@@ -1777,23 +1929,49 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 
 	// unlikely scenario where kcalloc fails
 	// handle one-by-one, zero allocation but O(n^2)
+	//
+	// Sentinel for "already processed":
+	//   ABORT:            picking requires pxd_dev->connected==true; we set
+	//                     it to false while holding pxd_dev->lock so the next
+	//                     iteration skips this device.
+	//   FAILOVER/RELEASE*: picking requires fastpath_active() or
+	//                     ioswitch_active. reset_device clears both -
+	//                     disableFastPath clears fp.fastpath, and the
+	//                     ioswitch abort clears ioswitch_active (via the
+	//                     completer's cmpxchg, or inline when the request
+	//                     is already gone) - so next iteration skips.
+	//
+	// RELEASE caveat: keying on fastpath_active() skips enabled-but-inactive
+	// devices the snapshot path would have covered. Only on kcalloc failure.
+	if (mode == PXDCTX_RESET_RELEASE || mode == PXDCTX_RESET_RELEASE_FORCE) {
+		pr_warn("%s: snapshot alloc failed, release falling back to "
+			"active-fastpath devices only\n", __func__);
+	}
 	for (;;) {
 		struct pxd_device *picked = NULL;
 
 		spin_lock(&ctx->lock);
 		list_for_each_entry(pxd_dev, &ctx->list, node) {
-			spin_lock(&pxd_dev->lock);
-			// connected = false => already processed
-			// connected = true => not processed yet
-			if (pxd_dev->connected) {
-				pxd_dev->connected = false;
+			if (mode == PXDCTX_RESET_ABORT) { /* abort_work path */
+				spin_lock(&pxd_dev->lock);
+				if (READ_ONCE(pxd_dev->connected)) {
+					WRITE_ONCE(pxd_dev->connected, false);
+					spin_unlock(&pxd_dev->lock);
+					get_device(&pxd_dev->dev);
+					picked = pxd_dev;
+					break;
+				}
 				spin_unlock(&pxd_dev->lock);
-				// increment refcount
+				continue;
+			}
+			/* failover/release path: fastpath devices, plus any device
+			 * still holding a suspend for an unacked ioswitch. */
+			if (fastpath_active(pxd_dev) ||
+			    atomic_read(&pxd_dev->fp.ioswitch_active)) {
 				get_device(&pxd_dev->dev);
 				picked = pxd_dev;
 				break;
 			}
-			spin_unlock(&pxd_dev->lock);
 		}
 		spin_unlock(&ctx->lock);
 
@@ -1802,142 +1980,25 @@ static void pxdctx_set_connected(struct pxd_context *ctx, bool enable)
 			break;
 		}
 
-		_pxd_setup(picked, false);
-		// decrement refcount
-		put_device(&picked->dev);
-	}
-}
-
-// pxdctx_reset_fastpath - tear down fastpath per device.
-// Backstop path (pxd_abort_context). Snapshot+refcount because
-// pxd_fastpath_reset_device -> blk_mq_quiesce_queue can sleep, so
-// ctx->lock must be dropped per device. Doesn't touch pxd_dev->connected
-// (allow_disconnected=0 already gates IO at that layer).
-static void pxdctx_reset_fastpath(struct pxd_context *ctx)
-{
-	size_t ndevs;
-	struct pxd_device **snap_list;
-	struct pxd_device *pxd_dev;
-	size_t i = 0;
-	size_t j;
-
-	// step 1: count entries under ctx->lock
-	spin_lock(&ctx->lock);
-	ndevs = ctx->num_devices;
-	spin_unlock(&ctx->lock);
-
-	// step 2: allocate snapshot list (may sleep, not under lock)
-	snap_list = kcalloc(ndevs, sizeof(*snap_list), GFP_KERNEL);
-
-	if (snap_list) {
-		// step 3: fill snapshot with refcounted device pointers
-		spin_lock(&ctx->lock);
-		list_for_each_entry(pxd_dev, &ctx->list, node) {
-			if (i >= ndevs) {
-				pr_warn("%s: ctx->list has more entries than snap_list, ignoring extra entries, devID : %llu minor %d\n",
-					__func__, pxd_dev->dev_id, pxd_dev->minor);
-				break;
-			}
-			get_device(&pxd_dev->dev);
-			snap_list[i++] = pxd_dev;
+		if (picked != no_flush) {
+			flush_work(&picked->remove_work);
 		}
-		spin_unlock(&ctx->lock);
-
-		// step 4: walk the snapshot without ctx->lock; safe to sleep
-		for (j = 0; j < i; j++) {
-			pxd_fastpath_reset_device(snap_list[j]);
-			put_device(&snap_list[j]->dev);
-		}
-
-		// step 5: free snapshot
-		kfree(snap_list);
-		return;
-	}
-
-	// kcalloc failed: one-at-a-time pickup, O(n^2) but allocation-free.
-	// We can't use pxd_dev->connected as the "already processed" sentinel
-	// (we deliberately don't touch it), so use fastpath_active() instead:
-	// pxd_fastpath_reset_device clears fp.fastpath via disableFastPath,
-	// which makes the candidate predicate false on subsequent iterations.
-	for (;;) {
-		struct pxd_device *picked = NULL;
-
-		spin_lock(&ctx->lock);
-		list_for_each_entry(pxd_dev, &ctx->list, node) {
-			if (fastpath_enabled(pxd_dev) && fastpath_active(pxd_dev)) {
-				get_device(&pxd_dev->dev);
-				picked = pxd_dev;
-				break;
-			}
-		}
-		spin_unlock(&ctx->lock);
-
-		if (!picked) {
-			// no fastpath-active devices left
-			break;
-		}
-
-		pxd_fastpath_reset_device(picked);
-		put_device(&picked->dev);
-	}
-}
-
-// pxdctx_initiate_failover - drive the failover protocol per fastpath-active
-// device on this ctx by calling pxd_initiate_failover() on each. Used by
-// pxd_control_release() to ensure PX-down goes through the same single-entry
-// failover API as IO-error and PX-storage ioctl paths.
-//
-// pxd_initiate_failover may sleep (blk_mq_quiesce_queue, sync workers), so
-// we use snapshot+refcount: capture devices under ctx->lock, drop the lock,
-// then iterate. We filter to fastpath_active devices at snapshot time so
-// native-path and already-failed-over devices don't take a spurious failover
-// round-trip (pxd_initiate_failover no longer self-filters). A device that
-// flips fp.fastpath false between snapshot and call still proceeds through
-// pxd_initiate_failover - it'll take one round-trip but the failover state
-// machine handles it correctly.
-//
-// Caller must run this BEFORE flipping fc->connected to 0 - pxd_initiate_ioswitch
-// gates on fc->connected and would skip the fuse req otherwise.
-static void pxdctx_initiate_failover(struct pxd_context *ctx)
-{
-	size_t ndevs;
-	struct pxd_device **snap_list;
-	struct pxd_device *pxd_dev;
-	size_t i = 0;
-	size_t j;
-
-	spin_lock(&ctx->lock);
-	ndevs = ctx->num_devices;
-	spin_unlock(&ctx->lock);
-
-	snap_list = kcalloc(ndevs, sizeof(*snap_list), GFP_KERNEL);
-	if (!snap_list) {
-		// kcalloc failed; fastpath stays armed, abort_work is backstop.
-		pr_warn("%s: ctx %d kcalloc failed; failover not initiated\n",
-			__func__, ctx->id);
-		return;
-	}
-
-	spin_lock(&ctx->lock);
-	list_for_each_entry(pxd_dev, &ctx->list, node) {
-		if (i >= ndevs) {
-			pr_warn("%s: ctx->list grew past snap_list; devID %llu minor %d skipped\n",
-				__func__, pxd_dev->dev_id, pxd_dev->minor);
-			break;
-		}
-		if (!fastpath_active(pxd_dev)) {
+		if (READ_ONCE(picked->removing)) {
+			put_device(&picked->dev);
 			continue;
 		}
-		get_device(&pxd_dev->dev);
-		snap_list[i++] = pxd_dev;
+		if (mode == PXDCTX_RESET_ABORT) {
+			_pxd_setup(picked, false);
+		} else if (mode == PXDCTX_RESET_RELEASE ||
+			   mode == PXDCTX_RESET_RELEASE_FORCE) {
+			pxd_fastpath_reset_device(picked, skip_sync,
+				mode == PXDCTX_RESET_RELEASE_FORCE /* fail io */);
+		} else {
+			/* just reset io path to native path*/
+			pxd_fastpath_reset_device(picked, skip_sync, false /* fail io */);
+		}
+		put_device(&picked->dev);
 	}
-	spin_unlock(&ctx->lock);
-
-	for (j = 0; j < i; j++) {
-		pxd_initiate_failover(snap_list[j]);
-		put_device(&snap_list[j]->dev);
-	}
-	kfree(snap_list);
 }
 
 static struct pxd_device *dev_to_pxd_dev(struct device *dev)
@@ -2221,7 +2282,12 @@ static ssize_t pxd_fastpath_update(struct device *dev, struct device_attribute *
 {
 	// format: path,path,path
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
-	struct pxd_update_path_out update_out;
+	/* Zero the whole struct: memcpy(devpath[i], trimtoken, len) below only
+	 * writes `len` bytes; strncpy in __pxd_update_path then reads up to
+	 * MAX_PXD_DEVPATH_LEN and would carry stack garbage into fp.device_path[i]
+	 * for any path shorter than 127 chars. filp_open on that garbled path
+	 * returns -ENOENT. */
+	struct pxd_update_path_out update_out = {0};
 	const char delim = ',';
 	char *token;
 	char *saveptr = NULL;
@@ -2264,12 +2330,28 @@ static ssize_t pxd_debug_show(struct device *dev,
                      struct device_attribute *attr, char *buf)
 {
 	struct pxd_device *pxd_dev = dev_to_pxd_dev(dev);
+	unsigned long flags;
+	struct list_head *cur;
+	int failq = 0;
 	int suspend;
 
+	/* failq and the two gates are the only way to tell a parked request from
+	 * an idle device: both park sites return before ncount is bumped, so
+	 * inprogress reads 0 while requests sit holding blk-mq tags. */
+	spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+	list_for_each(cur, &pxd_dev->fp.failQ) {
+		failq++;
+	}
+	spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+
 	suspend=pxd_suspend_state(pxd_dev);
-	return sprintf(buf, "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d,app_suspend:%d\n",
+	return sprintf(buf, "nfd:%d,suspend:%d,fpenabled:%d,fpactive:%d,app_suspend:%d,"
+			"failq:%d,active_failover:%d,ioswitch:%d,fp_freeze:%d\n",
 			pxd_dev->fp.nfd, suspend, fastpath_enabled(pxd_dev), fastpath_active(pxd_dev),
-			atomic_read(&pxd_dev->fp.app_suspend));
+			atomic_read(&pxd_dev->fp.app_suspend),
+			failq, pxd_dev->fp.active_failover,
+			atomic_read(&pxd_dev->fp.ioswitch_active),
+			pxd_dev->ctx ? READ_ONCE(pxd_dev->ctx->fp_freeze) : -1);
 }
 
 static ssize_t pxd_debug_store(struct device *dev,
@@ -2323,9 +2405,75 @@ static ssize_t pxd_inprogress_show(struct device *dev,
 	return sprintf(buf, "%d", atomic_read(&pxd_dev->ncount));
 }
 
-static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
+/* px tears fastpath down when the control fd closes, so a release arriving
+ * after that usually has nothing left to do. Each condition below mirrors
+ * work pxd_fastpath_reset_device would actually perform; if none holds for
+ * any device, skip the freeze bracket entirely.
+ *
+ *   !fastpath_enabled  - reset_device early-returns on these, never any work
+ *   fastpath_active    - live fastpath to fence off and switch to native
+ *   fp->file[]         - backing fds still open, must be closed
+ *   ioswitch_active    - in-flight switch that only this path aborts
+ *   failQ non-empty    - parked IO that must be routed, or it strands
+ *
+ * fp.suspend is deliberately NOT a condition: a device suspended by px via
+ * PXD_SUSPEND is not ours to resume, and reset_device's tail would clear
+ * app_suspend behind px's back.
+ */
+static bool pxdctx_release_needed(struct pxd_context *ctx)
 {
-	struct list_head *cur;
+	struct pxd_device *pxd_dev;
+	unsigned long flags;
+	bool needed = false;
+	int i;
+
+	/* fail_lock nests inside ctx->lock; no path takes ctx->lock while
+	 * holding fail_lock, so this is the only order in use. */
+	spin_lock(&ctx->lock);
+	list_for_each_entry(pxd_dev, &ctx->list, node) {
+		if (READ_ONCE(pxd_dev->removing) ||
+		    !fastpath_enabled(pxd_dev)) {
+			continue;
+		}
+		if (fastpath_active(pxd_dev) ||
+		    atomic_read(&pxd_dev->fp.ioswitch_active)) {
+			needed = true;
+			break;
+		}
+		/* Backing fds, not nfd: disableFastPath's early return zeroes
+		 * nfd without closing fp->file[], and porx's contract is that
+		 * the refs are gone when its write returns - so an open file
+		 * here is work no matter what nfd says. */
+		for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
+			if (READ_ONCE(pxd_dev->fp.file[i])) {
+				needed = true;
+				break;
+			}
+		}
+		if (needed) {
+			break;
+		}
+		spin_lock_irqsave(&pxd_dev->fp.fail_lock, flags);
+		if (!list_empty(&pxd_dev->fp.failQ)) {
+			needed = true;
+		}
+		spin_unlock_irqrestore(&pxd_dev->fp.fail_lock, flags);
+		if (needed) {
+			break;
+		}
+	}
+	spin_unlock(&ctx->lock);
+
+	return needed;
+}
+
+/* Tears down fastpath on every device in ctx. pxd_fastpath_reset_device
+ * sleeps, so the walk must not hold ctx->lock - see pxdctx_reset_fastpath. */
+static int pxdctx_release_fastpath(struct pxd_context *ctx,
+				struct pxd_device *self,
+				enum pxdctx_reset_mode mode)
+{
+	const bool fail_io = (mode == PXDCTX_RESET_RELEASE_FORCE);
 
 	if (READ_ONCE(ctx->fc.connected)) {
 		return -EINVAL;
@@ -2335,37 +2483,113 @@ static int pxd_nodewipe_cleanup(struct pxd_context *ctx)
 		return 0;
 	}
 
-	spin_lock(&ctx->lock);
-	list_for_each(cur, &ctx->list) {
-		struct pxd_device *pxd_dev = container_of(cur, struct pxd_device, node);
-
-		pxd_fastpath_reset_device(pxd_dev);
+	/* O(1) fast path: callers write to every minor, and a node has hundreds.
+	 * Only the first write per px-disconnect cycle does any real work. */
+	if (READ_ONCE(ctx->fp_released)) {
+		return 0;
 	}
-	spin_unlock(&ctx->lock);
 
-	return 0;
+	/* Wait for failover_work before the lock, never while holding it. */
+	flush_work(&ctx->failover_work);
+
+	mutex_lock(&ctx->transition_lock);
+	/* flush_work above only says that work item was done at that instant.
+	 * Waiting for this mutex can take a whole transition, during which
+	 * another release may have finished the teardown, or px may have
+	 * reconnected - and tearing fastpath down under a live px would be
+	 * worse than doing nothing. So both conditions are re-tested here. */
+	if (READ_ONCE(ctx->fc.connected) || ctx->fp_released) {
+		mutex_unlock(&ctx->transition_lock);
+		return 0;
+	}
+	if (!pxdctx_release_needed(ctx)) {
+		ctx->fp_released = true;
+		mutex_unlock(&ctx->transition_lock);
+		return 0;
+	}
+	pxd_fp_freeze_start(ctx);
+	pxdctx_reset_fastpath(ctx, mode, self);
+	/* Same routing for late arrivals as the reset above. */
+	pxd_fp_freeze_end(ctx, fail_io);
+	ctx->fp_released = true;
+	mutex_unlock(&ctx->transition_lock);
+
+	return 1;
 }
+
+/* Intent written after the magic. No intent means an older caller, which
+ * reads as LEGACY_INTENT - graceful, not force. */
+static int pxd_release_intent(const char *rest)
+{
+	int intent;
+
+	if (!rest || sscanf(rest, "%d", &intent) != 1) {
+		intent = LEGACY_INTENT;
+	}
+
+	return intent;
+}
+
+/* Kept distinct from graceful on purpose: a "legacy" line means the caller
+ * sent no intent, which is how you tell an old caller from a new one. */
+static const char *pxd_intent_name(int intent)
+{
+	if (intent & FORCE_CLEANUP) {
+		return "force";
+	}
+	if (intent & GRACEFUL_CLEANUP) {
+		return "graceful";
+	}
+	return "legacy";
+}
+
 
 static ssize_t pxd_release_store(struct device *dev,
 			struct device_attribute *attr, const char *buf, size_t count)
 {
-	static const char wipemagic[] = "P0RXR3l3@53";
+	static const char releasemagic[] = "P0RXR3l3@53";
+	const size_t maglen = sizeof(releasemagic) - 1;
+	enum pxdctx_reset_mode mode;
+	const char *rest;
+	int intent;
 	int i;
 	struct pxd_context *ctx;
+	/* The device that owns this attribute. The release is node-wide and does
+	 * not act on it specifically, but pxdctx_release_fastpath must know not
+	 * to flush_work its removal from inside its own store callback. */
+	struct pxd_device *self = dev_to_pxd_dev(dev);
 
-	if (!strncmp(wipemagic, buf, sizeof(wipemagic))) {
-		printk("releasing pxd references\n");
-		for (i = 0; i < pxd_num_contexts; ++i) {
-			ctx = &pxd_contexts[i];
-			if (READ_ONCE(ctx->fc.connected)) {
-				printk("%s px is still connected... cannot release\n", __func__);
-				break;
-			}
-			if (ctx->num_devices == 0) {
-				continue;
-			}
+	if (count < maglen || strncmp(releasemagic, buf, maglen)) {
+		return count;
+	}
+	/* kernfs NUL-terminates at count, so rest is safe to walk. Require a
+	 * separator so a longer unrelated string cannot match the prefix. */
+	rest = buf + maglen;
+	if (*rest && *rest != ' ' && *rest != '\n') {
+		return count;
+	}
 
-			pxd_nodewipe_cleanup(ctx);
+	intent = pxd_release_intent(rest);
+	mode = (intent & FORCE_CLEANUP) ? PXDCTX_RESET_RELEASE_FORCE
+				        : PXDCTX_RESET_RELEASE;
+
+	for (i = 0; i < pxd_num_contexts; ++i) {
+		ctx = &pxd_contexts[i];
+		if (READ_ONCE(ctx->fc.connected)) {
+			printk_ratelimited("%s px is still connected... cannot release\n", __func__);
+			break;
+		}
+		if (ctx->num_devices == 0) {
+			continue;
+		}
+
+		/* Logged here, not per write: callers loop over every minor and a
+		 * node has hundreds, but only the write that finds work to do is
+		 * interesting. comm/pid identify which caller it was. */
+		if (pxdctx_release_fastpath(ctx, self, mode) == 1) {
+			printk("pxd fastpath release by %s[%d] (%s, intent %#x) ctx %d\n",
+				current->comm, task_pid_nr(current),
+				pxd_intent_name(intent), intent, ctx->id);
 		}
 	}
 
@@ -2501,7 +2725,18 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 
 	// abort work cannot be active while restarting requests
 	cancel_delayed_work_sync(&ctx->abort_work);
+	flush_work(&ctx->failover_work);// wait for it to complete
 	fuse_restart_requests(fc);
+
+	/* Reconnect is a decision-carrying state transition. Wrap the state
+	 * writes (fc.connected 0->1 and pxd_dev->connected false->true via
+	 * pxdctx_set_connected) in a freeze so any pxd_io_failover work
+	 * that races the reopen parks on failQ, and gets reissued to
+	 * native at freeze_end (they can go through the native path;
+	 * userspace is now up so it will service them via fuse). */
+	mutex_lock(&ctx->transition_lock);
+	ctx->fp_released = false;
+	pxd_fp_freeze_start(ctx);
 
 	spin_lock(&ctx->lock);
 	pxd_timeout_secs = PXD_TIMER_SECS_DEFAULT;
@@ -2511,7 +2746,13 @@ static int pxd_control_open(struct inode *inode, struct file *file)
 	WRITE_ONCE(fc->allow_disconnected, 1);
 	file->private_data = fc;
 
-	pxdctx_set_connected(ctx, true);
+	pxdctx_set_connected(ctx);
+
+	/* fail_io=false: reissue any parked items to native. Userspace is up
+	 * (fc.connected=1); the reissued IOs will get serviced through the
+	 * fuse queue like any other native-path IO. */
+	pxd_fp_freeze_end(ctx, false /* fail io */);
+	mutex_unlock(&ctx->transition_lock);
 
 	++ctx->open_seq;
 
@@ -2530,11 +2771,14 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 		return 0;
 	}
 
-	// Drive failover through the single pxd_initiate_failover API for every
-	// fastpath-active device. fuse req queues into fc->processing while
-	// fc->connected is still 1; replayed by fuse_restart_requests on reopen.
-	pxdctx_initiate_failover(ctx);
-
+	/* Flip fc.connected to 0 FIRST, then schedule failover_work.
+	 *
+	 * Ordering matters: pxd_failover_work asserts
+	 * BUG_ON(READ_ONCE(fc.connected)). If we scheduled the work before
+	 * writing fc.connected, a kworker could pick it up in the tiny
+	 * window before the write and panic. Doing the write first also
+	 * means any pxd_io_failover racing this close sees ctx->fc.connected
+	 * == 0 and takes the safe local-reroute branch. */
 	spin_lock(&ctx->lock);
 	if (READ_ONCE(ctx->fc.connected) == 0) {
 		pxd_printk("%s: not opened\n", __func__);
@@ -2545,6 +2789,17 @@ static int pxd_control_release(struct inode *inode, struct file *file)
 	// queued fuse reqs, run pxdctx_reset_fastpath -> failQ -EIOs.
 	schedule_delayed_work(&ctx->abort_work, pxd_timeout_secs * HZ);
 	spin_unlock(&ctx->lock);
+
+	/* px leaving creates fastpath teardown work, so a previous release's
+	 * "nothing left to do" answer is now stale. Clearing it on reconnect
+	 * alone was not enough: in maintenance mode hal.Reset runs before the
+	 * new px opens the control fd, so the flag survived from the last
+	 * cycle and the release returned without closing anything - leaving
+	 * vgchange -an to spin until failover_work got there. */
+	WRITE_ONCE(ctx->fp_released, false);
+
+	/* Now safe to schedule failover_work; fc.connected == 0 guaranteed. */
+	schedule_work(&ctx->failover_work);
 
 	trace_pxd_close_ctrl_fd(ctx->id);
 	printk(KERN_INFO "%s: pxd-control-%d(%lld) close OK\n", __func__, ctx->id,
@@ -2561,6 +2816,38 @@ MODULE_ALIAS("devname:pxd-control");
 
 static void pxd_fuse_conn_release(struct fuse_conn *conn)
 {
+}
+
+static void pxd_failover_work(struct work_struct *work)
+{
+	struct pxd_context *ctx = container_of(work, struct pxd_context,
+		failover_work);
+
+	/* pxd_control_release writes fc.connected=0 before scheduling us, so
+	 * this should always hold. Kept as WARN not BUG - a spurious execute
+	 * (e.g. from cancel/reschedule races) should log, not panic. */
+	WARN_ON_ONCE(READ_ONCE(ctx->fc.connected));
+	printk(KERN_ERR "PXD_FAILOVER (%s:%u): initiating fastpath failover...",
+		ctx->name, ctx->id);
+
+	/* Create a ctx-scoped quiescent window for the fastpath->native
+	 * transition:
+	 *   1. freeze_start sets ctx->fp_freeze so any pxd_io_failover work
+	 *      item entering the failover state machine parks on its
+	 *      device's failQ (list_add via fproot->wait) and returns.
+	 *      Then flushes all fastpath kthread workers + gwq so items
+	 *      that started before the gate went up complete first.
+	 *   2. pxdctx_reset_fastpath switches each fastpath device to
+	 *      native and drains its failQ via pxd_reissuefailQ(status=0).
+	 *   3. freeze_end clears the gate and drains any items that parked
+	 *      between step 2's drain and step 3's clear. fail_io=false so
+	 *      those stragglers are reissued to native (matching the
+	 *      transition target). */
+	mutex_lock(&ctx->transition_lock);
+	pxd_fp_freeze_start(ctx);
+	pxdctx_reset_fastpath(ctx, PXDCTX_RESET_FAILOVER, NULL);
+	pxd_fp_freeze_end(ctx, false /* fail io */);
+	mutex_unlock(&ctx->transition_lock);
 }
 
 static void pxd_abort_context(struct work_struct *work)
@@ -2585,7 +2872,16 @@ static void pxd_abort_context(struct work_struct *work)
 
 	// Tear down fastpath per device (also fails any leftover failQ IOs
 	// via the defensive __pxd_abortfailQ inside pxd_fastpath_reset_device).
-	pxdctx_reset_fastpath(ctx);
+	// Wrap in the freeze window so any late pxd_io_failover work items on
+	// the fastpath kthread_workers park on failQ (see pxd_io_failover)
+	// and get aborted along with the rest. fail_io=true tells freeze_end
+	// to abort straggler parked items with -EIO (consistent with the hard
+	// teardown semantic of abort_work).
+	mutex_lock(&ctx->transition_lock);
+	pxd_fp_freeze_start(ctx);
+	pxdctx_reset_fastpath(ctx, PXDCTX_RESET_ABORT, NULL);
+	pxd_fp_freeze_end(ctx, true /* fail io */);
+	mutex_unlock(&ctx->transition_lock);
 }
 
 static int pxd_context_init(struct pxd_context *ctx, int i)
@@ -2615,6 +2911,9 @@ static int pxd_context_init(struct pxd_context *ctx, int i)
 	ctx->miscdev.name = ctx->name;
 	ctx->miscdev.fops = &ctx->fops;
 	INIT_DELAYED_WORK(&ctx->abort_work, pxd_abort_context);
+	INIT_WORK(&ctx->failover_work, pxd_failover_work);
+	mutex_init(&ctx->transition_lock);
+	ctx->fp_released = false;
 	return 0;
 }
 
@@ -2622,6 +2921,7 @@ static void pxd_context_destroy(struct pxd_context *ctx)
 {
 	misc_deregister(&ctx->miscdev);
 	cancel_delayed_work_sync(&ctx->abort_work);
+	cancel_work_sync(&ctx->failover_work);
 	if (ctx->id < pxd_num_contexts_exported) {
 		fuse_abort_conn(&ctx->fc);
 		fuse_conn_put(&ctx->fc);
