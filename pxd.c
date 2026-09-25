@@ -11,6 +11,8 @@
 #include <linux/uio.h>
 #include <linux/bio.h>
 #include <linux/pid_namespace.h>
+#include <linux/version.h>
+#include <linux/string.h>
 
 #if defined(RHEL_RELEASE_CODE) && defined(RHEL_RELEASE_VERSION) && defined(__EL8__)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,14,0) && RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(9,4)
@@ -188,8 +190,7 @@ static long pxd_ioctl_get_version(void __user *argp)
 		if (sizeof(ver_data) < ver_len) {
 			ver_len = sizeof(ver_data);
 		}
-		strncpy(ver_data, gitversion, ver_len);
-		ver_data[ver_len-1]='\0';
+		pxd_strncpy(ver_data, gitversion, ver_len);
 		if (copy_to_user(argp +
 				 offsetof(struct pxd_ioctl_version_args, piv_len),
 			&ver_len, sizeof(ver_len))) {
