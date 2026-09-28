@@ -276,6 +276,36 @@ static inline void pxd_ida_remove(struct ida *ida, unsigned int id)
 	#endif
 }
 
+/*
+ * Large zeroed array allocation that does not need physically contiguous
+ * memory. kvcalloc() falls back to vmalloc when kmalloc cannot satisfy the
+ * request (above KMALLOC_MAX_SIZE, 4MiB on x86_64); it exists from 4.18.
+ * Must be freed with pxd_kvfree(). Caller must be able to sleep.
+ */
+#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+
+static inline void *pxd_kvcalloc(size_t n, size_t size)
+{
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	return kvcalloc(n, size, GFP_KERNEL);
+	#else
+	if (size != 0 && n > SIZE_MAX / size)
+		return NULL;
+	return vzalloc(n * size);
+	#endif
+}
+
+static inline void pxd_kvfree(const void *addr)
+{
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)
+	kvfree(addr);
+	#else
+	vfree(addr);
+	#endif
+}
+
 #ifdef __PX_BLKMQ__
 #include <linux/blk-mq.h>
 #include "pxd_core.h"
