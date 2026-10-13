@@ -47,6 +47,8 @@ struct pxd_fastpath_extension {
 	struct completion sync_complete;
 	atomic_t sync_done;
 	uint64_t switch_uid; // switch IO request unique id
+	atomic_t switch_cmpl; // ioswitch completers currently running
+	wait_queue_head_t switch_wq; // reset waits here for switch_cmpl == 0
 
 	// failover work item
 	spinlock_t  fail_lock;

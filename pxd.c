@@ -684,6 +684,16 @@ static int pxd_request(struct fuse_req *req, uint32_t size, uint64_t off,
 }
 #endif
 
+/* Last touch of pxd_dev by an ioswitch completer. switch_cmpl only counts
+ * running completers for reset; the put pairs with the per-request get in
+ * pxd_initiate_ioswitch (this may free pxd_dev). */
+static void pxd_ioswitch_done(struct pxd_device *pxd_dev)
+{
+	if (atomic_dec_and_test(&pxd_dev->fp.switch_cmpl))
+		wake_up_all(&pxd_dev->fp.switch_wq);
+	put_device(&pxd_dev->dev);
+}
+
 static
 bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	int status)
@@ -692,11 +702,20 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	struct list_head ios;
 	unsigned long flags;
 
-	if (atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) == 0) {
-		return false;
+	/* Counted before the gate so pxd_fastpath_reset_device can wait out a
+	 * completer that is already past it before the device is torn down. */
+	atomic_inc(&pxd_dev->fp.switch_cmpl);
+
+	/* Claim our uid before opening the gate, or a switch started right after
+	 * it could have its new uid wiped. No match = stale (late reply after
+	 * detach, or a marker replayed after px restart): leave device state alone. */
+	if (cmpxchg64(&pxd_dev->fp.switch_uid, req->in.h.unique, 0) !=
+	    req->in.h.unique ||
+	    atomic_cmpxchg(&pxd_dev->fp.ioswitch_active, 1, 0) == 0) {
+		pxd_ioswitch_done(pxd_dev);
+		return true;
 	}
 
-	pxd_dev->fp.switch_uid = 0;
 	INIT_LIST_HEAD(&ios);
 	/// io path switch event completes with status.
 	printk("device %llu completed ioswitch %d with status %d\n",
@@ -720,6 +739,7 @@ bool pxd_process_ioswitch_complete(struct fuse_conn *fc, struct fuse_req *req,
 	// status=0 -> reroute to slowpath; non-zero -> -EIO. No-op for FALLBACK.
 	pxd_reissuefailQ(pxd_dev, &ios, status);
 
+	pxd_ioswitch_done(pxd_dev);
 	return true;
 }
 
@@ -755,8 +775,11 @@ int pxd_initiate_ioswitch(struct pxd_device *pxd_dev, int code)
 	req->end = pxd_process_ioswitch_complete;
 	pxd_req_misc(req, 0, 0, pxd_dev->minor, PXD_FLAGS_SYNC);
 
-	pxd_dev->fp.switch_uid = req->in.h.unique;
-	fuse_request_send_nowait(&pxd_dev->ctx->fc, req);
+	/* Pin pxd_dev until this req completes: px may reply after detach has
+	 * removed the device, and the completer must not run on freed memory. */
+	get_device(&pxd_dev->dev);
+	fuse_request_send_nowait_uid(&pxd_dev->ctx->fc, req,
+				     &pxd_dev->fp.switch_uid);
 	return 0;
 }
 

@@ -6518,3 +6518,397 @@ TEST_P(PxdFastpathTest, no_reissue_while_ioswitch_pending_using_dm_flakey_delay)
 
     dev_remove_fastpath(add_ext.dev_id);
 }
+
+/*
+ * PWX-59913: a failover marker still unacked at PXD_REMOVE must not let the
+ * pxd_device be freed under it.
+ *
+ * Field sequence (init500-c37-bm, kernel panic in
+ * pxd_process_ioswitch_complete.cold):
+ *   px demote-before-detach      PXD_FAILOVER_TO_USERSPACE notify
+ *   kernel                       queues marker U, fp.switch_uid stored as 0
+ *   px                           reads U, completes the demote op, detaches
+ *   pxd_finish_remove            request_find(0) -> "no request unique 0",
+ *                                pxd_device freed while U is outstanding
+ *   px acks U                    request_end -> completer on freed pxd_dev
+ *
+ * The freed object has to be reused before the late ack for the failure to
+ * be visible on a kernel without KASAN/slab poisoning. Pinning to one CPU and
+ * adding the next device makes SLUB hand the freed pxd_device back to it, so
+ * the stale ack lands on a live device and completes its switch instead of
+ * panicking the box. A correct driver keeps the removed device alive until U
+ * completes, so no later device may get its address.
+ */
+static size_t dmesg_line_count()
+{
+    FILE *p = popen("dmesg | wc -l", "r");
+    size_t n = 0;
+    if (p) {
+        if (fscanf(p, "%zu", &n) != 1) {
+            n = 0;
+        }
+        pclose(p);
+    }
+    return n;
+}
+
+static std::string dmesg_since(size_t line)
+{
+    std::string cmd = "dmesg | tail -n +" + std::to_string(line + 1);
+    FILE *p = popen(cmd.c_str(), "r");
+    std::string out;
+    if (!p) {
+        return out;
+    }
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), p)) {
+        out += buf;
+    }
+    pclose(p);
+    return out;
+}
+
+static bool kernel_oopsed(const std::string &log)
+{
+    return log.find("BUG:") != std::string::npos ||
+           log.find("Oops") != std::string::npos ||
+           log.find("general protection") != std::string::npos ||
+           log.find("list_del corruption") != std::string::npos;
+}
+
+/* Address printed by pxd_add: "Device <id> added <%px> with mode ...". */
+static std::string pxd_dev_addr(uint64_t dev_id)
+{
+    std::string cmd = "dmesg | grep 'Device " + std::to_string(dev_id) +
+                      " added ' | tail -n 1";
+    FILE *p = popen(cmd.c_str(), "r");
+    std::string addr;
+    if (!p) {
+        return addr;
+    }
+    char buf[4096];
+    if (fgets(buf, sizeof(buf), p)) {
+        const char *s = strstr(buf, " added ");
+        if (s) {
+            s += strlen(" added ");
+            const char *e = strchr(s, ' ');
+            addr.assign(s, e ? (size_t)(e - s) : strlen(s));
+        }
+    }
+    pclose(p);
+    return addr;
+}
+
+/* Read requests off ctl_fd until a marker with `opcode` shows up. Anything
+ * else (e.g. udev probing the device) goes to `other`; dropping it leaves the
+ * IO unanswered and the device busy forever. */
+static bool read_marker(int ctl_fd, int opcode, int secs, uint64_t *unique,
+                        std::function<void(struct rdwr_in *)> other = nullptr)
+{
+    struct rdwr_in rdwr;
+
+    for (int i = 0; i < secs * 10; i++) {
+        struct pollfd fds = {};
+        fds.fd = ctl_fd;
+        fds.events = POLLIN;
+        if (poll(&fds, 1, 100) <= 0) {
+            continue;
+        }
+        if (read(ctl_fd, &rdwr, sizeof(rdwr)) <= 0) {
+            continue;
+        }
+        std::cout << "ctl_fd: opcode=" << rdwr.in.opcode
+                  << " unique=" << rdwr.in.unique << std::endl;
+        if ((int)rdwr.in.opcode == opcode) {
+            *unique = rdwr.in.unique;
+            return true;
+        }
+        if (other) {
+            other(&rdwr);
+        }
+    }
+    return false;
+}
+
+TEST_P(PxdFastpathTest, detach_with_unacked_failover_marker_pwx59913)
+{
+    auto serve_io = [this](struct rdwr_in *r) { finish_io(r); };
+    std::cout << "=== PWX-59913: detach with unacked failover marker ===" << std::endl;
+
+    /* Free (kworker/remove writer) and the next kzalloc (PXD_ADD writer) on
+     * the same CPU, so the per-cpu freelist returns the freed pxd_device. */
+    cpu_set_t old_set, one;
+    ASSERT_EQ(sched_getaffinity(0, sizeof(old_set), &old_set), 0);
+    CPU_ZERO(&one);
+    CPU_SET(sched_getcpu(), &one);
+    ASSERT_EQ(sched_setaffinity(0, sizeof(one), &one), 0);
+
+    create_backing_devices(1, 50);
+    size_t mark = dmesg_line_count();
+
+    /* 1. Device A, fastpath active. */
+    pxd_add_ext_out a{};
+    std::string a_name;
+    int a_minor;
+    a.dev_id = 59913;
+    a.size = 50 * 1024 * 1024;
+    a.queue_depth = 128;
+    a.discard_size = PXD_LBS;
+    a.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    a.enable_fp = 1;
+    setup_fastpath_paths(a.paths);
+    dev_add_fastpath(a, a_minor, a_name);
+    ASSERT_EQ(read_fastpath_sysfs(a_minor), "1");
+    std::string a_addr = pxd_dev_addr(a.dev_id);
+    ASSERT_FALSE(a_addr.empty()) << "no 'Device " << a.dev_id << " added' in dmesg";
+    std::cout << "A dev " << a.dev_id << " pxd_dev " << a_addr << std::endl;
+
+    /* 2. px demote-before-detach: force failover, read marker U, do not ack. */
+    ASSERT_GT(send_ioswitch_notify(ctl_fd, a.dev_id, PXD_FAILOVER_TO_USERSPACE), 0)
+        << strerror(errno);
+    uint64_t u_a = 0;
+    ASSERT_TRUE(read_marker(ctl_fd, PXD_FAILOVER_TO_USERSPACE, 10, &u_a, serve_io))
+        << "no failover marker for A. debug=" << read_pxd_debug(a_minor);
+    PxdDebugState st;
+    ASSERT_TRUE(parse_pxd_debug(a_minor, &st));
+    std::cout << "A switching, marker U=" << u_a << " debug=" << read_pxd_debug(a_minor);
+    ASSERT_EQ(st.ioswitch, 1);
+
+    /* 3. px detaches while U is outstanding. */
+    {
+        fuse_out_header oh;
+        pxd_remove_out rm{};
+        struct iovec iov[2];
+        oh.unique = 0;
+        oh.error = PXD_REMOVE;
+        oh.len = sizeof(oh) + sizeof(rm);
+        rm.dev_id = a.dev_id;
+        rm.force = false;
+        iov[0].iov_base = &oh;
+        iov[0].iov_len = sizeof(oh);
+        iov[1].iov_base = &rm;
+        iov[1].iov_len = sizeof(rm);
+        ssize_t w = writev(ctl_fd, iov, 2);
+        ASSERT_EQ(w, (ssize_t)oh.len) << "PXD_REMOVE: " << strerror(errno);
+        added_ids.erase(a.dev_id);
+    }
+    sleep(1);
+    std::string log = dmesg_since(mark);
+    std::cout << "removed A; 'no request unique 0' seen: "
+              << (log.find("no request unique 0") != std::string::npos) << std::endl;
+
+    /* 4. Next devices: none may reuse A's pxd_device while U is pending. */
+    uint64_t b_id = 0;
+    int b_minor = -1;
+    for (int i = 1; i <= 4 && b_id == 0; i++) {
+        pxd_add_ext_out b{};
+        std::string b_name;
+        int minor;
+        b = a;
+        b.dev_id = a.dev_id + i;
+        dev_add_fastpath(b, minor, b_name);
+        std::string b_addr = pxd_dev_addr(b.dev_id);
+        std::cout << "dev " << b.dev_id << " pxd_dev " << b_addr << std::endl;
+        if (b_addr == a_addr) {
+            b_id = b.dev_id;
+            b_minor = minor;
+        }
+    }
+    EXPECT_EQ(b_id, 0u)
+        << "dev " << b_id << " was allocated at removed dev " << a.dev_id
+        << "'s pxd_device " << a_addr << " while A's failover marker U=" << u_a
+        << " is still outstanding: A was freed under its in-flight ioswitch";
+
+    if (b_id != 0) {
+        /* 5. B mid-switch, then px's late ack for A's U. */
+        ASSERT_GT(send_ioswitch_notify(ctl_fd, b_id, PXD_FAILOVER_TO_USERSPACE), 0);
+        uint64_t u_b = 0;
+        ASSERT_TRUE(read_marker(ctl_fd, PXD_FAILOVER_TO_USERSPACE, 10, &u_b, serve_io));
+        ASSERT_TRUE(parse_pxd_debug(b_minor, &st));
+        std::cout << "B switching, marker U=" << u_b << " debug=" << read_pxd_debug(b_minor);
+        ASSERT_EQ(st.ioswitch, 1);
+
+        ssize_t w = ack_marker_req(ctl_fd, u_a);
+        std::cout << "late ack of A's U=" << u_a << " rc=" << w
+                  << (w < 0 ? std::string(" ") + strerror(errno) : "") << std::endl;
+        usleep(200000);
+        ASSERT_TRUE(parse_pxd_debug(b_minor, &st));
+        std::cout << "B after A's ack: " << read_pxd_debug(b_minor);
+        EXPECT_EQ(st.ioswitch, 1)
+            << "A's stale marker ack completed dev " << b_id
+            << "'s switch: completer ran on A's freed pxd_device";
+        EXPECT_EQ(st.active_failover, 1);
+
+        ack_marker_req(ctl_fd, u_b);
+    } else {
+        ssize_t w = ack_marker_req(ctl_fd, u_a);
+        std::cout << "late ack of A's U=" << u_a << " rc=" << w << std::endl;
+        EXPECT_EQ(w, (ssize_t)sizeof(fuse_out_header))
+            << "late switch reply must still find its req; px-storage aborts "
+               "when the reply write fails";
+    }
+    usleep(200000);
+
+    log = dmesg_since(mark);
+    std::cout << "---- dmesg since test start ----\n" << log
+              << "---- end dmesg ----" << std::endl;
+    EXPECT_FALSE(kernel_oopsed(log)) << "kernel oops during late switch reply";
+    sched_setaffinity(0, sizeof(old_set), &old_set);
+}
+
+/*
+ * PWX-59913: a switch marker replayed after px restart must not complete a
+ * newer switch on the same device.
+ *
+ * Control fd close soft-resets the device and drops the in-flight switch, but
+ * the marker stays queued (allow_disconnected) and is redelivered on reopen.
+ * If px starts a new switch before acking the replay, the stale ack used to
+ * cmpxchg the newer switch's gate and complete it early.
+ */
+static bool switch_dropped(const PxdDebugState &st)
+{
+    return st.ioswitch == 0 && st.active_failover == 0;
+}
+
+TEST_P(PxdFastpathTest, stale_switch_reply_after_reopen_pwx59913)
+{
+    auto serve_io = [this](struct rdwr_in *r) { finish_io(r); };
+    create_backing_devices(1, 50);
+    size_t mark = dmesg_line_count();
+
+    pxd_add_ext_out a{};
+    std::string name;
+    int minor;
+    a.dev_id = 59930;
+    a.size = 50 * 1024 * 1024;
+    a.queue_depth = 128;
+    a.discard_size = PXD_LBS;
+    a.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+    a.enable_fp = 1;
+    setup_fastpath_paths(a.paths);
+    dev_add_fastpath(a, minor, name);
+    ASSERT_EQ(read_fastpath_sysfs(minor), "1");
+
+    ASSERT_GT(send_ioswitch_notify(ctl_fd, a.dev_id, PXD_FAILOVER_TO_USERSPACE), 0);
+    uint64_t u1 = 0;
+    ASSERT_TRUE(read_marker(ctl_fd, PXD_FAILOVER_TO_USERSPACE, 10, &u1, serve_io));
+
+    /* px dies with the switch in flight: the soft reset drops it, u1 stays queued. */
+    close(ctl_fd);
+    ctl_fd = -1;
+    PxdDebugState st = wait_pxd_debug(minor, 30, switch_dropped);
+    ASSERT_TRUE(switch_dropped(st)) << "reset did not drop the switch: "
+                                    << read_pxd_debug(minor);
+
+    /* px comes back and u1 is replayed. */
+    ctl_fd = open(control_device_fastpath(0).c_str(), O_RDWR);
+    ASSERT_GT(ctl_fd, 0) << strerror(errno);
+    pxd_ioctl_init_args args;
+    ASSERT_GE(ioctl(ctl_fd, PXD_IOC_INIT, &args), 0);
+    uint64_t replay = 0;
+    ASSERT_TRUE(read_marker(ctl_fd, PXD_FAILOVER_TO_USERSPACE, 10, &replay, serve_io));
+    EXPECT_EQ(replay, u1);
+
+    /* A newer switch starts before px acks the replay. */
+    ASSERT_GT(send_ioswitch_notify(ctl_fd, a.dev_id, PXD_FALLBACK_TO_KERNEL), 0);
+    uint64_t u2 = 0;
+    ASSERT_TRUE(read_marker(ctl_fd, PXD_FALLBACK_TO_KERNEL, 10, &u2, serve_io));
+    ASSERT_TRUE(parse_pxd_debug(minor, &st));
+    ASSERT_EQ(st.ioswitch, 1) << read_pxd_debug(minor);
+
+    EXPECT_EQ(ack_marker_req(ctl_fd, replay), (ssize_t)sizeof(fuse_out_header));
+    usleep(200000);
+    ASSERT_TRUE(parse_pxd_debug(minor, &st));
+    EXPECT_EQ(st.ioswitch, 1)
+        << "stale replayed reply completed the newer switch: " << read_pxd_debug(minor);
+
+    EXPECT_EQ(ack_marker_req(ctl_fd, u2), (ssize_t)sizeof(fuse_out_header));
+    usleep(200000);
+    ASSERT_TRUE(parse_pxd_debug(minor, &st));
+    EXPECT_EQ(st.ioswitch, 0) << read_pxd_debug(minor);
+    EXPECT_EQ(st.suspend, 0) << "leaked IO suspend: " << read_pxd_debug(minor);
+
+    EXPECT_FALSE(kernel_oopsed(dmesg_since(mark)));
+}
+
+/*
+ * PWX-59913: px's switch reply racing PXD_REMOVE.
+ *
+ * Detach can reach the kernel before px replies to the switch it just asked
+ * for (demote-before-detach). Whichever side wins, the reply must find its
+ * req (px-storage aborts otherwise) and the completer must never run on a
+ * freed pxd_device.
+ */
+TEST_P(PxdFastpathTest, switch_reply_races_detach_pwx59913)
+{
+    auto serve_io = [this](struct rdwr_in *r) { finish_io(r); };
+    create_backing_devices(1, 50);
+    size_t mark = dmesg_line_count();
+
+    for (int it = 0; it < 40; it++) {
+        pxd_add_ext_out a{};
+        std::string name;
+        int minor;
+        a.dev_id = 59940 + it;
+        a.size = 50 * 1024 * 1024;
+        a.queue_depth = 128;
+        a.discard_size = PXD_LBS;
+        a.open_mode = O_LARGEFILE | O_RDWR | O_DIRECT;
+        a.enable_fp = 1;
+        setup_fastpath_paths(a.paths);
+        dev_add_fastpath(a, minor, name);
+
+        ASSERT_GT(send_ioswitch_notify(ctl_fd, a.dev_id, PXD_FAILOVER_TO_USERSPACE), 0);
+        uint64_t u = 0;
+        ASSERT_TRUE(read_marker(ctl_fd, PXD_FAILOVER_TO_USERSPACE, 10, &u, serve_io));
+
+        /* Answer udev's probe IO first, or the open keeps PXD_REMOVE at EBUSY. */
+        auto drain = [&](int ms) {
+            struct rdwr_in r;
+            for (int i = 0; i < ms / 10; i++) {
+                struct pollfd f = {};
+                f.fd = ctl_fd;
+                f.events = POLLIN;
+                if (poll(&f, 1, 10) > 0 && read(ctl_fd, &r, sizeof(r)) > 0) {
+                    finish_io(&r);
+                }
+            }
+        };
+        drain(300);
+
+        std::atomic<ssize_t> ack_rc(-1);
+        std::thread acker([&]() {
+            usleep((it % 8) * 2000);   /* 0..14ms: before, during and after remove */
+            ack_rc.store(ack_marker_req(ctl_fd, u));
+        });
+
+        fuse_out_header oh;
+        pxd_remove_out rm{};
+        struct iovec iov[2];
+        oh.unique = 0;
+        oh.error = PXD_REMOVE;
+        oh.len = sizeof(oh) + sizeof(rm);
+        rm.dev_id = a.dev_id;
+        rm.force = false;
+        iov[0].iov_base = &oh;
+        iov[0].iov_len = sizeof(oh);
+        iov[1].iov_base = &rm;
+        iov[1].iov_len = sizeof(rm);
+        ssize_t w = writev(ctl_fd, iov, 2);
+        int saved = errno;
+        acker.join();
+        for (int retry = 0; w < 0 && saved == EBUSY && retry < 20; retry++) {
+            drain(100);
+            w = writev(ctl_fd, iov, 2);
+            saved = errno;
+        }
+        errno = saved;
+        added_ids.erase(a.dev_id);
+
+        EXPECT_EQ(w, (ssize_t)oh.len) << "iter " << it << " PXD_REMOVE: " << strerror(errno);
+        EXPECT_EQ(ack_rc.load(), (ssize_t)sizeof(fuse_out_header))
+            << "iter " << it << ": switch reply did not find its req";
+    }
+    usleep(500000);
+    EXPECT_FALSE(kernel_oopsed(dmesg_since(mark))) << dmesg_since(mark);
+}

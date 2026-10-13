@@ -893,6 +893,8 @@ int pxd_fastpath_init(struct pxd_device *pxd_dev)
 	atomic_set(&fp->suspend, 0);
 	atomic_set(&fp->app_suspend, 0);
 	atomic_set(&fp->ioswitch_active, 0);
+	atomic_set(&fp->switch_cmpl, 0);
+	init_waitqueue_head(&fp->switch_wq);
 	init_completion(&fp->sync_complete);
 	atomic_set(&fp->sync_done, 0);
 	for (i = 0; i < MAX_PXD_BACKING_DEVS; i++) {
@@ -1014,9 +1016,6 @@ out_file_failed:
 void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool fail_io)
 {
 	struct pxd_fastpath_extension *fp = &pxd_dev->fp;
-	struct pxd_context *ctx = pxd_dev->ctx;
-	struct fuse_conn *fc = &ctx->fc;
-	struct fuse_req *req;
 	unsigned long flags;
 	bool ioswitch_active;
 	struct list_head ios;
@@ -1029,38 +1028,29 @@ void pxd_fastpath_reset_device(struct pxd_device *pxd_dev, bool skip_sync, bool 
 	disableFastPath(pxd_dev, skip_sync);
 
 	ioswitch_active = atomic_read(&fp->ioswitch_active);
-	// abort any inflight ioswitch.
-	// On request_end with error, pxd_process_ioswitch_complete fires and
-	// calls pxd_reissuefailQ(.., status != 0) which fails every failQ IO
-	// with -EIO - exactly the behavior we want here.
+	trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
+		ioswitch_active, READ_ONCE(pxd_dev->fp.switch_uid));
 	if (ioswitch_active) {
-		req = request_find(fc, pxd_dev->fp.switch_uid);
-		if (!IS_ERR_OR_NULL(req)) {
-			trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
-				ioswitch_active, pxd_dev->fp.switch_uid);
-			// overwrite switch request to fail all pending IOs
-			req->in.h.opcode = PXD_FAILOVER_TO_USERSPACE;
-			req->out.h.error = -EIO; // force failure status
-			request_end(fc, req, true /* should lock */);
-		} else {
-			/* Request already gone, so the completer will never run
-			 * and never clear the gate. Clear both here or every
-			 * later IO parks on failQ with no completion pending. */
-			pxd_dev->fp.switch_uid = 0;
-			spin_lock_irqsave(&fp->fail_lock, flags);
-			smp_store_release(&fp->active_failover, false);
-			spin_unlock_irqrestore(&fp->fail_lock, flags);
-			atomic_set(&fp->ioswitch_active, 0);
-		}
-	} else {
-		trace_pxd_fastpath_reset_device(pxd_dev->dev_id, pxd_dev->minor,
-			ioswitch_active, 0);
+		/* Drop the in-flight switch but never end its req: px still owns it,
+		 * and px-storage aborts if its late reply finds no req. The cleared
+		 * uid makes the completer treat that reply as stale and only unpin. */
+		WRITE_ONCE(pxd_dev->fp.switch_uid, 0);
+		spin_lock_irqsave(&fp->fail_lock, flags);
+		smp_store_release(&fp->active_failover, false);
+		spin_unlock_irqrestore(&fp->fail_lock, flags);
+		atomic_set(&fp->ioswitch_active, 0);
 	}
 
-	// Defensive backstop: if there's no in-flight ioswitch (so the
-	// completer path above did not run, or it ran but failed to find the
-	// req), failQ may still hold IOs. Fail them with -EIO so callers in
-	// D state on these requests are released; never requeue.
+	/* Order the gate check/clear above before reading switch_cmpl; pairs with
+	 * the fully ordered cmpxchg that lets a completer past the gate. */
+	smp_mb();
+	/* A reply that won the gate before we cleared it may still be running on
+	 * another CPU; let it finish before the caller tears the device down. */
+	wait_event(fp->switch_wq, atomic_read(&fp->switch_cmpl) == 0);
+
+	// A switch dropped above never ran its completer, so failQ may still
+	// hold its parked IOs. Fail them with -EIO so callers in D state on
+	// these requests are released; never requeue.
 	if (fail_io) {
 		spin_lock_irqsave(&fp->fail_lock, flags);
 		if (!list_empty(&fp->failQ)) {
