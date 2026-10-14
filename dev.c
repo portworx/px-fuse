@@ -241,10 +241,20 @@ static void fuse_request_send_nowait_locked(struct fuse_conn *fc,
 
 void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 {
+	fuse_request_send_nowait_uid(fc, req, NULL);
+}
+
+void fuse_request_send_nowait_uid(struct fuse_conn *fc, struct fuse_req *req,
+				  u64 *uidp)
+{
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *)req->in.args);
 
 	req->in.h.unique = fuse_get_unique(fc);
+	/* Publish the id before px can see the req or it can complete inline;
+	 * callers that track the req (ioswitch) used to record 0 here. */
+	if (uidp)
+		WRITE_ONCE(*uidp, req->in.h.unique);
 	trace_pxd_request(req->pxd_dev->dev_id, req->in.h.unique, req->pxd_rdwr_in.size,
 		req->pxd_rdwr_in.offset, req->pxd_dev->minor, req->rq != NULL ? req_op(req->rq): -1,
 		req->rq != NULL ? req->rq->cmd_flags : -1, req->in.h.opcode, req->pxd_rdwr_in.flags);
